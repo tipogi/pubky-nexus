@@ -6,7 +6,7 @@ use std::{
 use crate::errors::EventProcessorError;
 use crate::events::Event;
 use futures::StreamExt;
-use nexus_common::db::PubkyConnector;
+use pubky_watcher::PubkyConnector;
 use nexus_common::models::homeserver::HsBlacklist;
 use nexus_common::models::user::UserHsCursor;
 use opentelemetry::metrics::Counter;
@@ -18,8 +18,8 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
 use super::TEventProcessor;
-use crate::events::retry::RetryScheduler;
 use crate::events::EventHandler;
+use pubky_watcher::EventRetryScheduler;
 use crate::service::runner::UserNotFoundBackoff;
 use crate::service::user_hs_resolver;
 
@@ -112,7 +112,7 @@ pub struct KeyBasedEventProcessor {
     /// Bounds execution time per user, preventing timeout and starvation.
     pub limit: u16,
 
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync>,
     pub event_source: Arc<dyn KeyBasedEventSource>,
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
@@ -122,22 +122,22 @@ pub struct KeyBasedEventProcessor {
     pub hs_blacklist: HsBlacklist,
 
     /// Scheduler used to enqueue failed events onto the retry queue
-    pub retry_scheduler: Arc<RetryScheduler>,
+    pub retry_scheduler: Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>,
 
     pub shutdown_rx: Receiver<bool>,
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for KeyBasedEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
+impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
+    fn event_handler(&self) -> &Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync> {
         &self.event_handler
     }
 
-    fn instance_name(&self) -> &'static str {
-        "KeyBasedEventProcessor"
+    fn instance_name(&self) -> String {
+        "KeyBasedEventProcessor".to_string()
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
+    fn retry_scheduler(&self) -> Option<&Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>> {
         Some(&self.retry_scheduler)
     }
 

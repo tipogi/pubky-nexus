@@ -1,11 +1,27 @@
-//! # Pubky Watcher
+//! Poll events from pubky homeservers.
 //!
-//! Generic library for subscribing to Pubky homeserver event streams and
-//! processing PUT/DEL events. Intended for external developers building
-//! indexers, sync pipelines, or other event-driven applications on top of
-//! Pubky homeservers.
-//!
-//! This crate provides the transport and orchestration layer (bulk `/events`
-//! polling, per-user event streams, parsing, cursors, retries). Domain-specific
-//! indexing — such as Nexus graph and Redis rules — lives in higher-level
-//! crates like `nexus-watcher`.
+//! Generic pipeline orchestration: parse event lines, dispatch to handlers,
+//! enqueue retries, and run processor loops.
+
+pub mod client;
+pub mod constants;
+pub mod error;
+pub mod hooks;
+pub mod processor;
+pub mod resolver;
+pub mod runner;
+pub mod stats;
+
+pub use client::PubkyConnector;
+pub use constants::PROCESSING_TIMEOUT_SECS;
+pub use error::{ClientError, ClientResult, RunError};
+pub use hooks::{
+    EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
+    RetryableError,
+};
+pub use processor::TEventProcessor;
+pub use resolver::{HomeserverResolver, PubkyConnectorResolver};
+pub use runner::{status_from_run_result, TEventProcessorRunner};
+pub use stats::{
+    ProcessedStats, ProcessorRunStats, ProcessorRunStatus, RunAllProcessorsStats,
+};

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use nexus_common::db::{exec_single_row, graph::Query, PubkyClientError, RedisOps};
+use nexus_common::db::{exec_single_row, graph::Query, RedisOps};
+use pubky_watcher::ClientError;
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::traits::Collection;
 use nexus_common::models::user::{set_user_homeserver, user_hs_cursor_key, UserDetails};
@@ -13,8 +14,7 @@ use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_common::WatcherConfig;
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{InitialBackoff, RetryScheduler};
-use nexus_watcher::events::Event;
-use nexus_watcher::events::EventHandler;
+use nexus_watcher::events::{DynEventHandler, Event, EventHandler};
 use nexus_watcher::service::indexer::{KeyBasedEventProcessor, RunError, TEventProcessor};
 use nexus_watcher::service::runner::UserNotFoundBackoff;
 use nexus_watcher::service::{KeyBasedEventProcessorRunner, TEventProcessorRunner};
@@ -887,14 +887,14 @@ fn stream_event(cursor: u64, user_id: &str, path: &str) -> Result<StreamEvent, D
 }
 
 fn too_many_requests_error() -> EventProcessorError {
-    PubkyClientError::TooManyRequests429 {
+    ClientError::TooManyRequests429 {
         message: "rate limited".into(),
     }
     .into()
 }
 
 fn user_not_found_error() -> EventProcessorError {
-    PubkyClientError::NotFound404 {
+    ClientError::NotFound404 {
         message: "user not found".into(),
     }
     .into()
@@ -912,7 +912,7 @@ fn retryable_client_error() -> EventProcessorError {
 
 fn processor(
     homeserver: Homeserver,
-    handler: Arc<dyn EventHandler>,
+    handler: Arc<DynEventHandler>,
     source: Arc<MockKeyBasedEventSource>,
 ) -> Arc<KeyBasedEventProcessor> {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -931,7 +931,7 @@ fn processor(
 /// the per-run processors a test rebuilds (mirroring the long-lived runner backoff).
 fn processor_with_backoff(
     homeserver: Homeserver,
-    handler: Arc<dyn EventHandler>,
+    handler: Arc<DynEventHandler>,
     source: Arc<MockKeyBasedEventSource>,
     user_not_found_backoff: Arc<UserNotFoundBackoff>,
 ) -> Arc<KeyBasedEventProcessor> {
@@ -949,7 +949,7 @@ fn processor_with_backoff(
 
 fn processor_with_limit(
     homeserver: Homeserver,
-    handler: Arc<dyn EventHandler>,
+    handler: Arc<DynEventHandler>,
     source: Arc<MockKeyBasedEventSource>,
     limit: u16,
 ) -> Arc<KeyBasedEventProcessor> {
@@ -967,7 +967,7 @@ fn processor_with_limit(
 
 fn processor_with_shutdown(
     homeserver: Homeserver,
-    handler: Arc<dyn EventHandler>,
+    handler: Arc<DynEventHandler>,
     source: Arc<MockKeyBasedEventSource>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Arc<KeyBasedEventProcessor> {
@@ -984,7 +984,7 @@ fn processor_with_shutdown(
 
 fn processor_with_options(
     homeserver: Homeserver,
-    handler: Arc<dyn EventHandler>,
+    handler: Arc<DynEventHandler>,
     source: Arc<MockKeyBasedEventSource>,
     limit: u16,
     shutdown_rx: watch::Receiver<bool>,
@@ -1076,7 +1076,7 @@ impl ShutdownOnFirstHandle {
 }
 
 #[async_trait::async_trait]
-impl EventHandler for ShutdownOnFirstHandle {
+impl EventHandler<Event, EventProcessorError> for ShutdownOnFirstHandle {
     async fn handle(&self, _event: &Event) -> Result<(), EventProcessorError> {
         if self.handle_count.fetch_add(1, Ordering::SeqCst) == 0 {
             let _ = self.shutdown_tx.send(true);
