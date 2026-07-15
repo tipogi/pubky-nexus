@@ -1,3 +1,11 @@
+//! Homeserver resolution for [`super::UserIngestor`].
+//!
+//! [`UserHomeserverResolver`] is an injection seam: [`super::UserIngestor`] needs PKDNS/DHT
+//! lookup but must not call [`pubky_watcher::PubkyConnector`] (or depend on `pubky-watcher`).
+//! Wiring happens in each binary crate (`nexus-watcher`, `nexus-webapi`) that constructs an
+//! ingestor. Tests use [`crate::utils::test_utils::MockUserHomeserverResolver`] instead of
+//! hitting the network.
+
 use pubky_app_specs::PubkyId;
 
 use crate::models::error::ModelResult;
