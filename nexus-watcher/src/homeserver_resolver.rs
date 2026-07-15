@@ -1,3 +1,7 @@
+//! Adapter from [`pubky_watcher::HomeserverResolver`] to [`UserHomeserverResolver`].
+//!
+//! Wired at the app boundary: `nexus-common` defines the trait; `pubky-watcher` owns the client.
+
 use std::sync::Arc;
 
 use nexus_common::models::error::{ModelError, ModelResult};
