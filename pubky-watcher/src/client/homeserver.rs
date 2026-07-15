@@ -1,8 +1,16 @@
-use crate::client::PubkyConnector;
-use crate::client::ClientResult;
+//! PKDNS/DHT homeserver resolution via the shared pubky client.
+//!
+//! [`HomeserverResolver`] operates on [`pubky::PublicKey`] and [`super::ClientError`].
+//! Nexus crates adapt this to `PubkyId` / `ModelResult` via `UserHomeserverResolver` in
+//! `nexus-common`.
+
+use super::{ClientResult, PubkyConnector};
 use pubky::PublicKey;
 
 /// Resolves a user's currently published homeserver from PKDNS/DHT.
+///
+/// Abstracted so resolver loops and ingestor wiring can use a mock in tests instead of the
+/// network. Production code uses [`PubkyConnectorResolver`].
 #[async_trait::async_trait]
 pub trait HomeserverResolver: Send + Sync {
     /// Returns the HS published for `user_pk`, if any is currently published.
