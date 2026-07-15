@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::homeserver_resolver::default_homeserver_resolver;
 use nexus_common::models::user::UserIngestor;
 use nexus_common::{file::default_config_dir_path, types::DynError, ApiConfig, DaemonConfig};
 use pubky::pkarr::{self, Keypair};
+use pubky_watcher::PubkyConnector;
 
 #[derive(Debug, Clone)]
 pub struct ApiContext {
@@ -57,7 +59,12 @@ impl ApiContextBuilder {
             Some(ac) => ac.clone(),
         };
 
-        let ingestor = UserIngestor::from_config(&api_config.stack);
+        PubkyConnector::initialise(api_config.stack.net.pubky_client_testnet_host()).await?;
+
+        let ingestor = UserIngestor::from_config(
+            &api_config.stack,
+            default_homeserver_resolver(),
+        );
 
         let pkarr_builder = self.pkarr_builder.clone().unwrap_or_default();
         let pkarr_client = pkarr_builder.build()?;

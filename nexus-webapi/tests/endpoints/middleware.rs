@@ -8,7 +8,7 @@ use axum::http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_LENGTH, ORIGIN};
 use axum::http::{Method, Request, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
-use nexus_common::utils::test_utils::default_ingestor_tests;
+use nexus_common::utils::test_utils::{default_ingestor_tests, mock_homeserver_resolver};
 use nexus_common::RateLimitConfig;
 use nexus_webapi::routes::{app_routes, build_app, AppState};
 use tempfile::TempDir;
@@ -23,7 +23,7 @@ async fn test_request_body_size_limit() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState {
         files_path: Arc::new(temp_dir.path().to_path_buf()),
-        ingestor: default_ingestor_tests(),
+        ingestor: default_ingestor_tests(mock_homeserver_resolver(None)),
     };
     let rate_limit_config: RateLimitConfig = RateLimitConfig::default();
     let (_tx, rx) = watch::channel(false);
@@ -60,7 +60,7 @@ async fn test_request_body_size_limit_without_content_length() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState {
         files_path: Arc::new(temp_dir.path().to_path_buf()),
-        ingestor: default_ingestor_tests(),
+        ingestor: default_ingestor_tests(mock_homeserver_resolver(None)),
     };
     let routes = Router::new().route("/echo", post(bytes_handler));
 
@@ -99,7 +99,7 @@ async fn test_request_timeout_returns_408() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState {
         files_path: Arc::new(temp_dir.path().to_path_buf()),
-        ingestor: default_ingestor_tests(),
+        ingestor: default_ingestor_tests(mock_homeserver_resolver(None)),
     };
     let routes = Router::new().route("/sleep/{millis}", get(sleep_handler));
 
@@ -137,7 +137,7 @@ async fn test_body_size_limit_response_has_cors_header() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState {
         files_path: Arc::new(temp_dir.path().to_path_buf()),
-        ingestor: default_ingestor_tests(),
+        ingestor: default_ingestor_tests(mock_homeserver_resolver(None)),
     };
     let routes = Router::new().route("/echo", post(ok_handler));
 
@@ -172,7 +172,7 @@ async fn test_request_timeout_response_has_cors_header() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let state = AppState {
         files_path: Arc::new(temp_dir.path().to_path_buf()),
-        ingestor: default_ingestor_tests(),
+        ingestor: default_ingestor_tests(mock_homeserver_resolver(None)),
     };
     let routes = Router::new().route("/sleep/{millis}", get(sleep_handler));
 

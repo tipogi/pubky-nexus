@@ -8,7 +8,7 @@ use nexus_common::models::user::UserDetails;
 use nexus_common::utils::test_utils::{random_pk, random_pubky_id};
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};
-use nexus_watcher::events::EventHandler;
+use nexus_watcher::events::{DynEventHandler, EventHandler};
 use nexus_watcher::service::HsEventProcessor;
 use pubky_app_specs::{post_uri_builder, PubkyId};
 use tokio::sync::watch;
@@ -50,7 +50,7 @@ async fn create_user_hosted_on(user_id: &str, hs_id: Option<&str>) {
 /// calling `process_event_lines` directly with constructed event lines.
 fn build_processor(
     store: Arc<dyn RetryStore>,
-    event_handler: Arc<dyn EventHandler>,
+    event_handler: Arc<DynEventHandler>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Arc<HsEventProcessor> {
     let retry_scheduler = Arc::new(RetryScheduler::new(

@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::Utc;
+use pubky_watcher::EventRetryScheduler;
 use tracing::warn;
 
 use crate::errors::EventProcessorError;
 use crate::events::Event;
-use nexus_common::db::PubkyClientError;
 use nexus_common::WatcherConfig;
 
 use super::{RedisRetryStore, RetryEvent, RetryStore};
@@ -45,35 +46,6 @@ impl RetryScheduler {
             Arc::new(RedisRetryStore::new()),
             InitialBackoff::from_config(config),
         )
-    }
-
-    /// Whether the event behind this error should be enqueued for retry.
-    /// When in doubt we enqueue (bounded by `max_retries`) rather than drop data.
-    pub fn should_enqueue_related_event(error: &EventProcessorError) -> bool {
-        match error {
-            EventProcessorError::PubkyClientError(err) => match err.as_ref() {
-                PubkyClientError::NotInitialized
-                | PubkyClientError::TooManyRequests429 { .. }
-                | PubkyClientError::ServerError5xx { .. }
-                | PubkyClientError::RequestFailed { .. }
-                | PubkyClientError::PkarrFailed(..) => true,
-
-                PubkyClientError::NotFound404 { .. }
-                | PubkyClientError::AuthenticationFailed(..)
-                | PubkyClientError::BuildFailed(..)
-                | PubkyClientError::ParseFailed(..) => false,
-            },
-
-            EventProcessorError::InvalidEventLine(_)
-            | EventProcessorError::SkipIndexing
-            | EventProcessorError::SpecValidation(..)
-            | EventProcessorError::HsBlacklisted { .. }
-            | EventProcessorError::HsEventsStreamRateLimitExhausted
-            | EventProcessorError::FetchSizeExceeded(_, _)
-            | EventProcessorError::UserIdMismatch { .. } => false,
-
-            _ => true,
-        }
     }
 
     pub async fn queue_missing_dep(
@@ -119,5 +91,24 @@ impl RetryScheduler {
         self.store.put(&retry_event).await?;
         warn!("Queued event for retry ({}): {}", reason, event.uri);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl EventRetryScheduler<Event, EventProcessorError> for RetryScheduler {
+    async fn queue_missing_dep(
+        &self,
+        event: &Event,
+        origin_homeserver_id: &str,
+    ) -> Result<(), EventProcessorError> {
+        RetryScheduler::queue_missing_dep(self, event, origin_homeserver_id).await
+    }
+
+    async fn queue_transient(
+        &self,
+        event: &Event,
+        origin_homeserver_id: &str,
+    ) -> Result<(), EventProcessorError> {
+        RetryScheduler::queue_transient(self, event, origin_homeserver_id).await
     }
 }

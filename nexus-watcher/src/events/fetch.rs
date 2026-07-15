@@ -53,7 +53,7 @@ where
 ///    `Content-Length` headers.
 ///
 /// Returns [EventProcessorError::FetchSizeExceeded] on size violation,
-/// [EventProcessorError::ClientError] on stream failure.
+/// [`EventProcessorError::ClientError`] on stream failure.
 pub(crate) async fn fetch_capped(
     resp: reqwest::Response,
     max: u64,
