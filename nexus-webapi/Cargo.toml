@@ -9,6 +9,7 @@ license = "MIT"
 build = "build.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 axum = "0.8.9"
 axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
 chrono = { workspace = true }
@@ -19,6 +20,7 @@ futures-util = "0.3.32"
 opentelemetry = { workspace = true }
 pubky-app-specs = { workspace = true }
 nexus-common = { version = "0.4.1", path = "../nexus-common" }
+pubky-watcher = { path = "../pubky-watcher" }
 deadpool-redis = { workspace = true }
 pubky = { workspace = true }
 serde = { workspace = true }

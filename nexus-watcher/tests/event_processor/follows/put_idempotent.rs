@@ -12,6 +12,7 @@ use nexus_common::{
     utils::test_utils::default_ingestor_tests,
 };
 use nexus_watcher::events::handlers::follow;
+use nexus_watcher::default_homeserver_resolver;
 use pubky::Keypair;
 use pubky_app_specs::{PubkyAppUser, PubkyId};
 
@@ -74,7 +75,7 @@ async fn test_follow_put_idempotent() -> Result<()> {
     // Simulate retry: call sync_put directly with the same follower/followee
     let follower_pubky = PubkyId::from(follower_kp.clone());
     let followee_pubky = PubkyId::from(followee_kp.clone());
-    follow::sync_put(follower_pubky, followee_pubky, &default_ingestor_tests()).await?;
+    follow::sync_put(follower_pubky, followee_pubky, &default_ingestor_tests(default_homeserver_resolver())).await?;
 
     // Verify counts are unchanged (not doubled)
     let followee_counts = find_user_counts(&followee_id).await;
@@ -170,7 +171,7 @@ async fn test_follow_put_recovers_missing_indexes() -> Result<()> {
     // Simulate retry: sync_put hits Updated (graph edge exists) and runs recovery
     let follower_pubky = PubkyId::from(follower_kp.clone());
     let followee_pubky = PubkyId::from(followee_kp.clone());
-    follow::sync_put(follower_pubky, followee_pubky, &default_ingestor_tests()).await?;
+    follow::sync_put(follower_pubky, followee_pubky, &default_ingestor_tests(default_homeserver_resolver())).await?;
 
     // Verify both indexes are recovered
     let (_, is_follower) = Followers::check_set_member(&[&followee_id], &follower_id).await?;

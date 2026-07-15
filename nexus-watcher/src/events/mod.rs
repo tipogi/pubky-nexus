@@ -1,10 +1,14 @@
-use nexus_common::{db::PubkyConnector, models::user::UserIngestor};
+use crate::homeserver_resolver::default_homeserver_resolver;
+use nexus_common::{models::user::UserIngestor, WatcherConfig};
+use pubky_watcher::PubkyConnector;
 pub mod event;
 
 pub use event::{Event, EventType, ParseResult};
+pub use pubky_watcher::EventHandler;
 
 use crate::errors::EventProcessorError;
-use nexus_common::WatcherConfig;
+
+pub type DynEventHandler = dyn EventHandler<Event, EventProcessorError> + Send + Sync;
 use pubky_app_specs::{ExtendedParsedUri, PubkyAppObject, Resource};
 use std::{
     path::{Path, PathBuf},
@@ -23,16 +27,7 @@ pub(crate) use fetch::{
 };
 pub use moderation::Moderation;
 
-/// Trait for handling events.
-///
-/// This trait abstracts event handling logic to allow for flexible implementations,
-/// including mocked versions for testing.
-#[async_trait::async_trait]
-pub trait EventHandler: Send + Sync {
-    async fn handle(&self, event: &Event) -> Result<(), EventProcessorError>;
-}
-
-/// Default implementation of `EventHandler` that uses the actual event handling logic.
+/// Default implementation of [`EventHandler`] that uses the actual event handling logic.
 pub struct DefaultEventHandler {
     moderation: Arc<Moderation>,
     ingestor: Arc<UserIngestor>,
@@ -61,7 +56,10 @@ impl DefaultEventHandler {
     pub fn from_config(config: &WatcherConfig) -> Self {
         Self::new(
             Moderation::from_config(config),
-            Arc::new(UserIngestor::from_config(&config.stack)),
+            Arc::new(UserIngestor::from_config(
+                &config.stack,
+                default_homeserver_resolver(),
+            )),
             config.max_file_size,
             config.stack.files_path.clone(),
         )
@@ -69,7 +67,7 @@ impl DefaultEventHandler {
 }
 
 #[async_trait::async_trait]
-impl EventHandler for DefaultEventHandler {
+impl EventHandler<Event, EventProcessorError> for DefaultEventHandler {
     async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
         match event.event_type {
             EventType::Put => {

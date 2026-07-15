@@ -2,7 +2,7 @@ use std::cmp::min;
 use std::sync::Arc;
 
 use crate::errors::EventProcessorError;
-use crate::events::{Event, ParseResult};
+use pubky_watcher::RetryableError;
 use chrono::{DateTime, Utc};
 use nexus_common::config::EventRetryConfig;
 use nexus_common::WatcherConfig;
@@ -10,10 +10,8 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, info, warn};
 
 use super::store::{RedisRetryStore, RetryStore};
-use super::IndexKey;
-use super::RetryEvent;
-use super::RetryScheduler;
-use crate::events::{DefaultEventHandler, EventHandler};
+use super::{IndexKey, RetryEvent};
+use crate::events::{DefaultEventHandler, Event, EventHandler, ParseResult};
 use crate::service::indexer::TEventProcessor;
 
 /// Maximum number of retry events to fetch per batch to avoid memory spikes
@@ -21,7 +19,7 @@ const RETRY_BATCH_SIZE: usize = 100;
 
 /// Processor for retrying events that failed due to missing dependencies
 pub struct RetryProcessor {
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync>,
     pub shutdown_rx: Receiver<bool>,
     pub config: EventRetryConfig,
     /// Persistence backend for retry events. Production wiring uses
@@ -30,8 +28,8 @@ pub struct RetryProcessor {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for RetryProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
+impl TEventProcessor<Event, EventProcessorError> for RetryProcessor {
+    fn event_handler(&self) -> &Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync> {
         &self.event_handler
     }
 
@@ -39,7 +37,7 @@ impl TEventProcessor for RetryProcessor {
         "RetryProcessor".to_string()
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
+    fn retry_scheduler(&self) -> Option<&Arc<dyn pubky_watcher::EventRetryScheduler<Event, EventProcessorError> + Send + Sync>> {
         None
     }
 
@@ -135,7 +133,7 @@ impl RetryProcessor {
                 debug!("Retry successful for event: {ev_uri}");
                 self.store.remove(index_key).await?;
             }
-            Err(e) if !RetryScheduler::should_enqueue_related_event(&e) => {
+            Err(e) if !e.should_enqueue_for_retry() => {
                 // Not worth retrying (ParseFailed, etc.) - dead-letter immediately
                 warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
                 self.store.remove(index_key).await?;

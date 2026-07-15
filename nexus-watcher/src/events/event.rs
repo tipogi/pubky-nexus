@@ -2,6 +2,7 @@ use crate::errors::EventProcessorError;
 use nexus_common::models::event::EventLine;
 use pubky::Event as StreamEvent;
 use pubky_app_specs::{ExtendedParsedUri, Resource};
+use pubky_watcher::{EventMetadata, LineParseOutcome, ParseFromLine};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use tracing::{debug, warn};
@@ -125,8 +126,6 @@ impl Event {
         uri: String,
         event_line: String,
     ) -> Result<ParseResult, EventProcessorError> {
-        // Validate and parse the URI using ExtendedParsedUri. This handles both
-        // standard pubky-app-specs URIs and universal tag URIs from other apps.
         let parsed_uri = match ExtendedParsedUri::try_from(uri.as_str()) {
             Ok(parsed) => parsed,
             Err(e) => return Ok(ParseResult::unrecognized_uri(event_type, uri, e)),
@@ -156,5 +155,48 @@ impl Event {
 
     pub fn to_event_line(&self) -> EventLine {
         EventLine::new(self.event_line.clone())
+    }
+}
+
+impl ParseFromLine for Event {
+    type Error = EventProcessorError;
+
+    fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error> {
+        match Self::parse_event(line)? {
+            ParseResult::Parsed(event) => Ok(LineParseOutcome::Parsed(event)),
+            ParseResult::Skipped => Ok(LineParseOutcome::Skipped),
+            ParseResult::UnrecognizedUri { reason, .. } => {
+                Ok(LineParseOutcome::Unrecognized { reason })
+            }
+        }
+    }
+}
+
+impl EventMetadata for Event {
+    fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    fn event_type_display(&self) -> &str {
+        match self.event_type {
+            EventType::Put => "PUT",
+            EventType::Del => "DEL",
+        }
+    }
+
+    fn user_id(&self) -> String {
+        self.parsed_uri.user_id().to_string()
+    }
+
+    fn resource_label(&self) -> String {
+        self.parsed_uri.resource().to_string()
+    }
+
+    fn resource_id(&self) -> String {
+        self.parsed_uri
+            .resource()
+            .id()
+            .unwrap_or_default()
+            .to_string()
     }
 }
