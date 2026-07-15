@@ -1,5 +1,5 @@
 use crate::client::PubkyConnector;
-use crate::error::ClientResult;
+use crate::client::ClientResult;
 use pubky::PublicKey;
 
 /// Resolves a user's currently published homeserver from PKDNS/DHT.

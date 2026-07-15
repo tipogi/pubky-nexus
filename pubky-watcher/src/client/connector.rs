@@ -1,4 +1,5 @@
-use crate::error::{ClientError, ClientResult};
+// TODO: Decide public name — `PubkyConnector` is Nexus legacy; consider `SharedClient` (see rename-pubky-connector).
+use super::{ClientError, ClientResult};
 use pubky::{Pubky, PubkyHttpClient};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
