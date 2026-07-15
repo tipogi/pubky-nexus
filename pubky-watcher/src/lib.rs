@@ -12,9 +12,9 @@ pub mod resolver;
 pub mod runner;
 pub mod stats;
 
-pub use client::PubkyConnector;
+pub use client::{ClientError, ClientResult, PubkyConnector};
 pub use constants::PROCESSING_TIMEOUT_SECS;
-pub use error::{ClientError, ClientResult, RunError};
+pub use error::RunError;
 pub use hooks::{
     EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
     RetryableError,
