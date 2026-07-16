@@ -5,7 +5,7 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info};
 
 use crate::error::RunError;
-use crate::hooks::{EventMetadata, RetryableError};
+use crate::pipeline::{EventMetadata, RetryableError};
 use crate::processor::TEventProcessor;
 use crate::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats};
 

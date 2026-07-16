@@ -6,7 +6,7 @@
 pub mod client;
 pub mod constants;
 pub mod error;
-pub mod hooks;
+pub mod pipeline;
 pub mod processor;
 pub mod runner;
 pub mod stats;
@@ -16,7 +16,7 @@ pub use client::{
 };
 pub use constants::PROCESSING_TIMEOUT_SECS;
 pub use error::RunError;
-pub use hooks::{
+pub use pipeline::{
     EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
     RetryableError,
 };
