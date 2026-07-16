@@ -4156,6 +4156,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pubky-watcher"
+version = "0.1.0"
+
+[[package]]
 name = "pubky_test_utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

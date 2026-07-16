@@ -1,0 +1,8 @@
+[package]
+name = "pubky-watcher"
+version = "0.1.0"
+edition = "2021"
+description = "Poll events from pubky homeservers"
+homepage = "https://github.com/pubky/pubky-nexus"
+repository = "https://github.com/pubky/pubky-nexus"
+license = "MIT"
