@@ -1,6 +1,6 @@
 use super::TEventProcessorRunner;
 use crate::errors::EventProcessorError;
-use crate::events::{DefaultEventHandler, Event, EventHandler};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event};
 use crate::events::retry::RetryScheduler;
 use crate::service::indexer::{DynEventProcessor, HsEventProcessor};
 use pubky_watcher::EventRetryScheduler;
@@ -15,7 +15,7 @@ pub struct HsEventProcessorRunner {
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
 
-    pub event_handler: Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync>,
+    pub event_handler: Arc<DynEventHandler>,
     pub shutdown_rx: Receiver<bool>,
 
     /// See [WatcherConfig::homeserver]

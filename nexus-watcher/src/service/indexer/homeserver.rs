@@ -1,6 +1,6 @@
 use super::TEventProcessor;
 use crate::errors::EventProcessorError;
-use crate::events::{read_stream_capped, Event, EventHandler, MAX_EVENTS_BODY};
+use crate::events::{read_stream_capped, DynEventHandler, Event, MAX_EVENTS_BODY};
 use pubky_watcher::EventRetryScheduler;
 use pubky_watcher::PubkyConnector;
 use nexus_common::db::{fetch_row_from_graph, queries, GraphResult};
@@ -48,7 +48,7 @@ pub struct HsEventProcessor {
 
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
-    pub event_handler: Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync>,
+    pub event_handler: Arc<DynEventHandler>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Scheduler used to enqueue failed events onto the retry queue
@@ -65,7 +65,7 @@ pub struct HsEventProcessor {
 
 #[async_trait::async_trait]
 impl TEventProcessor<Event, EventProcessorError> for HsEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync> {
+    fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
 

@@ -8,7 +8,7 @@ use nexus_common::models::user::UserDetails;
 use nexus_common::utils::test_utils::{random_pk, random_pubky_id};
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};
-use nexus_watcher::events::{DynEventHandler, EventHandler};
+use nexus_watcher::events::DynEventHandler;
 use nexus_watcher::service::HsEventProcessor;
 use pubky_app_specs::{post_uri_builder, PubkyId};
 use tokio::sync::watch;

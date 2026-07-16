@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use super::store::{RedisRetryStore, RetryStore};
 use super::{IndexKey, RetryEvent};
-use crate::events::{DefaultEventHandler, Event, EventHandler, ParseResult};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event, ParseResult};
 use crate::service::indexer::TEventProcessor;
 
 /// Maximum number of retry events to fetch per batch to avoid memory spikes
@@ -19,7 +19,7 @@ const RETRY_BATCH_SIZE: usize = 100;
 
 /// Processor for retrying events that failed due to missing dependencies
 pub struct RetryProcessor {
-    pub event_handler: Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync>,
+    pub event_handler: Arc<DynEventHandler>,
     pub shutdown_rx: Receiver<bool>,
     pub config: EventRetryConfig,
     /// Persistence backend for retry events. Production wiring uses
@@ -29,7 +29,7 @@ pub struct RetryProcessor {
 
 #[async_trait::async_trait]
 impl TEventProcessor<Event, EventProcessorError> for RetryProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync> {
+    fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
 

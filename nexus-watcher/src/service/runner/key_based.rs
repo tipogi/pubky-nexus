@@ -1,7 +1,7 @@
 use super::{TEventProcessorRunner, UserNotFoundBackoff};
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
-use crate::events::{DefaultEventHandler, Event, EventHandler};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event};
 use crate::service::indexer::{
     DynEventProcessor, KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource,
 };
@@ -24,7 +24,7 @@ pub struct KeyBasedEventProcessorRunner {
     /// See [WatcherConfig::monitored_homeservers_limit]
     pub monitored_hs_limit: usize,
 
-    pub event_handler: Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync>,
+    pub event_handler: Arc<DynEventHandler>,
     pub event_source: Arc<dyn KeyBasedEventSource>,
     pub shutdown_rx: Receiver<bool>,
 

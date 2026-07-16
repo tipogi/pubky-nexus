@@ -12,7 +12,7 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
 use super::TEventProcessor;
-use crate::events::EventHandler;
+use crate::events::DynEventHandler;
 use pubky_watcher::EventRetryScheduler;
 use crate::service::runner::UserNotFoundBackoff;
 use crate::service::user_hs_resolver;
@@ -83,7 +83,7 @@ pub struct KeyBasedEventProcessor {
     /// Bounds execution time per user, preventing timeout and starvation.
     pub limit: u16,
 
-    pub event_handler: Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync>,
+    pub event_handler: Arc<DynEventHandler>,
     pub event_source: Arc<dyn KeyBasedEventSource>,
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
@@ -100,7 +100,7 @@ pub struct KeyBasedEventProcessor {
 
 #[async_trait::async_trait]
 impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler<Event, EventProcessorError> + Send + Sync> {
+    fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
 

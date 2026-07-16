@@ -1,3 +1,9 @@
+//! Contracts that plug into the generic event-processing pipeline.
+//!
+//! Downstream crates specialize these traits with a concrete event type and
+//! error type. The processor/runner orchestration in this crate stays generic
+//! and only depends on the interfaces defined here.
+
 use async_trait::async_trait;
 
 /// Outcome of parsing a single event line from a homeserver.
@@ -37,9 +43,25 @@ pub trait EventHandler<E, Err>: Send + Sync {
 }
 
 /// Enqueues failed events for later retry.
+///
+/// Called from [`crate::TEventProcessor::handle_error`] after an error is classified
+/// as retryable. The two methods let implementations choose different scheduling
+/// policies for dependency failures vs other transient failures.
 #[async_trait]
 pub trait EventRetryScheduler<E, Err>: Send + Sync {
+    /// Queue an event that failed due to a missing dependency.
+    ///
+    /// Used when [`RetryableError::is_missing_dependency`] is true.
+    ///
+    /// `origin_homeserver_id` identifies the homeserver the event originated from,
+    /// so a later retry can correlate the event back to that source.
     async fn queue_missing_dep(&self, event: &E, origin_homeserver_id: &str) -> Result<(), Err>;
 
+    /// Queue an event that failed with a transient error.
+    ///
+    /// Used for retryable errors that are not missing dependencies.
+    ///
+    /// `origin_homeserver_id` identifies the homeserver the event originated from,
+    /// so a later retry can correlate the event back to that source.
     async fn queue_transient(&self, event: &E, origin_homeserver_id: &str) -> Result<(), Err>;
 }

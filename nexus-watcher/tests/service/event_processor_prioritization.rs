@@ -12,7 +12,7 @@ use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
 use nexus_common::DEFAULT_MAX_FILE_SIZE;
 use nexus_watcher::default_homeserver_resolver;
 use nexus_watcher::events::retry::{InitialBackoff, RedisRetryStore, RetryScheduler, RetryStore};
-use nexus_watcher::events::{DefaultEventHandler, DynEventHandler, EventHandler};
+use nexus_watcher::events::{DefaultEventHandler, DynEventHandler};
 use nexus_watcher::service::indexer::PubkyKeyBasedEventSource;
 use nexus_watcher::service::runner::HomeserverBackoff;
 use nexus_watcher::service::runner::UserNotFoundBackoff;

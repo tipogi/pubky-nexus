@@ -5,7 +5,7 @@ use tracing::Instrument;
 
 use crate::constants::PROCESSING_TIMEOUT_SECS;
 use crate::error::RunError;
-use crate::hooks::{
+use crate::pipeline::{
     EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
     RetryableError,
 };
