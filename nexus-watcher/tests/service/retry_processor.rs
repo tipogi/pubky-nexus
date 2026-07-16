@@ -9,7 +9,7 @@ use nexus_watcher::events::retry::{
     IndexKey, RedisRetryStore, RetryEvent, RetryProcessor, RetryStore, RETRY_MANAGER_EVENTS_INDEX,
     RETRY_MANAGER_PREFIX,
 };
-use nexus_watcher::events::{DynEventHandler, EventHandler};
+use nexus_watcher::events::DynEventHandler;
 use nexus_watcher::events::EventType;
 use nexus_watcher::service::TEventProcessor;
 use pubky_app_specs::post_uri_builder;

@@ -14,7 +14,7 @@ use nexus_watcher::events::retry::event::RetryEvent;
 use nexus_watcher::events::retry::{
     IndexKey, InitialBackoff, RedisRetryStore, RetryScheduler, RetryStore,
 };
-use nexus_watcher::events::{DefaultEventHandler, DynEventHandler, EventHandler};
+use nexus_watcher::events::{DefaultEventHandler, DynEventHandler};
 use nexus_watcher::events::{Event, ParseResult};
 use nexus_watcher::service::HsEventProcessorRunner;
 use nexus_watcher::service::TEventProcessorRunner;
