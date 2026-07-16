@@ -1,9 +1,11 @@
 use super::{TEventProcessorRunner, UserNotFoundBackoff};
+use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
-use crate::events::{DefaultEventHandler, EventHandler};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event};
 use crate::service::indexer::{
-    KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource, TEventProcessor,
+    DynEventProcessor, KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource,
 };
+use pubky_watcher::EventRetryScheduler;
 use crate::service::runner::key_based_hs_backoff::HomeserverBackoff;
 use crate::service::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats};
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
@@ -22,7 +24,7 @@ pub struct KeyBasedEventProcessorRunner {
     /// See [WatcherConfig::monitored_homeservers_limit]
     pub monitored_hs_limit: usize,
 
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<DynEventHandler>,
     pub event_source: Arc<dyn KeyBasedEventSource>,
     pub shutdown_rx: Receiver<bool>,
 
@@ -39,7 +41,7 @@ pub struct KeyBasedEventProcessorRunner {
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
     /// Scheduler shared with every processor this runner builds
-    pub retry_scheduler: Arc<RetryScheduler>,
+    pub retry_scheduler: Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>,
 }
 
 impl KeyBasedEventProcessorRunner {
@@ -79,12 +81,12 @@ impl KeyBasedEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
+impl TEventProcessorRunner<Event, EventProcessorError> for KeyBasedEventProcessorRunner {
     fn shutdown_rx(&self) -> Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
-    async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
+    async fn build(&self, hs_id: &str) -> Result<Arc<DynEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(hs_id)?;
 
         Ok(Arc::new(KeyBasedEventProcessor {

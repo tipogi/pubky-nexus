@@ -35,7 +35,7 @@ impl MockEventHandler {
 }
 
 #[async_trait::async_trait]
-impl EventHandler for MockEventHandler {
+impl EventHandler<Event, EventProcessorError> for MockEventHandler {
     async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
         // Increment invocation counter on every call
         *self.handle_count.lock().unwrap() += 1;

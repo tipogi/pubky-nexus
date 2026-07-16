@@ -7,8 +7,8 @@ pub mod user_hs_resolver;
 
 /// Module exports
 pub use constants::{PROCESSING_TIMEOUT_SECS, WATCHER_CONFIG_FILE_NAME};
-pub use indexer::{HsEventProcessor, KeyBasedEventProcessor, RunError, TEventProcessor};
-pub use runner::{HsEventProcessorRunner, KeyBasedEventProcessorRunner, TEventProcessorRunner};
+pub use indexer::{DynEventProcessor, HsEventProcessor, KeyBasedEventProcessor, RunError, TEventProcessor};
+pub use runner::{DynEventProcessorRunner, HsEventProcessorRunner, KeyBasedEventProcessorRunner, TEventProcessorRunner};
 pub(crate) use task_runner::{run_periodic_tasks, PeriodicTask};
 pub use user_hs_resolver::UserHsResolverRunner;
 
@@ -20,6 +20,7 @@ use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::{DaemonConfig, WatcherConfig};
+use pubky_watcher::PubkyConnectorResolver;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
@@ -101,7 +102,7 @@ impl NexusWatcher {
         ));
         let user_hs_resolver_runner = Arc::new(UserHsResolverRunner::from_config(
             &config,
-            Box::new(user_hs_resolver::PubkyConnectorResolver),
+            Box::new(PubkyConnectorResolver),
             shutdown_rx.clone(),
         ));
 
