@@ -1,6 +1,6 @@
 use crate::events::{fetch_capped, EventProcessorError};
 
-use nexus_common::db::PubkyConnector;
+use pubky_watcher::PubkyConnector;
 use nexus_common::media::FileVariant;
 use nexus_common::media::VariantController;
 use nexus_common::models::file::Blob;

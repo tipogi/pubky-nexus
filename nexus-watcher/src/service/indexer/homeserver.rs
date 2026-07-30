@@ -1,8 +1,9 @@
 use super::TEventProcessor;
 use crate::errors::EventProcessorError;
-use crate::events::retry::RetryScheduler;
-use crate::events::{read_stream_capped, Event, EventHandler, MAX_EVENTS_BODY};
-use nexus_common::db::{fetch_row_from_graph, queries, GraphResult, PubkyConnector};
+use crate::events::{read_stream_capped, DynEventHandler, Event, MAX_EVENTS_BODY};
+use pubky_watcher::EventRetryScheduler;
+use pubky_watcher::PubkyConnector;
+use nexus_common::db::{fetch_row_from_graph, queries, GraphResult};
 use nexus_common::models::homeserver::Homeserver;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
@@ -47,11 +48,11 @@ pub struct HsEventProcessor {
 
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<DynEventHandler>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Scheduler used to enqueue failed events onto the retry queue
-    pub retry_scheduler: Arc<RetryScheduler>,
+    pub retry_scheduler: Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>,
 
     /// Per-run cache of users' `HOSTED_BY` mappings. For a given user's events in
     /// the events list, only the 1st one results in a graph lookup, the rest read from this cache.
@@ -63,8 +64,8 @@ pub struct HsEventProcessor {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for HsEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
+impl TEventProcessor<Event, EventProcessorError> for HsEventProcessor {
+    fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
 
@@ -72,7 +73,7 @@ impl TEventProcessor for HsEventProcessor {
         format!("HsEventProcessor with HS ID: {}", self.homeserver.id)
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
+    fn retry_scheduler(&self) -> Option<&Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>> {
         Some(&self.retry_scheduler)
     }
 

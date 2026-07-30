@@ -1,10 +1,11 @@
 use crate::service::NexusWatcher;
-use nexus_common::db::{DatabaseConfig, PubkyConnector};
+use nexus_common::db::{DatabaseConfig};
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::WatcherConfig;
 use nexus_common::{Level, StackConfig, StackManager};
 use pubky_app_specs::PubkyId;
+use pubky_watcher::PubkyConnector;
 use std::path::PathBuf;
 use tokio::sync::watch::Receiver;
 

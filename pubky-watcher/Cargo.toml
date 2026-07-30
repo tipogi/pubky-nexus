@@ -6,3 +6,19 @@ description = "Poll events from pubky homeservers"
 homepage = "https://github.com/pubky/pubky-nexus"
 repository = "https://github.com/pubky/pubky-nexus"
 license = "MIT"
+
+[dependencies]
+async-trait = { workspace = true }
+pubky = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+clap = { workspace = true, features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "poll_homeserver"
+path = "examples/poll_homeserver.rs"

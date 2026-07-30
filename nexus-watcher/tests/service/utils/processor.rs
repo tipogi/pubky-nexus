@@ -7,8 +7,7 @@ use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::traits::Collection;
 use nexus_common::models::user::{set_user_homeserver, UserDetails};
 use nexus_watcher::errors::EventProcessorError;
-use nexus_watcher::events::retry::RetryScheduler;
-use nexus_watcher::events::EventHandler;
+use nexus_watcher::events::{DynEventHandler, Event};
 use nexus_watcher::service::TEventProcessor;
 use pubky::Keypair;
 use pubky_app_specs::PubkyId;
@@ -23,12 +22,12 @@ pub struct MockEventProcessor {
     sleep_duration: Option<Duration>,
     custom_timeout: Option<Duration>,
     shutdown_rx: Receiver<bool>,
-    event_handler: Arc<dyn EventHandler>,
+    event_handler: Arc<DynEventHandler>,
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for MockEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
+impl TEventProcessor<Event, EventProcessorError> for MockEventProcessor {
+    fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
 
@@ -44,7 +43,9 @@ impl TEventProcessor for MockEventProcessor {
         Some(self.homeserver_id.as_ref())
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
+    fn retry_scheduler(
+        &self,
+    ) -> Option<&Arc<dyn pubky_watcher::EventRetryScheduler<Event, EventProcessorError> + Send + Sync>> {
         None
     }
 
