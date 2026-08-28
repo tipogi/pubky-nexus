@@ -1,7 +1,6 @@
 mod counts;
 mod cursor;
 mod details;
-mod homeserver_resolver;
 //mod id;
 mod influencers;
 mod ingestor;
@@ -13,7 +12,6 @@ mod view;
 pub use counts::UserCounts;
 pub use cursor::{user_hs_cursor_key, UserHsCursor, UserHsCursorKey};
 pub use details::{set_user_homeserver, set_user_homeserver_stale, UserDetails};
-pub use homeserver_resolver::UserHomeserverResolver;
 pub use influencers::Influencers;
 pub use ingestor::UserIngestor;
 pub use relationship::Relationship;

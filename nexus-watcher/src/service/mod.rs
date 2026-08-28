@@ -20,7 +20,6 @@ use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::{DaemonConfig, WatcherConfig};
-use pubky_watcher::PubkyConnectorResolver;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
@@ -102,7 +101,6 @@ impl NexusWatcher {
         ));
         let user_hs_resolver_runner = Arc::new(UserHsResolverRunner::from_config(
             &config,
-            Box::new(PubkyConnectorResolver),
             shutdown_rx.clone(),
         ));
 

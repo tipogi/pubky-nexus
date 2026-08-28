@@ -10,7 +10,6 @@ use nexus_common::db::RedisOps;
 use nexus_common::models::post::{PostCounts, PostDetails, PostRelationships};
 use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_watcher::events::handlers;
-use nexus_watcher::default_homeserver_resolver;
 use pubky::Keypair;
 use pubky_app_specs::post_uri_builder;
 
@@ -56,7 +55,7 @@ async fn test_post_put_recovers_after_partial_redis_write() -> Result<()> {
         post.clone(),
         pubky_id(&user_id)?,
         post_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 
@@ -113,7 +112,7 @@ async fn test_post_put_replay_after_full_success_is_noop() -> Result<()> {
         post.clone(),
         pubky_id(&user_id)?,
         post_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 
@@ -205,7 +204,7 @@ async fn test_post_put_recovers_mention_edge() -> Result<()> {
         post.clone(),
         pubky_id(&alice_id)?,
         post_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 
@@ -306,7 +305,7 @@ async fn test_post_put_recovers_reply_preserves_parent_sorted_sets() -> Result<(
         reply_post.clone(),
         pubky_id(&bob_id)?,
         reply_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 
@@ -435,7 +434,7 @@ async fn test_post_put_recovers_repost_preserves_parent_state() -> Result<()> {
         repost.clone(),
         pubky_id(&bob_id)?,
         repost_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 

@@ -1,40 +1,28 @@
 use pubky_app_specs::{ParsedUri, PubkyId};
-use std::sync::Arc;
+use pubky_watcher::PubkyConnector;
 
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::homeserver::HsBlacklist;
 use crate::models::traits::Collection;
-use crate::models::user::homeserver_resolver::UserHomeserverResolver;
 use crate::models::user::{set_user_homeserver, UserDetails, UserHsCursor};
 use crate::StackConfig;
 
 /// Ingests previously-unknown users unless their HS is blacklisted.
-#[derive(Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct UserIngestor {
     hs_blacklist: HsBlacklist,
-    resolver: Arc<dyn UserHomeserverResolver>,
 }
 
 impl UserIngestor {
     /// Builds an ingestor enforcing the given HS blacklist.
-    pub fn new(
-        external_hs_pk_blacklist: impl IntoIterator<Item = PubkyId>,
-        resolver: Arc<dyn UserHomeserverResolver>,
-    ) -> Self {
+    pub fn new(external_hs_pk_blacklist: impl IntoIterator<Item = PubkyId>) -> Self {
         Self {
             hs_blacklist: HsBlacklist::new(external_hs_pk_blacklist),
-            resolver,
         }
     }
 
-    pub fn from_config(
-        config: &StackConfig,
-        resolver: Arc<dyn UserHomeserverResolver>,
-    ) -> Self {
-        Self::new(
-            config.net.external_hs_pk_blacklist.iter().cloned(),
-            resolver,
-        )
+    pub fn from_config(config: &StackConfig) -> Self {
+        Self::new(config.net.external_hs_pk_blacklist.iter().cloned())
     }
 
     /// Ingests the author of a referenced post, if unknown.
@@ -65,10 +53,17 @@ impl UserIngestor {
             });
         }
 
-        let Some(hs_id) = self.resolver.resolve_homeserver_id(user_id).await? else {
+        let pubky = PubkyConnector::get().map_err(ModelError::from_generic)?;
+
+        let Some(hs_pk) = pubky
+            .get_homeserver_of(&user_id.to_public_key())
+            .await
+            .map_err(ModelError::from_generic)?
+        else {
             return Ok(None);
         };
 
+        let hs_id = hs_pk.to_z32();
         if self.hs_blacklist.is_blacklisted(&hs_id) {
             return Err(ModelError::HsBlacklisted { hs_id });
         }
@@ -114,13 +109,5 @@ impl UserIngestor {
         UserHsCursor::init(user_id, &hs_id).await?;
 
         Ok(())
-    }
-}
-
-impl std::fmt::Debug for UserIngestor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UserIngestor")
-            .field("hs_blacklist", &self.hs_blacklist)
-            .finish_non_exhaustive()
     }
 }

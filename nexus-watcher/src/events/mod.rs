@@ -1,4 +1,3 @@
-use crate::homeserver_resolver::default_homeserver_resolver;
 use nexus_common::{models::user::UserIngestor, WatcherConfig};
 use pubky_watcher::PubkyConnector;
 pub mod event;
@@ -56,10 +55,7 @@ impl DefaultEventHandler {
     pub fn from_config(config: &WatcherConfig) -> Self {
         Self::new(
             Moderation::from_config(config),
-            Arc::new(UserIngestor::from_config(
-                &config.stack,
-                default_homeserver_resolver(),
-            )),
+            Arc::new(UserIngestor::from_config(&config.stack)),
             config.max_file_size,
             config.stack.files_path.clone(),
         )

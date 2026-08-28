@@ -11,9 +11,7 @@ pub mod processor;
 pub mod runner;
 pub mod stats;
 
-pub use client::{
-    ClientError, ClientResult, HomeserverResolver, PubkyConnector, PubkyConnectorResolver,
-};
+pub use client::{ClientError, ClientResult, PubkyConnector};
 pub use constants::PROCESSING_TIMEOUT_SECS;
 pub use error::RunError;
 pub use pipeline::{

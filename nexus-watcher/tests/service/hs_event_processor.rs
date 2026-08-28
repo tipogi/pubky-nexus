@@ -101,7 +101,7 @@ fn build_processor(
 async fn build_processor_at_cursor(
     cursor: u64,
     store: Arc<dyn RetryStore>,
-    event_handler: Arc<dyn EventHandler>,
+    event_handler: Arc<DynEventHandler>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<Arc<HsEventProcessor>> {
     let hs_id = random_pubky_id();

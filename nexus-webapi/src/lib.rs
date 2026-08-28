@@ -46,7 +46,6 @@
 pub mod api_context;
 mod builder;
 pub mod error;
-mod homeserver_resolver;
 mod key_republisher;
 pub mod mock;
 pub mod models;

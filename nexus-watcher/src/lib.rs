@@ -17,10 +17,8 @@
 mod builder;
 pub mod errors;
 pub mod events;
-mod homeserver_resolver;
 pub mod service;
 
 pub use builder::NexusWatcherBuilder;
 pub use errors::EventProcessorError;
 pub use events::DynEventHandler;
-pub use homeserver_resolver::default_homeserver_resolver;

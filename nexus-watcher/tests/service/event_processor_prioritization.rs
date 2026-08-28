@@ -10,7 +10,6 @@ use nexus_common::models::user::{set_user_homeserver, UserDetails};
 use nexus_common::types::DynError;
 use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
 use nexus_common::DEFAULT_MAX_FILE_SIZE;
-use nexus_watcher::default_homeserver_resolver;
 use nexus_watcher::events::retry::{InitialBackoff, RedisRetryStore, RetryScheduler, RetryStore};
 use nexus_watcher::events::{DefaultEventHandler, DynEventHandler};
 use nexus_watcher::service::indexer::PubkyKeyBasedEventSource;
@@ -29,7 +28,7 @@ async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(),
 
     let event_handler: Arc<DynEventHandler> = Arc::new(DefaultEventHandler::new(
         default_moderation_tests(),
-        default_ingestor_tests(default_homeserver_resolver()),
+        default_ingestor_tests(),
         DEFAULT_MAX_FILE_SIZE,
         PathBuf::from("/tmp/nexus-watcher-test"),
     ));
@@ -77,7 +76,7 @@ async fn test_event_processor_runner_blacklisted_homeserver_excluded() -> Result
 
     let event_handler: Arc<DynEventHandler> = Arc::new(DefaultEventHandler::new(
         default_moderation_tests(),
-        default_ingestor_tests(default_homeserver_resolver()),
+        default_ingestor_tests(),
         DEFAULT_MAX_FILE_SIZE,
         PathBuf::from("/tmp/nexus-watcher-test"),
     ));

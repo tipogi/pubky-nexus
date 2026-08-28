@@ -24,6 +24,7 @@ opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
 opentelemetry_sdk = { workspace = true }
 pubky = { workspace = true }
 pubky-app-specs = { workspace = true }
+pubky-watcher = { workspace = true }
 redis = { workspace = true, features = ["tokio-comp", "json"] }
 deadpool-redis = { workspace = true }
 serde = { workspace = true }

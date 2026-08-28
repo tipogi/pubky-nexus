@@ -6,7 +6,7 @@
 use nexus_common::db::{
     fetch_key_from_graph, queries, GraphResult,
 };
-use pubky_watcher::{ClientResult, HomeserverResolver, PubkyConnectorResolver};
+use pubky_watcher::PubkyConnector;
 use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_stale};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
@@ -20,39 +20,14 @@ use tracing::{debug, error, info, warn};
 
 static HS_RESOLVER_METRICS: LazyLock<HsResolverMetrics> = LazyLock::new(HsResolverMetrics::new);
 
-/// Resolves a user's currently published homeserver from PKDNS/DHT.
-///
-/// Abstracted behind a trait so the resolver loop can be driven with a mock in
-/// tests instead of hitting the network.
-#[async_trait::async_trait]
-pub trait PkdnsHomeserverResolver: Send + Sync {
-    /// Returns the HS published for `user_pk`, if any is currently published.
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> ClientResult<Option<PubkyId>>;
-}
-
-#[async_trait::async_trait]
-impl PkdnsHomeserverResolver for PubkyConnectorResolver {
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> ClientResult<Option<PubkyId>> {
-        HomeserverResolver::resolve_homeserver(self, user_pk)
-            .await
-            .map(|opt| opt.map(PubkyId::from))
-    }
-}
-
 pub struct UserHsResolverRunner {
-    resolver: Box<dyn PkdnsHomeserverResolver>,
     ttl_ms: u64,
     shutdown_rx: Receiver<bool>,
 }
 
 impl UserHsResolverRunner {
-    pub fn from_config(
-        config: &WatcherConfig,
-        resolver: Box<dyn PkdnsHomeserverResolver>,
-        shutdown_rx: Receiver<bool>,
-    ) -> Self {
+    pub fn from_config(config: &WatcherConfig, shutdown_rx: Receiver<bool>) -> Self {
         Self {
-            resolver,
             ttl_ms: config.hs_resolver_ttl,
             shutdown_rx,
         }
@@ -60,7 +35,7 @@ impl UserHsResolverRunner {
 
     pub async fn run(&self) -> Result<(), DynError> {
         let mut shutdown_rx = self.shutdown_rx.clone();
-        run(self.resolver.as_ref(), self.ttl_ms, &mut shutdown_rx).await
+        run(self.ttl_ms, &mut shutdown_rx).await
     }
 }
 
@@ -71,11 +46,7 @@ impl UserHsResolverRunner {
 ///
 /// `shutdown_rx` cancels the in-flight resolution on shutdown; cancelled users
 /// get re-picked-up on the next run via TTL.
-pub async fn run(
-    resolver: &dyn PkdnsHomeserverResolver,
-    ttl_ms: u64,
-    shutdown_rx: &mut Receiver<bool>,
-) -> Result<(), DynError> {
+pub async fn run(ttl_ms: u64, shutdown_rx: &mut Receiver<bool>) -> Result<(), DynError> {
     let user_ids = get_users_needing_resolution(ttl_ms).await?;
     let user_pks: Vec<PublicKey> = user_ids
         .iter()
@@ -120,7 +91,7 @@ pub async fn run(
                 info!(processed, total, "Shutdown detected; HS resolver stopping");
                 break;
             }
-            result = resolve_user(resolver, &user_pk) => {
+            result = resolve_user(&user_pk) => {
                 let user_id = user_pk.z32();
                 let user_hs_resolved = matches!(result, Ok(true));
                 if !user_hs_resolved {
@@ -191,32 +162,38 @@ async fn get_users_needing_resolution(ttl_ms: u64) -> GraphResult<Vec<String>> {
 /// Resolves a single user's HS and persists the HOSTED_BY relationship.
 ///
 /// Returns whether or not a PKDNS HS mapping was found when resolving the PKDNS record.
-async fn resolve_user(
-    resolver: &dyn PkdnsHomeserverResolver,
-    user_pk: &PublicKey,
-) -> Result<bool, DynError> {
-    let user_id = user_pk.z32();
+async fn resolve_user(user_pk: &PublicKey) -> Result<bool, DynError> {
+    let pubky = PubkyConnector::get()?;
+    let maybe_resolved_hs_id = pubky.get_homeserver_of(user_pk).await?.map(PubkyId::from);
+    apply_resolved_homeserver(&user_pk.z32(), maybe_resolved_hs_id).await
+}
 
-    let maybe_resolved_hs_id = resolver.resolve_homeserver(user_pk).await?;
-    let maybe_stored_hs_id = get_user_homeserver(&user_id).await?;
+/// Persists the HOSTED_BY relationship for a PKDNS lookup result.
+///
+/// Returns whether a published HS was found.
+async fn apply_resolved_homeserver(
+    user_id: &str,
+    maybe_resolved_hs_id: Option<PubkyId>,
+) -> Result<bool, DynError> {
+    let maybe_stored_hs_id = get_user_homeserver(user_id).await?;
 
     match (&maybe_stored_hs_id, &maybe_resolved_hs_id) {
         (None, None) => warn!(%user_id, "User has no published homeserver"),
 
         (None, Some(resolved_hs_id)) => {
-            set_user_homeserver(&user_id, resolved_hs_id).await?;
+            set_user_homeserver(user_id, resolved_hs_id).await?;
             debug!(%user_id, homeserver = %resolved_hs_id, "HS mapping created");
         }
 
         // Already bound to a HS: toggle the stale flag instead of switching.
         (Some(stored_hs_id), Some(resolved_hs_id)) if resolved_hs_id.as_ref() == stored_hs_id => {
-            set_user_homeserver_stale(&user_id, false).await?;
+            set_user_homeserver_stale(user_id, false).await?;
             debug!(%user_id, homeserver = %stored_hs_id, "HS mapping still active");
         }
 
         // HS switching is not fully implemented, so the bound HS is never changed once set
         (Some(stored_hs_id), _) => {
-            set_user_homeserver_stale(&user_id, true).await?;
+            set_user_homeserver_stale(user_id, true).await?;
             warn!(
                 %user_id,
                 stored_homeserver = %stored_hs_id,
@@ -275,22 +252,6 @@ mod tests {
 
     async fn setup() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await
-    }
-
-    /// Resolver stub returning a fixed PKDNS result, so `resolve_user` can be
-    /// driven without touching the DHT.
-    struct MockResolver {
-        result: Option<PubkyId>,
-    }
-
-    #[async_trait::async_trait]
-    impl PkdnsHomeserverResolver for MockResolver {
-        async fn resolve_homeserver(
-            &self,
-            _user_pk: &PublicKey,
-        ) -> ClientResult<Option<PubkyId>> {
-            Ok(self.result.clone())
-        }
     }
 
     /// Helper: create a User node in the graph
@@ -482,16 +443,12 @@ mod tests {
     async fn test_resolve_user_first_time_sets_homeserver() -> Result<(), DynError> {
         setup().await?;
 
-        let user_pk = random_pk();
-        let user_id = user_pk.z32();
+        let user_id = random_pk().z32();
         let hs_id = random_pubky_id();
 
         create_test_user(&user_id).await?;
 
-        let resolver = MockResolver {
-            result: Some(hs_id.clone()),
-        };
-        resolve_user(&resolver, &user_pk).await?;
+        apply_resolved_homeserver(&user_id, Some(hs_id.clone())).await?;
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
@@ -509,13 +466,11 @@ mod tests {
     async fn test_resolve_user_first_time_no_homeserver_noop() -> Result<(), DynError> {
         setup().await?;
 
-        let user_pk = random_pk();
-        let user_id = user_pk.z32();
+        let user_id = random_pk().z32();
 
         create_test_user(&user_id).await?;
 
-        let resolver = MockResolver { result: None };
-        resolve_user(&resolver, &user_pk).await?;
+        apply_resolved_homeserver(&user_id, None).await?;
 
         assert_eq!(get_user_homeserver(&user_id).await?, None);
         assert!(
@@ -536,8 +491,7 @@ mod tests {
     async fn test_resolve_user_change_keeps_binding_and_marks_stale() -> Result<(), DynError> {
         setup().await?;
 
-        let user_pk = random_pk();
-        let user_id = user_pk.z32();
+        let user_id = random_pk().z32();
         let stored_hs = random_pubky_id();
         let new_hs = random_pubky_id();
 
@@ -545,10 +499,7 @@ mod tests {
         set_user_homeserver(&user_id, &stored_hs).await?;
 
         // DHT now points at a different homeserver
-        let resolver = MockResolver {
-            result: Some(new_hs.clone()),
-        };
-        resolve_user(&resolver, &user_pk).await?;
+        apply_resolved_homeserver(&user_id, Some(new_hs.clone())).await?;
 
         // Binding unchanged, and the user is indexed on neither homeserver
         assert_eq!(
@@ -572,16 +523,14 @@ mod tests {
     async fn test_resolve_user_unpublished_keeps_binding_and_marks_stale() -> Result<(), DynError> {
         setup().await?;
 
-        let user_pk = random_pk();
-        let user_id = user_pk.z32();
+        let user_id = random_pk().z32();
         let stored_hs = random_pubky_id();
 
         create_test_user(&user_id).await?;
         set_user_homeserver(&user_id, &stored_hs).await?;
 
         // DHT no longer publishes a homeserver
-        let resolver = MockResolver { result: None };
-        resolve_user(&resolver, &user_pk).await?;
+        apply_resolved_homeserver(&user_id, None).await?;
 
         assert_eq!(
             get_user_homeserver(&user_id).await?,
@@ -602,8 +551,7 @@ mod tests {
     async fn test_resolve_user_realign_clears_stale() -> Result<(), DynError> {
         setup().await?;
 
-        let user_pk = random_pk();
-        let user_id = user_pk.z32();
+        let user_id = random_pk().z32();
         let stored_hs = random_pubky_id();
 
         create_test_user(&user_id).await?;
@@ -615,10 +563,7 @@ mod tests {
             .contains(&user_id));
 
         // DHT points back at the stored homeserver
-        let resolver = MockResolver {
-            result: Some(stored_hs.clone()),
-        };
-        resolve_user(&resolver, &user_pk).await?;
+        apply_resolved_homeserver(&user_id, Some(stored_hs.clone())).await?;
 
         assert!(get_user_ids_by_homeserver(&stored_hs)
             .await?

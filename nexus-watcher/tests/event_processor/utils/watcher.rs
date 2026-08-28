@@ -6,7 +6,6 @@ use nexus_common::models::file::FileDetails;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::traits::Collection;
 use nexus_common::utils::test_utils::default_ingestor_tests;
-use nexus_watcher::default_homeserver_resolver;
 use pubky_watcher::PubkyConnector;
 use nexus_common::{StackConfig, StackManager};
 use nexus_watcher::errors::EventProcessorError;
@@ -95,7 +94,7 @@ impl WatcherTest {
     ) -> HsEventProcessorRunner {
         let event_handler: Arc<DynEventHandler> = Arc::new(DefaultEventHandler::new(
             default_moderation_tests(),
-            default_ingestor_tests(default_homeserver_resolver()),
+            default_ingestor_tests(),
             max_file_size,
             files_path,
         ));

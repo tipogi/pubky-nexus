@@ -7,7 +7,6 @@ use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
 use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_watcher::errors::EventProcessorError;
-use nexus_watcher::default_homeserver_resolver;
 use nexus_watcher::events::handlers;
 use pubky::Keypair;
 use pubky_app_specs::post_uri_builder;
@@ -55,7 +54,7 @@ async fn test_post_del_recovers_after_partial_redis_cleanup() -> Result<()> {
     handlers::post::del(
         pubky_id(&user_id)?,
         post_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 
@@ -100,7 +99,7 @@ async fn test_post_del_replay_after_full_success_skips() -> Result<()> {
     let result = handlers::post::del(
         pubky_id(&user_id)?,
         post_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await;
     assert!(
@@ -180,7 +179,7 @@ async fn test_post_del_reply_recovers_without_double_decrement() -> Result<()> {
     handlers::post::del(
         pubky_id(&bob_id)?,
         reply_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 
@@ -282,7 +281,7 @@ async fn test_post_del_repost_recovers_without_double_decrement() -> Result<()> 
     handlers::post::del(
         pubky_id(&bob_id)?,
         repost_id.clone(),
-        &default_ingestor_tests(default_homeserver_resolver()),
+        &default_ingestor_tests(),
     )
     .await?;
 
