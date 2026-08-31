@@ -16,9 +16,7 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
-clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
 name = "poll_homeserver"

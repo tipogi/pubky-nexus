@@ -1,123 +1,52 @@
-//! Minimal example: poll a homeserver `/events/` feed by public key.
+//! One `/events/` poll through [`TEventProcessorRunner`] and [`TEventProcessor`].
 //!
-//! # Prerequisites
-//!
-//! For the default testnet homeserver you need a local testnet running
-//! (Pubky DHT + homeserver). Use
-//! [pubky-antfarm](https://github.com/tipogi/pubky-antfarm):
+//! Polls the public staging homeserver. From the workspace root:
 //!
 //! ```bash
-//! git clone https://github.com/tipogi/pubky-antfarm.git
-//! cd pubky-antfarm && cargo run
-//! ```
-//!
-//! # Run
-//!
-//! From the workspace root:
-//!
-//! ```bash
-//! # Default: static testnet homeserver + testnet client
 //! cargo run -p pubky-watcher --example poll_homeserver
-//!
-//! # Custom homeserver key (z32 public key)
-//! cargo run -p pubky-watcher --example poll_homeserver -- \
-//!   --homeserver 8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo
-//!
-//! # Mainnet (omit --testnet)
-//! cargo run -p pubky-watcher --example poll_homeserver -- \
-//!   --homeserver <z32-pubkey> --no-testnet
-//!
-//! # Resume from a cursor / change batch size
-//! cargo run -p pubky-watcher --example poll_homeserver -- \
-//!   --cursor 0 --limit 50
 //! ```
+//!
+//! The crate logs with `tracing`. This example uses `println!` instead of
+//! installing `tracing-subscriber`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use clap::Parser;
 use pubky::Method;
 use pubky_watcher::{
     EventBatch, EventHandler, EventMetadata, LineParseOutcome, ParseFromLine, ProcessedStats,
-    PubkyConnector, RetryableError, TEventProcessor, TEventProcessorRunner,
+    PubkyConnector, RetryableError, RunAllProcessorsStats, TEventProcessor, TEventProcessorRunner,
 };
 use tokio::sync::watch;
-use tracing::{info, warn};
 
-/// Static testnet homeserver public key (z32).
-/// See `pubky-testnet` binary / README.
-const DEFAULT_TESTNET_HOMESERVER: &str =
-    "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+const HOMESERVER: &str = "ufibwbmed6jeq9k4p583go95wofakh9fwpp4k734trq79pd9u1uy";
 
-#[derive(Parser, Debug)]
-#[command(
-    about = "Poll pubky homeserver /events/ using pubky-watcher",
-    long_about = None
-)]
-struct Args {
-    /// Homeserver public key (z32), without a `pk:` / `pubky` prefix
-    #[arg(long, default_value = DEFAULT_TESTNET_HOMESERVER)]
-    homeserver: String,
-
-    /// Events cursor to resume from (`0` = beginning)
-    #[arg(long, default_value = "0")]
-    cursor: String,
-
-    /// Max events per poll
-    #[arg(long, default_value_t = 100)]
-    limit: u16,
-
-    /// How many runner ticks to execute before exiting
-    #[arg(long, default_value_t = 1)]
-    ticks: u32,
-
-    /// Delay between ticks (milliseconds)
-    #[arg(long, default_value_t = 1_000)]
-    interval_ms: u64,
-
-    /// Use the mainnet Pubky client instead of testnet
-    #[arg(long)]
-    no_testnet: bool,
-
-    /// Testnet relay / DHT host passed to [`PubkyConnector::initialise`]
-    #[arg(long, default_value = "localhost")]
-    testnet_host: String,
-}
-
-#[derive(Debug, Clone)]
-struct SimpleEvent {
-    uri: String,
+#[derive(Debug)]
+struct LineEvent {
+    line: String,
     event_type: String,
+    uri: String,
 }
 
-impl EventMetadata for SimpleEvent {
+impl EventMetadata for LineEvent {
     fn uri(&self) -> &str {
         &self.uri
     }
-
     fn event_type_display(&self) -> &str {
         &self.event_type
     }
-
     fn user_id(&self) -> String {
-        self.uri
-            .strip_prefix("pubky://")
-            .and_then(|rest| rest.split('/').next())
-            .unwrap_or("unknown")
-            .to_string()
+        String::new()
     }
-
     fn resource_label(&self) -> String {
-        "raw".to_string()
+        String::new()
     }
-
     fn resource_id(&self) -> String {
-        self.uri.clone()
+        String::new()
     }
 }
 
-impl ParseFromLine for SimpleEvent {
+impl ParseFromLine for LineEvent {
     type Error = ExampleError;
 
     fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error> {
@@ -125,35 +54,30 @@ impl ParseFromLine for SimpleEvent {
         if line.is_empty() {
             return Ok(LineParseOutcome::Skipped);
         }
-
         let Some((event_type, uri)) = line.split_once(' ') else {
             return Ok(LineParseOutcome::Unrecognized {
                 reason: format!("expected `<TYPE> <uri>`, got: {line}"),
             });
         };
-
-        Ok(LineParseOutcome::Parsed(SimpleEvent {
-            uri: uri.to_string(),
+        Ok(LineParseOutcome::Parsed(LineEvent {
+            line: line.to_string(),
             event_type: event_type.to_string(),
+            uri: uri.to_string(),
         }))
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ExampleError {
-    #[error("client: {0}")]
-    Client(String),
-}
+#[error("{0}")]
+struct ExampleError(String);
 
 impl RetryableError for ExampleError {
     fn should_not_retry_now(&self) -> bool {
-        false
+        true
     }
-
     fn is_missing_dependency(&self) -> bool {
         false
     }
-
     fn should_enqueue_for_retry(&self) -> bool {
         false
     }
@@ -162,133 +86,116 @@ impl RetryableError for ExampleError {
 struct PrintHandler;
 
 #[async_trait]
-impl EventHandler<SimpleEvent, ExampleError> for PrintHandler {
-    async fn handle(&self, event: &SimpleEvent) -> Result<(), ExampleError> {
-        println!("{} {}", event.event_type, event.uri);
+impl EventHandler<LineEvent, ExampleError> for PrintHandler {
+    async fn handle(&self, event: &LineEvent) -> Result<(), ExampleError> {
+        println!("{}", event.line);
+
+        if event.event_type != "PUT" {
+            return Ok(());
+        }
+
+        let response = PubkyConnector::get()
+            .map_err(|e| ExampleError(e.to_string()))?
+            .public_storage()
+            .get(&event.uri)
+            .await
+            .map_err(|e| ExampleError(e.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ExampleError(e.to_string()))?;
+        println!("{status} {body}");
         Ok(())
     }
 }
 
-struct ExampleProcessor {
-    homeserver_id: String,
-    cursor: String,
-    limit: u16,
-    event_handler: Arc<dyn EventHandler<SimpleEvent, ExampleError> + Send + Sync>,
-    shutdown_rx: watch::Receiver<bool>,
+struct Processor {
+    event_handler: Arc<dyn EventHandler<LineEvent, ExampleError> + Send + Sync>,
 }
 
 #[async_trait]
-impl TEventProcessor<SimpleEvent, ExampleError> for ExampleProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler<SimpleEvent, ExampleError> + Send + Sync> {
+impl TEventProcessor<LineEvent, ExampleError> for Processor {
+    fn event_handler(&self) -> &Arc<dyn EventHandler<LineEvent, ExampleError> + Send + Sync> {
         &self.event_handler
     }
 
     fn instance_name(&self) -> String {
-        format!("example-processor:{}", self.homeserver_id)
-    }
-
-    fn homeserver_id(&self) -> Option<&str> {
-        Some(&self.homeserver_id)
+        "poll_homeserver".to_string()
     }
 
     async fn run_internal(self: Arc<Self>) -> Result<(), ExampleError> {
-        let lines = self.poll_events().await?;
-        let batch = EventBatch::split(&lines);
-        if !batch.has_events() && batch.cursor.is_none() {
-            info!("No new events");
-            return Ok(());
-        }
-
-        info!(count = batch.event_lines.len(), "Processing event lines");
-        if let Some(cursor) = batch.cursor {
-            info!(%cursor, "Homeserver returned next cursor");
-        }
-
-        for line in &batch.event_lines {
-            if *self.shutdown_rx.borrow() {
-                info!("Shutdown detected; stopping batch");
-                break;
-            }
-
-            self.process_event_line(line).await?;
-        }
-
-        Ok(())
+        let body = self.poll_events().await?;
+        self.process_event_body(&body).await
     }
 }
 
-impl ExampleProcessor {
-    async fn poll_events(&self) -> Result<Vec<String>, ExampleError> {
-        let pubky = PubkyConnector::get().map_err(|e| ExampleError::Client(e.to_string()))?;
-        let url = format!(
-            "https://{}/events/?cursor={}&limit={}",
-            self.homeserver_id, self.cursor, self.limit
-        );
-
-        info!(%url, "GET /events/");
-        let response = pubky
+impl Processor {
+    async fn poll_events(&self) -> Result<String, ExampleError> {
+        let url = format!("https://{HOMESERVER}/events/?cursor=0&limit=8");
+        println!("GET {url}");
+        let body = PubkyConnector::get()
+            .map_err(|e| ExampleError(e.to_string()))?
             .client()
             .request(Method::GET, &url)
             .send()
             .await
-            .map_err(|e| ExampleError::Client(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(ExampleError::Client(format!(
-                "homeserver returned HTTP {}",
-                response.status()
-            )));
-        }
-
-        let body = response
+            .map_err(|e| ExampleError(e.to_string()))?
             .text()
             .await
-            .map_err(|e| ExampleError::Client(e.to_string()))?;
+            .map_err(|e| ExampleError(e.to_string()))?;
 
-        Ok(body.trim().lines().map(String::from).collect())
+        Ok(body)
+    }
+
+    async fn process_event_body(&self, body: &str) -> Result<(), ExampleError> {
+        let batch = EventBatch::from_body(body);
+        if !batch.has_events() {
+            println!("No new events");
+        }
+        for line in &batch.event_lines {
+            self.process_event_line(line).await?;
+        }
+        if let Some(cursor) = batch.cursor {
+            println!("cursor: {cursor}");
+        }
+        Ok(())
     }
 }
 
-struct ExampleRunner {
-    homeserver_id: String,
-    cursor: String,
-    limit: u16,
+struct Runner {
     shutdown_rx: watch::Receiver<bool>,
 }
 
 #[async_trait]
-impl TEventProcessorRunner<SimpleEvent, ExampleError> for ExampleRunner {
+impl TEventProcessorRunner<LineEvent, ExampleError> for Runner {
     fn shutdown_rx(&self) -> watch::Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
     async fn build(
         &self,
-        hs_id: &str,
+        _hs_id: &str,
     ) -> Result<
-        Arc<dyn TEventProcessor<SimpleEvent, ExampleError> + Send + Sync>,
+        Arc<dyn TEventProcessor<LineEvent, ExampleError> + Send + Sync>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        Ok(Arc::new(ExampleProcessor {
-            homeserver_id: hs_id.to_string(),
-            cursor: self.cursor.clone(),
-            limit: self.limit,
+        Ok(Arc::new(Processor {
             event_handler: Arc::new(PrintHandler),
-            shutdown_rx: self.shutdown_rx.clone(),
         }))
     }
 
     async fn pre_run(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(vec![self.homeserver_id.clone()])
+        Ok(vec![HOMESERVER.to_string()])
     }
 
-    async fn post_run(&self, stats: pubky_watcher::RunAllProcessorsStats) -> ProcessedStats {
+    async fn post_run(&self, stats: RunAllProcessorsStats) -> ProcessedStats {
         for run in &stats.stats {
-            info!(
-                hs_id = %run.hs_id,
-                ?run.status,
-                elapsed_ms = run.duration.as_millis(),
-                "Processor finished"
+            println!(
+                "processor {} {:?} in {}ms",
+                run.hs_id,
+                run.status,
+                run.duration.as_millis()
             );
         }
         ProcessedStats(stats)
@@ -297,47 +204,9 @@ impl TEventProcessorRunner<SimpleEvent, ExampleError> for ExampleRunner {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    PubkyConnector::initialise(None).await?;
 
-    let args = Args::parse();
-    let testnet = !args.no_testnet;
-    let testnet_host = testnet.then_some(args.testnet_host.as_str());
-
-    info!(
-        homeserver = %args.homeserver,
-        cursor = %args.cursor,
-        limit = args.limit,
-        testnet,
-        "Starting poll_homeserver example"
-    );
-
-    PubkyConnector::initialise(testnet_host).await?;
-
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let runner = ExampleRunner {
-        homeserver_id: args.homeserver,
-        cursor: args.cursor,
-        limit: args.limit,
-        shutdown_rx,
-    };
-
-    for tick in 1..=args.ticks {
-        info!(tick, "Runner tick");
-        match runner.run().await {
-            Ok(_) => {}
-            Err(e) => warn!(error = %e, "Runner tick failed"),
-        }
-
-        if tick < args.ticks {
-            tokio::time::sleep(Duration::from_millis(args.interval_ms)).await;
-        }
-    }
-
-    let _ = shutdown_tx.send(true);
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    Runner { shutdown_rx }.run().await?;
     Ok(())
 }

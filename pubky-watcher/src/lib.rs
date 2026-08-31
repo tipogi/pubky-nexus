@@ -1,8 +1,9 @@
 //! Poll events from pubky homeservers.
 //!
-//! Connect with [`PubkyConnector`], split a `GET /events/` body with
-//! [`EventBatch`], implement the traits, then run a [`TEventProcessor`]
-//! (one tick) or a [`TEventProcessorRunner`] (many homeservers).
+//! Connect with [`PubkyConnector`] (the [pubky](https://crates.io/crates/pubky) SDK
+//! client), split a `GET /events/` body with [`EventBatch`], implement the traits,
+//! then run a [`TEventProcessor`] (one tick) or a [`TEventProcessorRunner`]
+//! (many homeservers).
 
 mod client;
 mod events;
