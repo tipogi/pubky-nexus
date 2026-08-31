@@ -39,8 +39,8 @@ use async_trait::async_trait;
 use clap::Parser;
 use pubky::Method;
 use pubky_watcher::{
-    EventHandler, EventMetadata, LineParseOutcome, ParseFromLine, ProcessedStats, PubkyConnector,
-    RetryableError, TEventProcessor, TEventProcessorRunner,
+    EventBatch, EventHandler, EventMetadata, LineParseOutcome, ParseFromLine, ProcessedStats,
+    PubkyConnector, RetryableError, TEventProcessor, TEventProcessorRunner,
 };
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -125,9 +125,6 @@ impl ParseFromLine for SimpleEvent {
         if line.is_empty() {
             return Ok(LineParseOutcome::Skipped);
         }
-        if line.starts_with("cursor: ") {
-            return Ok(LineParseOutcome::Skipped);
-        }
 
         let Some((event_type, uri)) = line.split_once(' ') else {
             return Ok(LineParseOutcome::Unrecognized {
@@ -196,21 +193,21 @@ impl TEventProcessor<SimpleEvent, ExampleError> for ExampleProcessor {
 
     async fn run_internal(self: Arc<Self>) -> Result<(), ExampleError> {
         let lines = self.poll_events().await?;
-        if lines.is_empty() {
+        let batch = EventBatch::split(&lines);
+        if !batch.has_events() && batch.cursor.is_none() {
             info!("No new events");
             return Ok(());
         }
 
-        info!(count = lines.len(), "Processing event lines");
-        for line in &lines {
+        info!(count = batch.event_lines.len(), "Processing event lines");
+        if let Some(cursor) = batch.cursor {
+            info!(%cursor, "Homeserver returned next cursor");
+        }
+
+        for line in &batch.event_lines {
             if *self.shutdown_rx.borrow() {
                 info!("Shutdown detected; stopping batch");
                 break;
-            }
-
-            if let Some(cursor) = line.strip_prefix("cursor: ") {
-                info!(%cursor, "Homeserver returned next cursor");
-                continue;
             }
 
             self.process_event_line(line).await?;

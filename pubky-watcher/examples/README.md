@@ -7,7 +7,7 @@ Minimal end-to-end example of the generic watcher pipeline:
 1. Initialise [`PubkyConnector`](../src/client/connector.rs) (testnet or mainnet)
 2. Build a [`TEventProcessorRunner`](../src/runner.rs) for one homeserver public key
 3. Poll `GET https://{homeserver}/events/?cursor=…&limit=…`
-4. Parse lines and print them via a simple [`EventHandler`](../src/pipeline.rs)
+4. Split the body with [`EventBatch`](../src/events.rs) and print lines via a simple [`EventHandler`](../src/traits.rs)
 
 ### Prerequisites (testnet)
 

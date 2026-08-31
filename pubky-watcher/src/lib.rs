@@ -1,25 +1,23 @@
 //! Poll events from pubky homeservers.
 //!
-//! Generic pipeline orchestration: parse event lines, dispatch to handlers,
-//! enqueue retries, and run processor loops.
+//! Connect with [`PubkyConnector`], split a `GET /events/` body with
+//! [`EventBatch`], implement the traits, then run a [`TEventProcessor`]
+//! (one tick) or a [`TEventProcessorRunner`] (many homeservers).
 
-pub mod client;
-pub mod constants;
-pub mod error;
-pub mod pipeline;
-pub mod processor;
-pub mod runner;
-pub mod stats;
+mod client;
+mod events;
+mod processor;
+mod runner;
+mod traits;
 
 pub use client::{ClientError, ClientResult, PubkyConnector};
-pub use constants::PROCESSING_TIMEOUT_SECS;
-pub use error::RunError;
-pub use pipeline::{
+pub use events::{EventBatch, CURSOR_PREFIX};
+pub use processor::{RunError, TEventProcessor, PROCESSING_TIMEOUT_SECS};
+pub use runner::{
+    status_from_run_result, ProcessedStats, ProcessorRunStats, ProcessorRunStatus,
+    RunAllProcessorsStats, TEventProcessorRunner,
+};
+pub use traits::{
     EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
     RetryableError,
-};
-pub use processor::TEventProcessor;
-pub use runner::{status_from_run_result, TEventProcessorRunner};
-pub use stats::{
-    ProcessedStats, ProcessorRunStats, ProcessorRunStatus, RunAllProcessorsStats,
 };

@@ -8,15 +8,16 @@ repository = "https://github.com/pubky/pubky-nexus"
 license = "MIT"
 
 [dependencies]
-async-trait = { workspace = true }
-pubky = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-url = { workspace = true }
+async-trait = "0.1"
+pubky = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+url = "2"
 
 [dev-dependencies]
-clap = { workspace = true, features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]

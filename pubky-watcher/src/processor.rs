@@ -3,12 +3,43 @@ use std::time::Duration;
 
 use tracing::Instrument;
 
-use crate::constants::PROCESSING_TIMEOUT_SECS;
-use crate::error::RunError;
-use crate::pipeline::{
+use crate::traits::{
     EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
     RetryableError,
 };
+
+/// Per-homeserver hard timeout (seconds).
+pub const PROCESSING_TIMEOUT_SECS: u64 = 3_600;
+
+/// Outcome of a single [`TEventProcessor::run`].
+#[derive(Debug)]
+pub enum RunError<E> {
+    Internal(E),
+    Panicked,
+    TimedOut,
+}
+
+impl<E> RunError<E> {
+    pub fn is_panic(&self) -> bool {
+        matches!(self, RunError::Panicked)
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, RunError::TimedOut)
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for RunError<E> {}
+
+impl<E: std::fmt::Display> std::fmt::Display for RunError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::Internal(err) => write!(f, "Internal error: {err}"),
+            RunError::Panicked => write!(f, "Execution panicked"),
+            RunError::TimedOut => write!(f, "Execution timed out"),
+        }
+    }
+}
 
 /// Asynchronous event processor interface for the Watcher service.
 #[async_trait::async_trait]

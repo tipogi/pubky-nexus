@@ -1,8 +1,7 @@
-//! Contracts that plug into the generic event-processing pipeline.
+//! Traits a downstream crate implements to plug into the poller.
 //!
-//! Downstream crates specialize these traits with a concrete event type and
-//! error type. The processor/runner orchestration in this crate stays generic
-//! and only depends on the interfaces defined here.
+//! Specialize these with a concrete event type and error type. Processor and
+//! runner orchestration stay generic and only depend on these interfaces.
 
 use async_trait::async_trait;
 

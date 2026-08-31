@@ -1,3 +1,3 @@
-pub use pubky_watcher::stats::{
+pub use pubky_watcher::{
     ProcessedStats, ProcessorRunStats, ProcessorRunStatus, RunAllProcessorsStats,
 };
