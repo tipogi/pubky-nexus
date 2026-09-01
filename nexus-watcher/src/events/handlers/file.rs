@@ -1,6 +1,5 @@
 use crate::events::{fetch_capped, EventProcessorError};
 
-use pubky_watcher::PubkyConnector;
 use nexus_common::media::FileVariant;
 use nexus_common::media::VariantController;
 use nexus_common::models::file::Blob;
@@ -10,6 +9,7 @@ use nexus_common::models::{
     traits::Collection,
 };
 use pubky_app_specs::{ParsedUri, PubkyAppFile, PubkyAppObject, PubkyId};
+use pubky_watcher::PubkyConnector;
 use std::path::Path;
 use tokio::fs::remove_dir_all;
 use tracing::{debug, warn};

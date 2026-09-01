@@ -19,16 +19,13 @@ pub trait ParseFromLine: Sized {
     fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error>;
 }
 
-/// Metadata exposed for tracing during event processing.
-pub trait EventMetadata {
-    fn uri(&self) -> &str;
-    fn event_type_display(&self) -> &str;
-    fn user_id(&self) -> String;
-    fn resource_label(&self) -> String;
-    fn resource_id(&self) -> String;
-}
-
-/// Classifies errors for retry dispatch in the generic pipeline.
+/// Opt-in error classification for retry dispatch.
+///
+/// Not required by [`crate::TEventProcessor`]. Implement this and call
+/// [`crate::dispatch_retryable_error`] from an overridden
+/// [`crate::TEventProcessor::handle_error`] when you want abort / skip / enqueue
+/// behavior. Simple consumers can use any error type and keep the default
+/// fail-fast `handle_error`.
 pub trait RetryableError: std::fmt::Display + Send + Sync {
     fn should_not_retry_now(&self) -> bool;
     fn is_missing_dependency(&self) -> bool;
@@ -43,8 +40,8 @@ pub trait EventHandler<E, Err>: Send + Sync {
 
 /// Enqueues failed events for later retry.
 ///
-/// Called from [`crate::TEventProcessor::handle_error`] after an error is classified
-/// as retryable. The two methods let implementations choose different scheduling
+/// Used by [`crate::dispatch_retryable_error`] after an error is classified as
+/// retryable. The two methods let implementations choose different scheduling
 /// policies for dependency failures vs other transient failures.
 #[async_trait]
 pub trait EventRetryScheduler<E, Err>: Send + Sync {

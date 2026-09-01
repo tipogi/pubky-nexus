@@ -13,12 +13,11 @@ mod traits;
 
 pub use client::{ClientError, ClientResult, PubkyConnector};
 pub use events::{EventBatch, CURSOR_PREFIX};
-pub use processor::{RunError, TEventProcessor, PROCESSING_TIMEOUT_SECS};
+pub use processor::{dispatch_retryable_error, RunError, TEventProcessor, PROCESSING_TIMEOUT_SECS};
 pub use runner::{
     status_from_run_result, ProcessedStats, ProcessorRunStats, ProcessorRunStatus,
     RunAllProcessorsStats, TEventProcessorRunner,
 };
 pub use traits::{
-    EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
-    RetryableError,
+    EventHandler, EventRetryScheduler, LineParseOutcome, ParseFromLine, RetryableError,
 };

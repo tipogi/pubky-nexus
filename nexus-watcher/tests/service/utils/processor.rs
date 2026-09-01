@@ -39,16 +39,6 @@ impl TEventProcessor<Event, EventProcessorError> for MockEventProcessor {
         "MockEventProcessor".to_string()
     }
 
-    fn homeserver_id(&self) -> Option<&str> {
-        Some(self.homeserver_id.as_ref())
-    }
-
-    fn retry_scheduler(
-        &self,
-    ) -> Option<&Arc<dyn pubky_watcher::EventRetryScheduler<Event, EventProcessorError> + Send + Sync>> {
-        None
-    }
-
     async fn run_internal(self: Arc<Self>) -> Result<(), EventProcessorError> {
         // Simulate a long-running task if needed, but be responsive to shutdown
         // This simulates the processing of event lines, which can take a while but can be interrupted by the shutdown signal

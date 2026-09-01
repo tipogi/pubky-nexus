@@ -5,7 +5,6 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info};
 
 use crate::processor::{RunError, TEventProcessor};
-use crate::traits::{EventMetadata, RetryableError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessorRunStatus {
@@ -86,27 +85,26 @@ pub fn status_from_run_result<Err>(result: Result<(), RunError<Err>>) -> Process
 #[async_trait::async_trait]
 pub trait TEventProcessorRunner<E, Err>: Send + Sync
 where
-    E: Send + Sync + 'static + EventMetadata,
-    Err: RetryableError + std::fmt::Debug + Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    Err: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
 {
     fn shutdown_rx(&self) -> Receiver<bool>;
 
     async fn build(
         &self,
         hs_id: &str,
-    ) -> Result<Arc<dyn TEventProcessor<E, Err> + Send + Sync>, Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<
+        Arc<dyn TEventProcessor<E, Err> + Send + Sync>,
+        Box<dyn std::error::Error + Send + Sync>,
+    >;
 
-    async fn pre_run(
-        &self,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>>;
+    async fn pre_run(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>>;
 
     async fn post_run(&self, stats: RunAllProcessorsStats) -> ProcessedStats {
         ProcessedStats(stats)
     }
 
-    async fn run(
-        &self,
-    ) -> Result<ProcessedStats, Box<dyn std::error::Error + Send + Sync>> {
+    async fn run(&self) -> Result<ProcessedStats, Box<dyn std::error::Error + Send + Sync>> {
         let hs_ids = self.pre_run().await?;
         let mut run_stats = RunAllProcessorsStats::default();
 

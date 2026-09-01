@@ -4,8 +4,7 @@ use std::time::Duration;
 use tracing::Instrument;
 
 use crate::traits::{
-    EventHandler, EventMetadata, EventRetryScheduler, LineParseOutcome, ParseFromLine,
-    RetryableError,
+    EventHandler, EventRetryScheduler, LineParseOutcome, ParseFromLine, RetryableError,
 };
 
 /// Per-homeserver hard timeout (seconds).
@@ -41,24 +40,50 @@ impl<E: std::fmt::Display> std::fmt::Display for RunError<E> {
     }
 }
 
+/// Classifies `error` with [`RetryableError`] and enqueues retryable failures.
+///
+/// Opt-in helper for retry-aware consumers. Call from an overridden
+/// [`TEventProcessor::handle_error`]. The default `handle_error` does not use this —
+/// it fails fast without requiring [`RetryableError`].
+pub async fn dispatch_retryable_error<E, Err>(
+    event: &E,
+    error: Err,
+    scheduler: &dyn EventRetryScheduler<E, Err>,
+    origin_homeserver_id: &str,
+) -> Result<(), Err>
+where
+    Err: RetryableError,
+{
+    if error.should_not_retry_now() {
+        tracing::warn!("Got should-not-retry-now error, stopping batch: {error}");
+        return Err(error);
+    }
+
+    if !error.should_enqueue_for_retry() {
+        tracing::debug!("Error not worth retrying, skipping event: {error}");
+        return Ok(());
+    }
+
+    if error.is_missing_dependency() {
+        scheduler
+            .queue_missing_dep(event, origin_homeserver_id)
+            .await
+    } else {
+        tracing::warn!("Transient error, queuing event for retry: {error}");
+        scheduler.queue_transient(event, origin_homeserver_id).await
+    }
+}
+
 /// Asynchronous event processor interface for the Watcher service.
 #[async_trait::async_trait]
 pub trait TEventProcessor<E, Err>: Send + Sync + 'static
 where
-    E: Send + Sync + 'static + EventMetadata,
-    Err: RetryableError + std::fmt::Debug + Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    Err: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
 {
     fn event_handler(&self) -> &Arc<dyn EventHandler<E, Err> + Send + Sync>;
 
     fn instance_name(&self) -> String;
-
-    fn retry_scheduler(&self) -> Option<&Arc<dyn EventRetryScheduler<E, Err> + Send + Sync>> {
-        None
-    }
-
-    fn homeserver_id(&self) -> Option<&str> {
-        None
-    }
 
     async fn run(self: Arc<Self>) -> Result<(), RunError<Err>> {
         let timeout = self
@@ -110,82 +135,27 @@ where
         Ok(())
     }
 
-    async fn handle_error(&self, event: &E, error: Err) -> Result<(), Err> {
-        if error.should_not_retry_now() {
-            tracing::warn!("Got should-not-retry-now error, stopping batch: {error}");
-            return Err(error);
-        }
-
-        if !error.should_enqueue_for_retry() {
-            tracing::debug!(
-                "Error not worth retrying, skipping event {}: {error}",
-                event.uri()
-            );
-            return Ok(());
-        }
-
-        let Some(scheduler) = self.retry_scheduler() else {
-            return Ok(());
-        };
-
-        let Some(homeserver_id) = self.homeserver_id() else {
-            tracing::warn!(
-                "Retryable error but no origin homeserver to persist; skipping retry for {}",
-                event.uri()
-            );
-            return Ok(());
-        };
-
-        if error.is_missing_dependency() {
-            scheduler.queue_missing_dep(event, homeserver_id).await
-        } else {
-            tracing::warn!("Transient error, queuing event for retry: {error}");
-            scheduler.queue_transient(event, homeserver_id).await
-        }
+    /// Default: fail fast (propagate the error). No retry classification.
+    ///
+    /// Retry-aware consumers should override this and call
+    /// [`dispatch_retryable_error`] with a [`RetryableError`] implementor.
+    async fn handle_error(&self, _event: &E, error: Err) -> Result<(), Err> {
+        Err(error)
     }
 
     async fn should_process_event(&self, _event: &E) -> Result<bool, Err> {
         Ok(true)
     }
 
-    #[tracing::instrument(
-        name = "event.process",
-        skip_all,
-        fields(
-            event.resource = %event.resource_label(),
-            event.uri = %event.uri(),
-            event.r#type = %event.event_type_display(),
-            event.user_id = %event.user_id(),
-            event.resource_id = %event.resource_id(),
-            instance = %self.instance_name(),
-            otel.status_code = tracing::field::Empty,
-            otel.status_message = tracing::field::Empty,
-        )
-    )]
     async fn handle_event(&self, event: &E) -> Result<(), Err> {
-        let span = tracing::Span::current();
-
         match self.should_process_event(event).await {
             Ok(true) => {}
-            Ok(false) => {
-                span.record("otel.status_code", "UNSET");
-                span.record("otel.status_message", "SKIPPED");
-                return Ok(());
-            }
-            Err(e) => {
-                span.record("otel.status_code", "ERROR");
-                span.record("otel.status_message", tracing::field::display(&e));
-                return self.handle_error(event, e).await;
-            }
+            Ok(false) => return Ok(()),
+            Err(e) => return self.handle_error(event, e).await,
         }
 
         if let Err(e) = self.event_handler().handle(event).await {
-            span.record("otel.status_code", "ERROR");
-            span.record("otel.status_message", tracing::field::display(&e));
-
             self.handle_error(event, e).await?;
-        } else {
-            span.record("otel.status_code", "OK");
         }
 
         Ok(())

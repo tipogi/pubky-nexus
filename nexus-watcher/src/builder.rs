@@ -1,5 +1,5 @@
 use crate::service::NexusWatcher;
-use nexus_common::db::{DatabaseConfig};
+use nexus_common::db::DatabaseConfig;
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::WatcherConfig;

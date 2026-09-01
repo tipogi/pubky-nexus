@@ -6,7 +6,6 @@ use nexus_common::models::file::FileDetails;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::traits::Collection;
 use nexus_common::utils::test_utils::default_ingestor_tests;
-use pubky_watcher::PubkyConnector;
 use nexus_common::{StackConfig, StackManager};
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::event::RetryEvent;
@@ -28,6 +27,7 @@ use pubky_app_specs::{
     PubkyAppFile, PubkyAppFollow, PubkyAppPost, PubkyAppUser, PubkyId,
 };
 use pubky_testnet::Testnet;
+use pubky_watcher::PubkyConnector;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

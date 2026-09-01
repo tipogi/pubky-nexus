@@ -2,7 +2,7 @@ use crate::errors::EventProcessorError;
 use nexus_common::models::event::EventLine;
 use pubky::Event as StreamEvent;
 use pubky_app_specs::{ExtendedParsedUri, Resource};
-use pubky_watcher::{EventMetadata, LineParseOutcome, ParseFromLine};
+use pubky_watcher::{LineParseOutcome, ParseFromLine};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use tracing::{debug, warn};
@@ -171,31 +171,3 @@ impl ParseFromLine for Event {
     }
 }
 
-impl EventMetadata for Event {
-    fn uri(&self) -> &str {
-        &self.uri
-    }
-
-    fn event_type_display(&self) -> &str {
-        match self.event_type {
-            EventType::Put => "PUT",
-            EventType::Del => "DEL",
-        }
-    }
-
-    fn user_id(&self) -> String {
-        self.parsed_uri.user_id().to_string()
-    }
-
-    fn resource_label(&self) -> String {
-        self.parsed_uri.resource().to_string()
-    }
-
-    fn resource_id(&self) -> String {
-        self.parsed_uri
-            .resource()
-            .id()
-            .unwrap_or_default()
-            .to_string()
-    }
-}

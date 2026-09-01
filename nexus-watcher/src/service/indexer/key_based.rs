@@ -4,9 +4,11 @@ use std::{
 };
 
 use crate::errors::EventProcessorError;
+use crate::events::DynEventHandler;
 use crate::events::Event;
+use crate::service::runner::UserNotFoundBackoff;
+use crate::service::user_hs_resolver;
 use futures::StreamExt;
-use pubky_watcher::PubkyConnector;
 use nexus_common::models::homeserver::HsBlacklist;
 use nexus_common::models::user::UserHsCursor;
 use opentelemetry::metrics::Counter;
@@ -14,14 +16,11 @@ use opentelemetry::{global, KeyValue};
 use pubky::errors::RequestError;
 use pubky::{Event as StreamEvent, EventCursor, PublicKey};
 use pubky_app_specs::PubkyId;
+use pubky_watcher::{dispatch_retryable_error, EventRetryScheduler, PubkyConnector};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
-use super::TEventProcessor;
-use crate::events::DynEventHandler;
-use pubky_watcher::EventRetryScheduler;
-use crate::service::runner::UserNotFoundBackoff;
-use crate::service::user_hs_resolver;
+use super::{handle_event_with_tracing, TEventProcessor};
 
 const FETCH_EVENTS_429_BACKOFF_SECS: [u64; 3] = [1, 2, 3];
 
@@ -137,12 +136,22 @@ impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
         "KeyBasedEventProcessor".to_string()
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>> {
-        Some(&self.retry_scheduler)
+    async fn handle_event(&self, event: &Event) -> Result<(), EventProcessorError> {
+        handle_event_with_tracing(self, event).await
     }
 
-    fn homeserver_id(&self) -> Option<&str> {
-        Some(self.homeserver_id.as_ref())
+    async fn handle_error(
+        &self,
+        event: &Event,
+        error: EventProcessorError,
+    ) -> Result<(), EventProcessorError> {
+        dispatch_retryable_error(
+            event,
+            error,
+            self.retry_scheduler.as_ref(),
+            self.homeserver_id.as_ref(),
+        )
+        .await
     }
 
     fn custom_timeout(&self) -> Option<Duration> {

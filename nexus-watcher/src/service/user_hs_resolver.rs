@@ -3,10 +3,7 @@
 //! Periodic task that resolves each user's homeserver and persists
 //! the `(:User)-[:HOSTED_BY]->(:Homeserver)` relationship in Neo4j.
 
-use nexus_common::db::{
-    fetch_key_from_graph, queries, GraphResult,
-};
-use pubky_watcher::PubkyConnector;
+use nexus_common::db::{fetch_key_from_graph, queries, GraphResult};
 use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_stale};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
@@ -14,6 +11,7 @@ use opentelemetry::global;
 use opentelemetry::metrics::Histogram;
 use pubky::PublicKey;
 use pubky_app_specs::PubkyId;
+use pubky_watcher::PubkyConnector;
 use std::sync::LazyLock;
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};

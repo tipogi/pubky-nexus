@@ -5,7 +5,6 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::db::{exec_single_row, graph::Query, RedisOps};
-use pubky_watcher::ClientError;
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::traits::Collection;
 use nexus_common::models::user::{set_user_homeserver, user_hs_cursor_key, UserDetails};
@@ -20,6 +19,7 @@ use nexus_watcher::service::runner::UserNotFoundBackoff;
 use nexus_watcher::service::{KeyBasedEventProcessorRunner, TEventProcessorRunner};
 use pubky::{Event as StreamEvent, EventCursor, EventType, Keypair, PubkyResource, PublicKey};
 use pubky_app_specs::PubkyId;
+use pubky_watcher::ClientError;
 use tokio::sync::watch;
 
 use crate::service::utils::{

@@ -1,15 +1,15 @@
-use super::TEventProcessor;
+use super::{handle_event_with_tracing, TEventProcessor};
 use crate::errors::EventProcessorError;
 use crate::events::{read_stream_capped, DynEventHandler, Event, MAX_EVENTS_BODY};
 use nexus_common::db::kv::RedisError;
 use nexus_common::db::{fetch_row_from_graph, queries, GraphResult};
 use nexus_common::models::error::ModelError;
 use nexus_common::models::homeserver::Homeserver;
-use pubky_watcher::{EventBatch, EventRetryScheduler, PubkyConnector};
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::Method;
 use pubky_app_specs::PubkyId;
+use pubky_watcher::{dispatch_retryable_error, EventBatch, EventRetryScheduler, PubkyConnector};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::watch::Receiver;
@@ -108,12 +108,22 @@ impl TEventProcessor<Event, EventProcessorError> for HsEventProcessor {
         "HsEventProcessor".to_string()
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>> {
-        Some(&self.retry_scheduler)
+    async fn handle_event(&self, event: &Event) -> Result<(), EventProcessorError> {
+        handle_event_with_tracing(self, event).await
     }
 
-    fn homeserver_id(&self) -> Option<&str> {
-        Some(self.homeserver.id.as_ref())
+    async fn handle_error(
+        &self,
+        event: &Event,
+        error: EventProcessorError,
+    ) -> Result<(), EventProcessorError> {
+        dispatch_retryable_error(
+            event,
+            error,
+            self.retry_scheduler.as_ref(),
+            self.homeserver.id.as_ref(),
+        )
+        .await
     }
 
     /// Skips events from users that are not actively bound to this homeserver.

@@ -5,13 +5,13 @@ use crate::events::{DefaultEventHandler, DynEventHandler, Event};
 use crate::service::indexer::{
     DynEventProcessor, KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource,
 };
-use pubky_watcher::EventRetryScheduler;
 use crate::service::runner::key_based_hs_backoff::HomeserverBackoff;
 use crate::service::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats};
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use pubky_app_specs::PubkyId;
+use pubky_watcher::EventRetryScheduler;
 use std::sync::Arc;
 use tokio::sync::{watch::Receiver, Mutex};
 use tracing::{debug, info, warn};
