@@ -162,7 +162,7 @@ async fn get_users_needing_resolution(ttl_ms: u64) -> GraphResult<Vec<String>> {
 /// Returns whether or not a PKDNS HS mapping was found when resolving the PKDNS record.
 async fn resolve_user(user_pk: &PublicKey) -> Result<bool, DynError> {
     let pubky = PubkyConnector::get()?;
-    let maybe_resolved_hs_id = pubky.get_homeserver_of(user_pk).await?.map(PubkyId::from);
+    let maybe_resolved_hs_id = pubky.get_homeserver_of(user_pk).await.map(PubkyId::from);
     apply_resolved_homeserver(&user_pk.z32(), maybe_resolved_hs_id).await
 }
 

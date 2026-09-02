@@ -46,12 +46,7 @@ impl PubkyConnector {
                     client_builder
                         .testnet_with_host(host)
                         // Avoid competing with `StaticTestnet` for DHT port 6881.
-                        .pkarr(|p| {
-                            p.dht(|c| {
-                                c.port = Some(0);
-                                c
-                            })
-                        });
+                        .pkarr(|p| p.dht(|d| d.port(0)));
                 }
 
                 let client = client_builder.build()?;
