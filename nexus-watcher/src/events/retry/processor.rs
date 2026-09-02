@@ -2,18 +2,16 @@ use std::cmp::min;
 use std::sync::Arc;
 
 use crate::errors::EventProcessorError;
-use crate::events::{Event, ParseResult};
 use chrono::{DateTime, Utc};
 use nexus_common::config::EventRetryConfig;
 use nexus_common::WatcherConfig;
+use pubky_watcher::RetryableError;
 use tokio::sync::watch::Receiver;
 use tracing::{debug, info, warn};
 
 use super::store::{RedisRetryStore, RetryStore};
-use super::IndexKey;
-use super::RetryEvent;
-use super::RetryScheduler;
-use crate::events::{DefaultEventHandler, EventHandler};
+use super::{IndexKey, RetryEvent};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event, ParseResult};
 use crate::service::indexer::TEventProcessor;
 
 /// Maximum number of retry events to fetch per batch to avoid memory spikes
@@ -21,7 +19,7 @@ const RETRY_BATCH_SIZE: usize = 100;
 
 /// Processor for retrying events that failed due to missing dependencies
 pub struct RetryProcessor {
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<DynEventHandler>,
     pub shutdown_rx: Receiver<bool>,
     pub config: EventRetryConfig,
     /// Persistence backend for retry events. Production wiring uses
@@ -30,17 +28,13 @@ pub struct RetryProcessor {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for RetryProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
+impl TEventProcessor<Event, EventProcessorError> for RetryProcessor {
+    fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
 
-    fn instance_name(&self) -> &'static str {
-        "RetryProcessor"
-    }
-
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
-        None
+    fn instance_name(&self) -> String {
+        "RetryProcessor".to_string()
     }
 
     async fn run_internal(self: Arc<Self>) -> Result<(), EventProcessorError> {
@@ -114,9 +108,6 @@ impl RetryProcessor {
             }
         };
 
-        let ev_uri = &retry_event.event_uri;
-        let ev_retry_count = retry_event.retry_count;
-
         // In principle, it's possible to check if `origin_homeserver_id` is blacklisted before
         // handling the event. A retry entry may have been queued before that HS got blacklisted.
         // Retrying those pre-existing events is acceptable for now. Newly discovered events from a
@@ -132,32 +123,45 @@ impl RetryProcessor {
         match event_handle_res {
             Ok(()) => {
                 // Success - event was processed, remove from retry queue
-                debug!("Retry successful for event: {ev_uri}");
+                debug!("Retry successful for event: {}", retry_event.event_uri);
                 self.store.remove(index_key).await?;
             }
-            Err(e) if !RetryScheduler::should_enqueue_related_event(&e) => {
-                // Not worth retrying (ParseFailed, etc.) - dead-letter immediately
-                warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
-                self.store.remove(index_key).await?;
-            }
-            Err(e) if e.should_not_retry_now() => {
-                // Errors we should not retry right now (e.g. Neo4j/Redis failures) must NOT count
-                // against the application-level max_retries limit.  Reschedule with backoff but do
-                // NOT increment retry_count, then propagate to stop the current batch.
-                self.reschedule(&retry_event, &e, false).await?;
-                return Err(e);
-            }
-            Err(e) if ev_retry_count >= self.max_retries_for(&e) => {
-                warn!("Event {ev_uri} exceeded max retries ({ev_retry_count}), dead-lettering");
-                self.store.remove(index_key).await?;
-            }
-            Err(e) => {
-                // Schedule retry with backoff (increments retry_count)
-                self.reschedule(&retry_event, &e, true).await?;
+            Err(error) => {
+                self.handle_retry_error(index_key, &retry_event, error)
+                    .await?;
             }
         }
 
         Ok(())
+    }
+
+    async fn handle_retry_error(
+        &self,
+        index_key: &IndexKey,
+        retry_event: &RetryEvent,
+        error: EventProcessorError,
+    ) -> Result<(), EventProcessorError> {
+        let event_uri = &retry_event.event_uri;
+        let retry_count = retry_event.retry_count;
+
+        if !error.should_enqueue_for_retry() {
+            // Not worth retrying (ParseFailed, etc.) - dead-letter immediately.
+            warn!("Event {event_uri} threw an error not worth retrying, dead-lettering: {error}");
+            return self.store.remove(index_key).await;
+        }
+
+        if error.should_not_retry_now() {
+            // Infrastructure failures do not consume the application-level retry budget.
+            self.reschedule(retry_event, &error, false).await?;
+            return Err(error);
+        }
+
+        if retry_count >= self.max_retries_for(&error) {
+            warn!("Event {event_uri} exceeded max retries ({retry_count}), dead-lettering");
+            return self.store.remove(index_key).await;
+        }
+
+        self.reschedule(retry_event, &error, true).await
     }
 
     fn max_retries_for(&self, error: &EventProcessorError) -> u32 {

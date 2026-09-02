@@ -1,10 +1,13 @@
-use nexus_common::{db::PubkyConnector, models::user::UserIngestor};
+use nexus_common::{models::user::UserIngestor, WatcherConfig};
+use pubky_watcher::PubkyConnector;
 pub mod event;
 
 pub use event::{Event, EventType, ParseResult};
+pub use pubky_watcher::EventHandler;
 
 use crate::errors::EventProcessorError;
-use nexus_common::WatcherConfig;
+
+pub type DynEventHandler = dyn EventHandler<Event, EventProcessorError> + Send + Sync;
 use pubky_app_specs::{ExtendedParsedUri, PubkyAppObject, Resource};
 use std::{
     path::{Path, PathBuf},
@@ -23,16 +26,7 @@ pub(crate) use fetch::{
 };
 pub use moderation::Moderation;
 
-/// Trait for handling events.
-///
-/// This trait abstracts event handling logic to allow for flexible implementations,
-/// including mocked versions for testing.
-#[async_trait::async_trait]
-pub trait EventHandler: Send + Sync {
-    async fn handle(&self, event: &Event) -> Result<(), EventProcessorError>;
-}
-
-/// Default implementation of `EventHandler` that uses the actual event handling logic.
+/// Default implementation of [`EventHandler`] that uses the actual event handling logic.
 pub struct DefaultEventHandler {
     moderation: Arc<Moderation>,
     ingestor: Arc<UserIngestor>,
@@ -69,7 +63,7 @@ impl DefaultEventHandler {
 }
 
 #[async_trait::async_trait]
-impl EventHandler for DefaultEventHandler {
+impl EventHandler<Event, EventProcessorError> for DefaultEventHandler {
     async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
         match event.event_type {
             EventType::Put => {

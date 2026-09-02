@@ -60,7 +60,7 @@ async fn test_maybe_ingest_user_ingests_when_not_blacklisted() -> Result<()> {
     test.register_user_in_hs(&user_kp, &hs_pk).await?;
 
     let user_pubky_id = PubkyId::from(user_kp.public_key());
-    UserIngestor::default()
+    UserIngestor::new([])
         .maybe_ingest_user(&user_pubky_id)
         .await?;
 

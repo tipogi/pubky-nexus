@@ -19,7 +19,7 @@ pub fn random_pubky_id() -> PubkyId {
     PubkyId::from(random_pk())
 }
 
-/// Default user ingestor for tests: empty HS blacklist (ingest everything).
+/// Builds a user ingestor for tests with an empty HS blacklist.
 pub fn default_ingestor_tests() -> Arc<UserIngestor> {
-    Arc::new(UserIngestor::default())
+    Arc::new(UserIngestor::new([]))
 }

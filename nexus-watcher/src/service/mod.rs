@@ -7,8 +7,13 @@ pub mod user_hs_resolver;
 
 /// Module exports
 pub use constants::{PROCESSING_TIMEOUT_SECS, WATCHER_CONFIG_FILE_NAME};
-pub use indexer::{HsEventProcessor, KeyBasedEventProcessor, RunError, TEventProcessor};
-pub use runner::{HsEventProcessorRunner, KeyBasedEventProcessorRunner, TEventProcessorRunner};
+pub use indexer::{
+    DynEventProcessor, HsEventProcessor, KeyBasedEventProcessor, RunError, TEventProcessor,
+};
+pub use runner::{
+    DynEventProcessorRunner, HsEventProcessorRunner, KeyBasedEventProcessorRunner,
+    TEventProcessorRunner,
+};
 pub(crate) use task_runner::{run_periodic_tasks, PeriodicTask};
 pub use user_hs_resolver::UserHsResolverRunner;
 
@@ -101,7 +106,6 @@ impl NexusWatcher {
         ));
         let user_hs_resolver_runner = Arc::new(UserHsResolverRunner::from_config(
             &config,
-            Box::new(user_hs_resolver::PubkyConnectorResolver),
             shutdown_rx.clone(),
         ));
 

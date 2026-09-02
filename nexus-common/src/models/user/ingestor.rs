@@ -1,6 +1,6 @@
 use pubky_app_specs::{ParsedUri, PubkyId};
+use pubky_watcher::PubkyConnector;
 
-use crate::db::PubkyConnector;
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::homeserver::HsBlacklist;
 use crate::models::traits::Collection;

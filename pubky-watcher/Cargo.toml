@@ -6,3 +6,18 @@ description = "Poll events from pubky homeservers"
 homepage = "https://github.com/pubky/pubky-nexus"
 repository = "https://github.com/pubky/pubky-nexus"
 license = "MIT"
+
+[dependencies]
+async-trait = "0.1"
+pubky = { workspace = true }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "poll_homeserver"
+path = "examples/poll_homeserver.rs"

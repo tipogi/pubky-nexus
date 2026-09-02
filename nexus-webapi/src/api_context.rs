@@ -4,6 +4,7 @@ use std::sync::Arc;
 use nexus_common::models::user::UserIngestor;
 use nexus_common::{file::default_config_dir_path, types::DynError, ApiConfig, DaemonConfig};
 use pubky::pkarr::{self, Keypair};
+use pubky_watcher::PubkyConnector;
 
 #[derive(Debug, Clone)]
 pub struct ApiContext {
@@ -56,6 +57,8 @@ impl ApiContextBuilder {
             }
             Some(ac) => ac.clone(),
         };
+
+        PubkyConnector::initialise(api_config.stack.net.pubky_client_testnet_host()).await?;
 
         let ingestor = UserIngestor::from_config(&api_config.stack);
 

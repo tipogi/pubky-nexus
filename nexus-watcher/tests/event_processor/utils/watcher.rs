@@ -2,7 +2,6 @@ use crate::event_processor::utils::default_moderation_tests;
 use anyhow::{anyhow, Error, Result};
 use base32::{encode, Alphabet};
 use chrono::Utc;
-use nexus_common::db::PubkyConnector;
 use nexus_common::models::file::FileDetails;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::traits::Collection;
@@ -13,7 +12,7 @@ use nexus_watcher::events::retry::event::RetryEvent;
 use nexus_watcher::events::retry::{
     IndexKey, InitialBackoff, RedisRetryStore, RetryScheduler, RetryStore,
 };
-use nexus_watcher::events::{DefaultEventHandler, EventHandler};
+use nexus_watcher::events::{DefaultEventHandler, DynEventHandler};
 use nexus_watcher::events::{Event, ParseResult};
 use nexus_watcher::service::HsEventProcessorRunner;
 use nexus_watcher::service::TEventProcessorRunner;
@@ -27,6 +26,7 @@ use pubky_app_specs::{
     PubkyAppFile, PubkyAppFollow, PubkyAppPost, PubkyAppUser, PubkyId,
 };
 use pubky_testnet::Testnet;
+use pubky_watcher::PubkyConnector;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -86,7 +86,7 @@ impl WatcherTest {
         files_path: PathBuf,
         max_file_size: u64,
     ) -> HsEventProcessorRunner {
-        let event_handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
+        let event_handler: Arc<DynEventHandler> = Arc::new(DefaultEventHandler::new(
             default_moderation_tests(),
             default_ingestor_tests(),
             max_file_size,
@@ -375,7 +375,7 @@ impl WatcherTest {
 /// Throws an error if event parsing fails
 pub async fn retrieve_and_handle_event_line(
     event_line: &str,
-    event_handler: Arc<dyn EventHandler>,
+    event_handler: Arc<DynEventHandler>,
 ) -> Result<(), EventProcessorError> {
     match Event::parse_event(event_line)? {
         ParseResult::Parsed(event) => event_handler.handle(&event).await,

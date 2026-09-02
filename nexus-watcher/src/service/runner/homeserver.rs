@@ -1,12 +1,14 @@
 use super::TEventProcessorRunner;
+use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
-use crate::events::{DefaultEventHandler, EventHandler};
-use crate::service::indexer::{HsEventProcessor, TEventProcessor};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event};
+use crate::service::indexer::{DynEventProcessor, HsEventProcessor};
 use crate::service::stats::{ProcessedStats, RunAllProcessorsStats};
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use pubky_app_specs::PubkyId;
+use pubky_watcher::EventRetryScheduler;
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 use tracing::debug;
@@ -15,14 +17,14 @@ pub struct HsEventProcessorRunner {
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
 
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<DynEventHandler>,
     pub shutdown_rx: Receiver<bool>,
 
     /// See [WatcherConfig::homeserver]
     pub primary_homeserver: PubkyId,
 
     /// Scheduler shared with every processor this runner builds
-    pub retry_scheduler: Arc<RetryScheduler>,
+    pub retry_scheduler: Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>,
 }
 
 impl HsEventProcessorRunner {
@@ -43,13 +45,13 @@ impl HsEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner for HsEventProcessorRunner {
+impl TEventProcessorRunner<Event, EventProcessorError> for HsEventProcessorRunner {
     fn shutdown_rx(&self) -> Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
     /// Creates and returns a new event processor instance for the specified homeserver
-    async fn build(&self, homeserver_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
+    async fn build(&self, homeserver_id: &str) -> Result<Arc<DynEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(homeserver_id)?;
         let homeserver = Homeserver::get_by_id(homeserver_id)
             .await?
