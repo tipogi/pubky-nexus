@@ -1,6 +1,8 @@
 //! Five `/events/` polls through [`TEventProcessorRunner`] and [`TEventProcessor`].
 //!
-//! Polls the public staging homeserver. From the workspace root:
+//! Polls the public staging homeserver. Uses the crate's default
+//! [`HomeserverEvent`] parser; you still wire fetch + cursor yourself.
+//! From the workspace root:
 //!
 //! ```bash
 //! cargo run -p pubky-watcher --example poll_homeserver
@@ -14,8 +16,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pubky::Method;
 use pubky_watcher::{
-    EventBatch, EventHandler, LineParseOutcome, ParseFromLine, PubkyConnector, TEventProcessor,
-    TEventProcessorRunner,
+    EventBatch, EventHandler, EventMethod, HomeserverEvent, PubkyConnector, TEventProcessor,
+    TEventProcessorRunner, WatcherError,
 };
 use tokio::sync::{watch, Mutex};
 
@@ -23,45 +25,18 @@ const STAGING_HOMESERVER: &str = "ufibwbmed6jeq9k4p583go95wofakh9fwpp4k734trq79p
 const POLL_TICKS: usize = 5;
 const EVENTS_PER_TICK: usize = 8;
 
-type PollError = Box<dyn std::error::Error + Send + Sync>;
-
-#[derive(Debug)]
-struct HomeserverEvent {
-    method: String,
-    uri: String,
-}
-
-impl ParseFromLine for HomeserverEvent {
-    type Error = PollError;
-
-    fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error> {
-        let line = line.trim();
-        if line.is_empty() {
-            return Ok(LineParseOutcome::Skipped);
-        }
-        let Some((method, uri)) = line.split_once(' ') else {
-            return Ok(LineParseOutcome::Unrecognized {
-                reason: format!("expected `<TYPE> <uri>`, got: {line}"),
-            });
-        };
-        Ok(LineParseOutcome::Parsed(HomeserverEvent {
-            method: method.to_string(),
-            uri: uri.to_string(),
-        }))
-    }
-}
-
-type DynEventHandler = dyn EventHandler<HomeserverEvent, PollError> + Send + Sync;
-type DynEventProcessor = dyn TEventProcessor<HomeserverEvent, PollError> + Send + Sync;
+type DynEventHandler = dyn EventHandler<HomeserverEvent, WatcherError> + Send + Sync;
+type DynEventProcessor =
+    dyn TEventProcessor<HomeserverEvent, WatcherError, Output = ()> + Send + Sync;
 
 struct ResourcePrintingHandler;
 
 #[async_trait]
-impl EventHandler<HomeserverEvent, PollError> for ResourcePrintingHandler {
-    async fn handle(&self, event: &HomeserverEvent) -> Result<(), PollError> {
+impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
+    async fn handle(&self, event: &HomeserverEvent) -> Result<(), WatcherError> {
         println!("{} {}", event.method, event.uri);
 
-        if event.method != "PUT" {
+        if event.method != EventMethod::Put {
             return Ok(());
         }
 
@@ -94,7 +69,9 @@ struct HomeserverPollProcessor {
 }
 
 #[async_trait]
-impl TEventProcessor<HomeserverEvent, PollError> for HomeserverPollProcessor {
+impl TEventProcessor<HomeserverEvent, WatcherError> for HomeserverPollProcessor {
+    type Output = ();
+
     fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
@@ -103,7 +80,7 @@ impl TEventProcessor<HomeserverEvent, PollError> for HomeserverPollProcessor {
         "poll_homeserver".to_string()
     }
 
-    async fn run_internal(self: Arc<Self>) -> Result<(), PollError> {
+    async fn run_internal(self: Arc<Self>) -> Result<(), WatcherError> {
         let cursor = self.cursor.lock().await.clone();
         let body = self
             .poll_events(&cursor)
@@ -119,10 +96,9 @@ impl TEventProcessor<HomeserverEvent, PollError> for HomeserverPollProcessor {
 }
 
 impl HomeserverPollProcessor {
-    async fn poll_events(&self, cursor: &str) -> Result<String, PollError> {
-        let url = format!(
-            "https://{STAGING_HOMESERVER}/events/?cursor={cursor}&limit={EVENTS_PER_TICK}"
-        );
+    async fn poll_events(&self, cursor: &str) -> Result<String, WatcherError> {
+        let url =
+            format!("https://{STAGING_HOMESERVER}/events/?cursor={cursor}&limit={EVENTS_PER_TICK}");
         println!("GET {url}");
         let body = PubkyConnector::get()?
             .client()
@@ -136,7 +112,7 @@ impl HomeserverPollProcessor {
         Ok(body)
     }
 
-    async fn process_event_body(&self, body: &str) -> Result<Option<String>, PollError> {
+    async fn process_event_body(&self, body: &str) -> Result<Option<String>, WatcherError> {
         let batch = EventBatch::from_body(body);
 
         if !batch.has_events() {
@@ -164,28 +140,25 @@ struct StagingPollRunner {
 }
 
 #[async_trait]
-impl TEventProcessorRunner<HomeserverEvent, PollError> for StagingPollRunner {
+impl TEventProcessorRunner<HomeserverEvent, WatcherError> for StagingPollRunner {
     fn shutdown_rx(&self) -> watch::Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
-    async fn build(
-        &self,
-        _hs_id: &str,
-    ) -> Result<Arc<DynEventProcessor>, PollError> {
+    async fn build(&self, _hs_id: &str) -> Result<Arc<DynEventProcessor>, WatcherError> {
         Ok(Arc::new(HomeserverPollProcessor {
             event_handler: self.event_handler.clone(),
             cursor: self.cursor.clone(),
         }))
     }
 
-    async fn pre_run(&self) -> Result<Vec<String>, PollError> {
+    async fn pre_run(&self) -> Result<Vec<String>, WatcherError> {
         Ok(vec![STAGING_HOMESERVER.to_string()])
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), PollError> {
+async fn main() -> Result<(), WatcherError> {
     PubkyConnector::initialise(None).await?;
 
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);

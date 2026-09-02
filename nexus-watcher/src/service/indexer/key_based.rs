@@ -128,6 +128,8 @@ pub struct KeyBasedEventProcessor {
 
 #[async_trait::async_trait]
 impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
+    type Output = ();
+
     fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }

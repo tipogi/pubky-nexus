@@ -1,6 +1,5 @@
-use futures::StreamExt;
-
 use crate::EventProcessorError;
+pub(crate) use pubky_watcher::read_stream_capped;
 
 /// Max bytes to read from an error response body.
 pub(crate) const MAX_ERROR_BODY: usize = 4 * 1024;
@@ -19,31 +18,6 @@ pub(crate) fn format_error_body(bytes: &[u8], max: usize) -> String {
     } else {
         String::from_utf8_lossy(bytes).into_owned()
     }
-}
-
-/// Reads chunks from a byte stream, buffering at most `max + 1` bytes.
-/// Returns `Ok((bytes, exceeded))` on completion, `Err(e)` on stream failure.
-pub(crate) async fn read_stream_capped<S, E>(
-    mut stream: S,
-    max: usize,
-) -> Result<(Vec<u8>, bool), E>
-where
-    S: futures::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
-{
-    let cap = max + 1;
-    let mut buf = Vec::new();
-    let mut total = 0usize;
-
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        total += bytes.len();
-        buf.extend_from_slice(&bytes[..bytes.len().min(cap.saturating_sub(buf.len()))]);
-        if total >= cap {
-            return Ok((buf, true));
-        }
-    }
-
-    Ok((buf, false))
 }
 
 /// Fetches the body of a `reqwest::Response`, enforcing a size limit.
@@ -79,76 +53,6 @@ pub(crate) async fn fetch_capped(
 mod tests {
     use super::*;
     use futures::stream;
-
-    /// Trivial error type so we can construct a failing stream without reqwest internals.
-    #[derive(Debug)]
-    struct TestErr;
-
-    fn ok_stream(
-        data: Vec<u8>,
-    ) -> impl futures::Stream<Item = Result<bytes::Bytes, TestErr>> + Unpin {
-        stream::iter(vec![Ok(bytes::Bytes::from(data))])
-    }
-
-    fn err_stream() -> impl futures::Stream<Item = Result<bytes::Bytes, TestErr>> + Unpin {
-        stream::iter(vec![Err(TestErr)])
-    }
-
-    fn partial_then_err(
-        data: Vec<u8>,
-    ) -> impl futures::Stream<Item = Result<bytes::Bytes, TestErr>> + Unpin {
-        stream::iter(vec![Ok(bytes::Bytes::from(data)), Err(TestErr)])
-    }
-
-    #[tokio::test]
-    async fn read_stream_capped_empty() {
-        let (buf, exceeded) = read_stream_capped(ok_stream(vec![]), 100).await.unwrap();
-        assert!(buf.is_empty());
-        assert!(!exceeded);
-    }
-
-    #[tokio::test]
-    async fn read_stream_capped_exact() {
-        let (buf, exceeded) = read_stream_capped(ok_stream(vec![1; 100]), 100)
-            .await
-            .unwrap();
-        assert_eq!(buf.len(), 100);
-        assert!(!exceeded);
-    }
-
-    #[tokio::test]
-    async fn read_stream_capped_over() {
-        let (buf, exceeded) = read_stream_capped(ok_stream(vec![1; 101]), 100)
-            .await
-            .unwrap();
-        assert_eq!(buf.len(), 101);
-        assert!(exceeded);
-    }
-
-    #[tokio::test]
-    async fn read_stream_capped_single_large_chunk() {
-        // A chunk much larger than max must not bloat buf beyond cap (max + 1).
-        let (buf, exceeded) = read_stream_capped(ok_stream(vec![1; 1_000_000]), 100)
-            .await
-            .unwrap();
-        assert_eq!(buf.len(), 101);
-        assert!(exceeded);
-    }
-
-    #[tokio::test]
-    async fn read_stream_capped_propagates_error() {
-        let result: Result<(Vec<u8>, bool), TestErr> = read_stream_capped(err_stream(), 100).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn read_stream_capped_propagates_error_after_data() {
-        let result: Result<(Vec<u8>, bool), TestErr> =
-            read_stream_capped(partial_then_err(vec![1; 50]), 100).await;
-        assert!(result.is_err());
-    }
-
-    // --- fetch_capped tests ---
 
     fn no_cl_oversized(total: usize) -> reqwest::Response {
         let body = reqwest::Body::wrap_stream(stream::iter(vec![Ok::<_, std::io::Error>(

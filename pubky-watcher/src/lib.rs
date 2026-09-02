@@ -7,10 +7,28 @@
 //! indexers, sync pipelines, or other event-driven applications on top of
 //! Pubky homeservers.
 //!
-//! Connect with [`PubkyConnector`] (the [pubky](https://crates.io/crates/pubky) SDK
-//! client), split a `GET /events/` body with [`EventBatch`], implement the traits,
-//! then run a [`TEventProcessor`] (one tick) or a [`TEventProcessorRunner`]
-//! (many homeservers).
+//! ## Quick path
+//!
+//! Implement [`EventHandler`] for [`HomeserverEvent`], then poll one homeserver:
+//!
+//! ```ignore
+//! Watcher::homeserver(homeserver)
+//!     .handler(MyHandler)
+//!     .build(shutdown_rx)?
+//!     .run(EventCursor::new(cursor))
+//!     .await?
+//! ```
+//!
+//! The returned [`WatchOutcome`] contains the cursor the application may
+//! persist. Use [`Watcher::key_stream`] to poll multiple user streams on that
+//! homeserver.
+//!
+//! ## Advanced path
+//!
+//! Connect with [`PubkyConnector`], split a `GET /events/` body with
+//! [`EventBatch`], implement the traits, then run a [`TEventProcessor`] (one
+//! tick) or a [`TEventProcessorRunner`] (many homeservers). Nexus uses this
+//! path for custom cursors, backoff, and retries.
 //!
 //! Domain-specific indexing — such as Nexus graph and Redis rules — lives in
 //! higher-level crates like `nexus-watcher`.
@@ -20,9 +38,10 @@ mod events;
 mod processor;
 mod runner;
 mod traits;
+mod watcher;
 
 pub use client::{ClientError, ClientResult, PubkyConnector};
-pub use events::{EventBatch, CURSOR_PREFIX};
+pub use events::{read_stream_capped, EventBatch, EventMethod, HomeserverEvent, CURSOR_PREFIX};
 pub use processor::{dispatch_retryable_error, RunError, TEventProcessor, PROCESSING_TIMEOUT_SECS};
 pub use runner::{
     status_from_run_result, ProcessedStats, ProcessorRunStats, ProcessorRunStatus,
@@ -30,4 +49,8 @@ pub use runner::{
 };
 pub use traits::{
     EventHandler, EventRetryScheduler, LineParseOutcome, ParseFromLine, RetryableError,
+};
+pub use watcher::{
+    HomeserverWatcher, HomeserverWatcherBuilder, KeyStreamOutcome, KeyStreamWatcher,
+    KeyStreamWatcherBuilder, Missing, WatchOutcome, Watcher, WatcherError,
 };

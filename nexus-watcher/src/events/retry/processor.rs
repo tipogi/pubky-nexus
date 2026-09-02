@@ -29,6 +29,8 @@ pub struct RetryProcessor {
 
 #[async_trait::async_trait]
 impl TEventProcessor<Event, EventProcessorError> for RetryProcessor {
+    type Output = ();
+
     fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
