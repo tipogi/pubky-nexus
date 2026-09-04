@@ -17,15 +17,19 @@
 use async_trait::async_trait;
 use pubky::{EventCursor, PublicKey};
 use pubky_watcher::{
-    EventHandler, EventMethod, HomeserverEvent, PubkyConnector, Watcher, WatcherError,
+    read_stream_capped, EventHandler, EventMethod, HomeserverEvent, ResourceReader, Watcher,
+    WatcherClient, WatcherError,
 };
 use tokio::sync::watch;
 
 const STAGING_HOMESERVER: &str = "ufibwbmed6jeq9k4p583go95wofakh9fwpp4k734trq79pd9u1uy";
 const POLL_TICKS: usize = 5;
 const EVENTS_PER_TICK: u16 = 8;
+const MAX_RESOURCE_BODY: usize = 2 * 1024 * 1024;
 
-struct ResourcePrintingHandler;
+struct ResourcePrintingHandler {
+    client: WatcherClient,
+}
 
 #[async_trait]
 impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
@@ -36,15 +40,11 @@ impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
             return Ok(());
         }
 
-        let response = PubkyConnector::get()?
-            .public_storage()
-            .get(&event.uri)
-            .await?;
-        let status = response.status();
+        let response = self.client.get_resource(&event.uri).await?;
+        let status = response.status;
         let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
+            .content_type
+            .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
 
@@ -53,7 +53,12 @@ impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
             return Ok(());
         }
 
-        let body = response.text().await?;
+        let (body, exceeded) = read_stream_capped(response.body, MAX_RESOURCE_BODY).await?;
+        if exceeded {
+            println!("{status} resource exceeded {MAX_RESOURCE_BODY} bytes");
+            return Ok(());
+        }
+        let body = String::from_utf8_lossy(&body);
         println!("{status} {body}");
         Ok(())
     }
@@ -61,13 +66,12 @@ impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), WatcherError> {
-    PubkyConnector::initialise(None).await?;
-
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let homeserver = STAGING_HOMESERVER.parse::<PublicKey>()?;
+    let client = WatcherClient::mainnet()?;
 
-    let watcher = Watcher::homeserver(homeserver)
-        .handler(ResourcePrintingHandler)
+    let watcher = Watcher::homeserver(client.clone(), homeserver)
+        .handler(ResourcePrintingHandler { client })
         .events_limit(EVENTS_PER_TICK)
         .build(shutdown_rx)?;
 

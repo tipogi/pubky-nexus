@@ -11,7 +11,7 @@ use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use pubky_app_specs::PubkyId;
-use pubky_watcher::EventRetryScheduler;
+use pubky_watcher::{EventRetryScheduler, WatcherClient};
 use std::sync::Arc;
 use tokio::sync::{watch::Receiver, Mutex};
 use tracing::{debug, info, warn};
@@ -46,12 +46,16 @@ pub struct KeyBasedEventProcessorRunner {
 
 impl KeyBasedEventProcessorRunner {
     /// Creates a new instance from the provided configuration
-    pub fn from_config(config: &WatcherConfig, shutdown_rx: Receiver<bool>) -> Self {
+    pub fn from_config(
+        config: &WatcherConfig,
+        shutdown_rx: Receiver<bool>,
+        client: Arc<WatcherClient>,
+    ) -> Self {
         Self {
             limit: config.key_based_events_limit,
             monitored_hs_limit: config.monitored_homeservers_limit,
-            event_handler: Arc::new(DefaultEventHandler::from_config(config)),
-            event_source: Arc::new(PubkyKeyBasedEventSource),
+            event_handler: Arc::new(DefaultEventHandler::from_config(config, client.clone())),
+            event_source: Arc::new(PubkyKeyBasedEventSource::new(client)),
             shutdown_rx,
             primary_homeserver: config.homeserver.clone(),
             hs_blacklist: HsBlacklist::from_config(&config.stack),

@@ -12,7 +12,7 @@
 //! Implement [`EventHandler`] for [`HomeserverEvent`], then poll one homeserver:
 //!
 //! ```ignore
-//! Watcher::homeserver(homeserver)
+//! Watcher::homeserver(WatcherClient::mainnet()?, homeserver)
 //!     .handler(MyHandler)
 //!     .build(shutdown_rx)?
 //!     .run(EventCursor::new(cursor))
@@ -25,10 +25,10 @@
 //!
 //! ## Advanced path
 //!
-//! Connect with [`PubkyConnector`], split a `GET /events/` body with
-//! [`EventBatch`], implement the traits, then run a [`TEventProcessor`] (one
-//! tick) or a [`TEventProcessorRunner`] (many homeservers). Nexus uses this
-//! path for custom cursors, backoff, and retries.
+//! Inject a [`WatcherClient`] capability, split a `GET /events/` body with
+//! [`EventBatch`], implement the processing traits, then run a
+//! [`TEventProcessor`] (one tick) or a [`TEventProcessorRunner`] (many
+//! homeservers). Nexus uses this path for custom cursors, backoff, and retries.
 //!
 //! Domain-specific indexing — such as Nexus graph and Redis rules — lives in
 //! higher-level crates like `nexus-watcher`.
@@ -40,7 +40,10 @@ mod runner;
 mod traits;
 mod watcher;
 
-pub use client::{ClientError, ClientResult, PubkyConnector};
+pub use client::{
+    ClientError, ClientResponse, ClientResult, HomeserverEventSource, HomeserverResolver,
+    KeyEventSource, KeyEventStream, ResourceReader, ResponseBody, WatcherClient,
+};
 pub use events::{read_stream_capped, EventBatch, EventMethod, HomeserverEvent, CURSOR_PREFIX};
 pub use processor::{dispatch_retryable_error, RunError, TEventProcessor, PROCESSING_TIMEOUT_SECS};
 pub use runner::{

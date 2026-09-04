@@ -7,7 +7,7 @@ use tracing::debug;
 
 use crate::processor::TEventProcessor;
 use crate::traits::EventHandler;
-use crate::PubkyConnector;
+use crate::KeyEventSource;
 
 use super::{
     invalid_data, invalid_input, run_processor, validate_limit, DynHandler, Missing, WatchOutcome,
@@ -21,16 +21,25 @@ pub struct KeyStreamWatcherBuilder<H> {
     handler: H,
     events_limit: u16,
     path: String,
+    event_source: Arc<dyn KeyEventSource>,
 }
 
 impl KeyStreamWatcherBuilder<Missing> {
-    pub(super) fn new(homeserver: PublicKey, users: Vec<(PublicKey, EventCursor)>) -> Self {
+    pub(super) fn new<C>(
+        client: C,
+        homeserver: PublicKey,
+        users: Vec<(PublicKey, EventCursor)>,
+    ) -> Self
+    where
+        C: KeyEventSource,
+    {
         Self {
             homeserver,
             users,
             handler: Missing,
             events_limit: DEFAULT_EVENTS_LIMIT,
             path: "/pub/".to_string(),
+            event_source: Arc::new(client),
         }
     }
 }
@@ -59,6 +68,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
             handler,
             events_limit: self.events_limit,
             path: self.path,
+            event_source: self.event_source,
         }
     }
 }
@@ -80,6 +90,7 @@ where
                 handler: Arc::new(self.handler),
                 events_limit: self.events_limit,
                 path: self.path,
+                event_source: self.event_source,
                 shutdown_rx,
             }),
         })
@@ -92,6 +103,7 @@ struct KeyStreamConfig {
     handler: Arc<DynHandler<Event>>,
     events_limit: u16,
     path: String,
+    event_source: Arc<dyn KeyEventSource>,
     shutdown_rx: Receiver<bool>,
 }
 
@@ -205,12 +217,16 @@ impl KeyStreamEventProcessor {
             path = %self.config.path,
             "Polling key event stream"
         );
-        let mut stream = PubkyConnector::get()?
-            .event_stream_for(&self.config.homeserver)
-            .add_users([(user, Some(cursor))])?
-            .limit(self.config.events_limit)
-            .path(&self.config.path)
-            .subscribe()
+        let mut stream = self
+            .config
+            .event_source
+            .key_event_stream(
+                &self.config.homeserver,
+                user,
+                cursor,
+                self.config.events_limit,
+                &self.config.path,
+            )
             .await?;
 
         let mut events = Vec::with_capacity(self.config.events_limit as usize);
@@ -300,4 +316,57 @@ fn validate_stream_events(
         floor = event.cursor.id();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use futures_util::stream;
+    use pubky::{Event, EventCursor, Keypair, PublicKey};
+
+    use crate::{
+        ClientResult, EventHandler, KeyEventSource, KeyEventStream, Watcher, WatcherError,
+    };
+
+    struct EmptySource;
+
+    #[async_trait]
+    impl KeyEventSource for EmptySource {
+        async fn key_event_stream(
+            &self,
+            _homeserver: &PublicKey,
+            _user: &PublicKey,
+            _cursor: EventCursor,
+            _limit: u16,
+            _path: &str,
+        ) -> ClientResult<KeyEventStream> {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    struct IgnoreEvents;
+
+    #[async_trait]
+    impl EventHandler<Event, WatcherError> for IgnoreEvents {
+        async fn handle(&self, _event: &Event) -> Result<(), WatcherError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_source_does_not_require_global_initialization() {
+        let homeserver = Keypair::random().public_key();
+        let user = Keypair::random().public_key();
+        let users = vec![(user.clone(), EventCursor::new(9))];
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let watcher = Watcher::key_stream(EmptySource, homeserver, users)
+            .handler(IgnoreEvents)
+            .build(shutdown_rx)
+            .unwrap();
+
+        let outcome = watcher.run().await.unwrap();
+        assert_eq!(outcome.cursors, vec![(user, EventCursor::new(9))]);
+        assert!(outcome.completed);
+    }
 }

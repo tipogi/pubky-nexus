@@ -3143,6 +3143,7 @@ dependencies = [
  "nexus-webapi",
  "opentelemetry 0.32.0",
  "opentelemetry_sdk 0.32.1",
+ "pubky-watcher",
  "redis",
  "serde",
  "tempfile",

@@ -14,22 +14,26 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pubky::Method;
+use pubky::{EventCursor, PublicKey};
 use pubky_watcher::{
-    EventBatch, EventHandler, EventMethod, HomeserverEvent, PubkyConnector, TEventProcessor,
-    TEventProcessorRunner, WatcherError,
+    read_stream_capped, EventBatch, EventHandler, EventMethod, HomeserverEvent,
+    HomeserverEventSource, ResourceReader, TEventProcessor, TEventProcessorRunner, WatcherClient,
+    WatcherError,
 };
 use tokio::sync::{watch, Mutex};
 
 const STAGING_HOMESERVER: &str = "ufibwbmed6jeq9k4p583go95wofakh9fwpp4k734trq79pd9u1uy";
 const POLL_TICKS: usize = 5;
-const EVENTS_PER_TICK: usize = 8;
+const EVENTS_PER_TICK: u16 = 8;
+const MAX_BODY: usize = 2 * 1024 * 1024;
 
 type DynEventHandler = dyn EventHandler<HomeserverEvent, WatcherError> + Send + Sync;
 type DynEventProcessor =
     dyn TEventProcessor<HomeserverEvent, WatcherError, Output = ()> + Send + Sync;
 
-struct ResourcePrintingHandler;
+struct ResourcePrintingHandler {
+    client: WatcherClient,
+}
 
 #[async_trait]
 impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
@@ -40,15 +44,11 @@ impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
             return Ok(());
         }
 
-        let response = PubkyConnector::get()?
-            .public_storage()
-            .get(&event.uri)
-            .await?;
-        let status = response.status();
+        let response = self.client.get_resource(&event.uri).await?;
+        let status = response.status;
         let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
+            .content_type
+            .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
 
@@ -57,13 +57,19 @@ impl EventHandler<HomeserverEvent, WatcherError> for ResourcePrintingHandler {
             return Ok(());
         }
 
-        let body = response.text().await?;
+        let (body, exceeded) = read_stream_capped(response.body, MAX_BODY).await?;
+        if exceeded {
+            println!("{status} resource exceeded {MAX_BODY} bytes");
+            return Ok(());
+        }
+        let body = String::from_utf8_lossy(&body);
         println!("{status} {body}");
         Ok(())
     }
 }
 
 struct HomeserverPollProcessor {
+    event_source: Arc<dyn HomeserverEventSource>,
     event_handler: Arc<DynEventHandler>,
     cursor: Arc<Mutex<String>>,
 }
@@ -97,17 +103,25 @@ impl TEventProcessor<HomeserverEvent, WatcherError> for HomeserverPollProcessor 
 
 impl HomeserverPollProcessor {
     async fn poll_events(&self, cursor: &str) -> Result<String, WatcherError> {
-        let url =
-            format!("https://{STAGING_HOMESERVER}/events/?cursor={cursor}&limit={EVENTS_PER_TICK}");
+        let homeserver = STAGING_HOMESERVER.parse::<PublicKey>()?;
+        let cursor = EventCursor::new(cursor.parse()?);
+        let url = format!(
+            "https://{STAGING_HOMESERVER}/events/?cursor={}&limit={EVENTS_PER_TICK}",
+            cursor.id()
+        );
         println!("GET {url}");
-        let body = PubkyConnector::get()?
-            .client()
-            .request(Method::GET, &url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
+        let response = self
+            .event_source
+            .fetch_homeserver_events(&homeserver, cursor, EVENTS_PER_TICK)
             .await?;
+        if !response.status.is_success() {
+            return Err(format!("GET failed with {}", response.status).into());
+        }
+        let (body, exceeded) = read_stream_capped(response.body, MAX_BODY).await?;
+        if exceeded {
+            return Err(format!("response exceeded {MAX_BODY} bytes").into());
+        }
+        let body = String::from_utf8(body)?;
 
         Ok(body)
     }
@@ -134,6 +148,7 @@ impl HomeserverPollProcessor {
 }
 
 struct StagingPollRunner {
+    event_source: Arc<dyn HomeserverEventSource>,
     shutdown_rx: watch::Receiver<bool>,
     cursor: Arc<Mutex<String>>,
     event_handler: Arc<DynEventHandler>,
@@ -147,6 +162,7 @@ impl TEventProcessorRunner<HomeserverEvent, WatcherError> for StagingPollRunner 
 
     async fn build(&self, _hs_id: &str) -> Result<Arc<DynEventProcessor>, WatcherError> {
         Ok(Arc::new(HomeserverPollProcessor {
+            event_source: self.event_source.clone(),
             event_handler: self.event_handler.clone(),
             cursor: self.cursor.clone(),
         }))
@@ -159,13 +175,13 @@ impl TEventProcessorRunner<HomeserverEvent, WatcherError> for StagingPollRunner 
 
 #[tokio::main]
 async fn main() -> Result<(), WatcherError> {
-    PubkyConnector::initialise(None).await?;
-
+    let client = WatcherClient::mainnet()?;
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let runner = StagingPollRunner {
+        event_source: Arc::new(client.clone()),
         shutdown_rx,
         cursor: Arc::new(Mutex::new("0".to_string())),
-        event_handler: Arc::new(ResourcePrintingHandler),
+        event_handler: Arc::new(ResourcePrintingHandler { client }),
     };
 
     for tick in 1..=POLL_TICKS {

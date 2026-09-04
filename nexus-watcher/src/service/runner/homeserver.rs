@@ -8,7 +8,7 @@ use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use pubky_app_specs::PubkyId;
-use pubky_watcher::EventRetryScheduler;
+use pubky_watcher::{EventRetryScheduler, HomeserverEventSource, WatcherClient};
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 use tracing::debug;
@@ -18,6 +18,7 @@ pub struct HsEventProcessorRunner {
     pub limit: u16,
 
     pub event_handler: Arc<DynEventHandler>,
+    pub event_source: Arc<dyn HomeserverEventSource>,
     pub shutdown_rx: Receiver<bool>,
 
     /// See [WatcherConfig::homeserver]
@@ -29,10 +30,15 @@ pub struct HsEventProcessorRunner {
 
 impl HsEventProcessorRunner {
     /// Creates a new instance from the provided configuration
-    pub fn from_config(config: &WatcherConfig, shutdown_rx: Receiver<bool>) -> Self {
+    pub fn from_config(
+        config: &WatcherConfig,
+        shutdown_rx: Receiver<bool>,
+        client: Arc<WatcherClient>,
+    ) -> Self {
         Self {
             limit: config.events_limit,
-            event_handler: Arc::new(DefaultEventHandler::from_config(config)),
+            event_handler: Arc::new(DefaultEventHandler::from_config(config, client.clone())),
+            event_source: client,
             shutdown_rx,
             primary_homeserver: config.homeserver.clone(),
             retry_scheduler: Arc::new(RetryScheduler::from_config(config)),
@@ -61,6 +67,7 @@ impl TEventProcessorRunner<Event, EventProcessorError> for HsEventProcessorRunne
             homeserver,
             limit: self.limit,
             event_handler: self.event_handler.clone(),
+            event_source: self.event_source.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             retry_scheduler: self.retry_scheduler.clone(),
             hs_mapping_cache: Default::default(),

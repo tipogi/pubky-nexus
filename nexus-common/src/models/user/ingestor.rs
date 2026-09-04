@@ -1,5 +1,6 @@
 use pubky_app_specs::{ParsedUri, PubkyId};
-use pubky_watcher::PubkyConnector;
+use pubky_watcher::HomeserverResolver;
+use std::sync::Arc;
 
 use crate::models::error::{ModelError, ModelResult};
 use crate::models::homeserver::HsBlacklist;
@@ -8,21 +9,38 @@ use crate::models::user::{set_user_homeserver, UserDetails, UserHsCursor};
 use crate::StackConfig;
 
 /// Ingests previously-unknown users unless their HS is blacklisted.
-#[derive(Debug, Default, Clone)]
+#[derive(Clone)]
 pub struct UserIngestor {
     hs_blacklist: HsBlacklist,
+    resolver: Arc<dyn HomeserverResolver>,
+}
+
+impl std::fmt::Debug for UserIngestor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserIngestor")
+            .field("hs_blacklist", &self.hs_blacklist)
+            .finish()
+    }
 }
 
 impl UserIngestor {
     /// Builds an ingestor enforcing the given HS blacklist.
-    pub fn new(external_hs_pk_blacklist: impl IntoIterator<Item = PubkyId>) -> Self {
+    pub fn new(
+        external_hs_pk_blacklist: impl IntoIterator<Item = PubkyId>,
+        resolver: Arc<dyn HomeserverResolver>,
+    ) -> Self {
         Self {
             hs_blacklist: HsBlacklist::new(external_hs_pk_blacklist),
+            resolver,
         }
     }
 
-    pub fn from_config(config: &StackConfig) -> Self {
-        Self::new(config.net.external_hs_pk_blacklist.iter().cloned())
+    pub fn from_config(config: &StackConfig, resolver: Arc<dyn HomeserverResolver>) -> Self {
+        Self::new(
+            config.net.external_hs_pk_blacklist.iter().cloned(),
+            resolver,
+        )
     }
 
     /// Ingests the author of a referenced post, if unknown.
@@ -53,9 +71,13 @@ impl UserIngestor {
             });
         }
 
-        let pubky = PubkyConnector::get().map_err(ModelError::from_generic)?;
+        let maybe_hs_pk = self
+            .resolver
+            .resolve_homeserver(&user_id.to_public_key())
+            .await
+            .map_err(ModelError::from_generic)?;
 
-        let Some(hs_pk) = pubky.get_homeserver_of(&user_id.to_public_key()).await else {
+        let Some(hs_pk) = maybe_hs_pk else {
             return Ok(None);
         };
 

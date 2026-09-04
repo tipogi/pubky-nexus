@@ -11,8 +11,8 @@ use opentelemetry::global;
 use opentelemetry::metrics::Histogram;
 use pubky::PublicKey;
 use pubky_app_specs::PubkyId;
-use pubky_watcher::PubkyConnector;
-use std::sync::LazyLock;
+use pubky_watcher::{HomeserverResolver, WatcherClient};
+use std::sync::{Arc, LazyLock};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
@@ -21,19 +21,25 @@ static HS_RESOLVER_METRICS: LazyLock<HsResolverMetrics> = LazyLock::new(HsResolv
 pub struct UserHsResolverRunner {
     ttl_ms: u64,
     shutdown_rx: Receiver<bool>,
+    resolver: Arc<dyn HomeserverResolver>,
 }
 
 impl UserHsResolverRunner {
-    pub fn from_config(config: &WatcherConfig, shutdown_rx: Receiver<bool>) -> Self {
+    pub fn from_config(
+        config: &WatcherConfig,
+        shutdown_rx: Receiver<bool>,
+        client: Arc<WatcherClient>,
+    ) -> Self {
         Self {
             ttl_ms: config.hs_resolver_ttl,
             shutdown_rx,
+            resolver: client,
         }
     }
 
     pub async fn run(&self) -> Result<(), DynError> {
         let mut shutdown_rx = self.shutdown_rx.clone();
-        run(self.ttl_ms, &mut shutdown_rx).await
+        run(self.ttl_ms, &mut shutdown_rx, self.resolver.as_ref()).await
     }
 }
 
@@ -44,7 +50,11 @@ impl UserHsResolverRunner {
 ///
 /// `shutdown_rx` cancels the in-flight resolution on shutdown; cancelled users
 /// get re-picked-up on the next run via TTL.
-pub async fn run(ttl_ms: u64, shutdown_rx: &mut Receiver<bool>) -> Result<(), DynError> {
+pub async fn run(
+    ttl_ms: u64,
+    shutdown_rx: &mut Receiver<bool>,
+    resolver: &dyn HomeserverResolver,
+) -> Result<(), DynError> {
     let user_ids = get_users_needing_resolution(ttl_ms).await?;
     let user_pks: Vec<PublicKey> = user_ids
         .iter()
@@ -89,7 +99,7 @@ pub async fn run(ttl_ms: u64, shutdown_rx: &mut Receiver<bool>) -> Result<(), Dy
                 info!(processed, total, "Shutdown detected; HS resolver stopping");
                 break;
             }
-            result = resolve_user(&user_pk) => {
+            result = resolve_user(&user_pk, resolver) => {
                 let user_id = user_pk.z32();
                 let user_hs_resolved = matches!(result, Ok(true));
                 if !user_hs_resolved {
@@ -160,9 +170,14 @@ async fn get_users_needing_resolution(ttl_ms: u64) -> GraphResult<Vec<String>> {
 /// Resolves a single user's HS and persists the HOSTED_BY relationship.
 ///
 /// Returns whether or not a PKDNS HS mapping was found when resolving the PKDNS record.
-async fn resolve_user(user_pk: &PublicKey) -> Result<bool, DynError> {
-    let pubky = PubkyConnector::get()?;
-    let maybe_resolved_hs_id = pubky.get_homeserver_of(user_pk).await.map(PubkyId::from);
+async fn resolve_user(
+    user_pk: &PublicKey,
+    resolver: &dyn HomeserverResolver,
+) -> Result<bool, DynError> {
+    let maybe_resolved_hs_id = resolver
+        .resolve_homeserver(user_pk)
+        .await?
+        .map(PubkyId::from);
     apply_resolved_homeserver(&user_pk.z32(), maybe_resolved_hs_id).await
 }
 

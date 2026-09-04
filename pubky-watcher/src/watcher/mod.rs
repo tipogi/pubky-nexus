@@ -13,6 +13,7 @@ use std::sync::Arc;
 use pubky::{EventCursor, PublicKey};
 
 use crate::processor::{RunError, TEventProcessor};
+use crate::{HomeserverEventSource, KeyEventSource};
 
 pub use homeserver::{HomeserverWatcher, HomeserverWatcherBuilder};
 pub use key_stream::{KeyStreamOutcome, KeyStreamWatcher, KeyStreamWatcherBuilder};
@@ -62,16 +63,23 @@ pub struct Watcher;
 
 impl Watcher {
     /// Configure one homeserver-wide `GET /events/` poller.
-    pub fn homeserver(homeserver: PublicKey) -> HomeserverWatcherBuilder<Missing> {
-        HomeserverWatcherBuilder::new(homeserver)
+    pub fn homeserver<C>(client: C, homeserver: PublicKey) -> HomeserverWatcherBuilder<Missing>
+    where
+        C: HomeserverEventSource,
+    {
+        HomeserverWatcherBuilder::new(client, homeserver)
     }
 
     /// Configure a multi-user `/events-stream` poller on one homeserver.
-    pub fn key_stream(
+    pub fn key_stream<C>(
+        client: C,
         homeserver: PublicKey,
         users: Vec<(PublicKey, EventCursor)>,
-    ) -> KeyStreamWatcherBuilder<Missing> {
-        KeyStreamWatcherBuilder::new(homeserver, users)
+    ) -> KeyStreamWatcherBuilder<Missing>
+    where
+        C: KeyEventSource,
+    {
+        KeyStreamWatcherBuilder::new(client, homeserver, users)
     }
 }
 

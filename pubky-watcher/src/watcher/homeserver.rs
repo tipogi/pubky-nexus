@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use pubky::{EventCursor, Method, PublicKey};
+use pubky::{EventCursor, PublicKey};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, warn};
 
 use crate::events::{read_stream_capped, EventBatch, HomeserverEvent};
 use crate::processor::TEventProcessor;
 use crate::traits::{EventHandler, LineParseOutcome, ParseFromLine};
-use crate::PubkyConnector;
+use crate::HomeserverEventSource;
 
 use super::{
     invalid_data, run_processor, validate_limit, DynHandler, Missing, WatchOutcome, WatcherError,
@@ -19,14 +19,19 @@ pub struct HomeserverWatcherBuilder<H> {
     homeserver: PublicKey,
     handler: H,
     events_limit: u16,
+    event_source: Arc<dyn HomeserverEventSource>,
 }
 
 impl HomeserverWatcherBuilder<Missing> {
-    pub(super) fn new(homeserver: PublicKey) -> Self {
+    pub(super) fn new<C>(client: C, homeserver: PublicKey) -> Self
+    where
+        C: HomeserverEventSource,
+    {
         Self {
             homeserver,
             handler: Missing,
             events_limit: DEFAULT_EVENTS_LIMIT,
+            event_source: Arc::new(client),
         }
     }
 }
@@ -47,6 +52,7 @@ impl<H> HomeserverWatcherBuilder<H> {
             homeserver: self.homeserver,
             handler,
             events_limit: self.events_limit,
+            event_source: self.event_source,
         }
     }
 }
@@ -63,6 +69,7 @@ where
                 homeserver: self.homeserver,
                 handler: Arc::new(self.handler),
                 events_limit: self.events_limit,
+                event_source: self.event_source,
                 shutdown_rx,
             }),
         })
@@ -73,6 +80,7 @@ struct HomeserverConfig {
     homeserver: PublicKey,
     handler: Arc<DynHandler<HomeserverEvent>>,
     events_limit: u16,
+    event_source: Arc<dyn HomeserverEventSource>,
     shutdown_rx: Receiver<bool>,
 }
 
@@ -167,7 +175,7 @@ impl HomeserverEventProcessor {
     async fn poll_events(&self) -> Result<String, WatcherError> {
         let url = format!(
             "https://{}/events/?cursor={}&limit={}",
-            self.config.homeserver,
+            self.config.homeserver.z32(),
             self.cursor.id(),
             self.config.events_limit
         );
@@ -178,15 +186,24 @@ impl HomeserverEventProcessor {
             "Polling homeserver events"
         );
 
-        let response = PubkyConnector::get()?
-            .client()
-            .request(Method::GET, &url)
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = self
+            .config
+            .event_source
+            .fetch_homeserver_events(
+                &self.config.homeserver,
+                self.cursor,
+                self.config.events_limit,
+            )
+            .await?;
+        if !response.status.is_success() {
+            return Err(crate::ClientError::from_status(
+                response.status,
+                format!("GET {url} failed"),
+            )
+            .into());
+        }
 
-        let (bytes, exceeded) =
-            read_stream_capped(response.bytes_stream(), MAX_EVENTS_BODY).await?;
+        let (bytes, exceeded) = read_stream_capped(response.body, MAX_EVENTS_BODY).await?;
         if exceeded {
             return Err(invalid_data("homeserver event response exceeded 10 MiB"));
         }
@@ -220,8 +237,56 @@ fn validate_batch_cursor(
 #[cfg(test)]
 mod tests {
     use super::validate_batch_cursor;
-    use crate::EventBatch;
-    use pubky::EventCursor;
+    use crate::{
+        ClientError, ClientResponse, ClientResult, EventBatch, EventHandler, HomeserverEventSource,
+        Watcher, WatcherError,
+    };
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures_util::stream;
+    use pubky::{EventCursor, Keypair, PublicKey, StatusCode};
+
+    struct IdleSource;
+
+    #[async_trait]
+    impl HomeserverEventSource for IdleSource {
+        async fn fetch_homeserver_events(
+            &self,
+            _homeserver: &PublicKey,
+            cursor: EventCursor,
+            _limit: u16,
+        ) -> ClientResult<ClientResponse> {
+            let body = Bytes::from(format!("cursor: {}", cursor.id()));
+            Ok(ClientResponse {
+                status: StatusCode::OK,
+                content_length: Some(body.len() as u64),
+                content_type: Some("text/plain".into()),
+                body: Box::pin(stream::iter([Ok::<_, ClientError>(body)])),
+            })
+        }
+    }
+
+    struct IgnoreEvents;
+
+    #[async_trait]
+    impl EventHandler<crate::HomeserverEvent, WatcherError> for IgnoreEvents {
+        async fn handle(&self, _event: &crate::HomeserverEvent) -> Result<(), WatcherError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_source_does_not_require_global_initialization() {
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let watcher = Watcher::homeserver(IdleSource, Keypair::random().public_key())
+            .handler(IgnoreEvents)
+            .build(shutdown_rx)
+            .unwrap();
+
+        let outcome = watcher.run(EventCursor::new(7)).await.unwrap();
+        assert_eq!(outcome.cursor.id(), 7);
+        assert!(outcome.completed);
+    }
 
     #[test]
     fn event_batch_cursor_must_advance() {

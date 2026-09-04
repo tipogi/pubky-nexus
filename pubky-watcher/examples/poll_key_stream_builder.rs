@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use pubky::{Event, EventCursor, PublicKey};
-use pubky_watcher::{EventHandler, PubkyConnector, Watcher, WatcherError};
+use pubky_watcher::{EventHandler, Watcher, WatcherClient, WatcherError};
 use tokio::sync::watch;
 
 const STAGING_HOMESERVER: &str = "ufibwbmed6jeq9k4p583go95wofakh9fwpp4k734trq79pd9u1uy";
@@ -36,8 +36,7 @@ impl EventHandler<Event, WatcherError> for PrintingHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), WatcherError> {
-    PubkyConnector::initialise(None).await?;
-
+    let client = WatcherClient::mainnet()?;
     let homeserver = STAGING_HOMESERVER.parse::<PublicKey>()?;
     let users = USER_KEYS
         .into_iter()
@@ -48,7 +47,7 @@ async fn main() -> Result<(), WatcherError> {
         .collect::<Result<Vec<_>, _>>()?;
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let watcher = Watcher::key_stream(homeserver, users)
+    let watcher = Watcher::key_stream(client, homeserver, users)
         .handler(PrintingHandler)
         .events_limit(EVENTS_PER_RUN)
         .path("/pub/")

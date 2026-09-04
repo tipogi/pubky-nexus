@@ -5,7 +5,7 @@ use crate::errors::EventProcessorError;
 use chrono::{DateTime, Utc};
 use nexus_common::config::EventRetryConfig;
 use nexus_common::WatcherConfig;
-use pubky_watcher::RetryableError;
+use pubky_watcher::{RetryableError, WatcherClient};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, info, warn};
 
@@ -65,10 +65,14 @@ impl TEventProcessor<Event, EventProcessorError> for RetryProcessor {
 }
 
 impl RetryProcessor {
-    pub fn new(config: &WatcherConfig, shutdown_rx: Receiver<bool>) -> Self {
+    pub fn new(
+        config: &WatcherConfig,
+        shutdown_rx: Receiver<bool>,
+        client: Arc<WatcherClient>,
+    ) -> Self {
         let store: Arc<dyn RetryStore> = Arc::new(RedisRetryStore::new());
         Self {
-            event_handler: Arc::new(DefaultEventHandler::from_config(config)),
+            event_handler: Arc::new(DefaultEventHandler::from_config(config, client)),
             shutdown_rx,
             config: config.retry.clone(),
             store,

@@ -5,8 +5,9 @@ use nexus_common::utils::create_shutdown_rx;
 use nexus_common::WatcherConfig;
 use nexus_common::{Level, StackConfig, StackManager};
 use pubky_app_specs::PubkyId;
-use pubky_watcher::PubkyConnector;
+use pubky_watcher::WatcherClient;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 
 #[derive(Debug, Default)]
@@ -62,11 +63,22 @@ impl NexusWatcherBuilder {
     ///
     /// - `shutdown_rx`: optional shutdown signal. If none is provided, a default one will be created, listening for Ctrl-C.
     pub async fn start(self, shutdown_rx: Option<Receiver<bool>>) -> Result<(), DynError> {
+        let client = match self.0.stack.net.pubky_client_testnet_host() {
+            Some(host) => WatcherClient::testnet(host)?,
+            None => WatcherClient::mainnet()?,
+        };
+
+        self.start_with_client(shutdown_rx, Arc::new(client)).await
+    }
+
+    /// Starts the watcher with a client owned by the application composition root.
+    pub async fn start_with_client(
+        self,
+        shutdown_rx: Option<Receiver<bool>>,
+        client: Arc<WatcherClient>,
+    ) -> Result<(), DynError> {
         StackManager::setup(&self.0.stack).await?;
         let shutdown_rx = shutdown_rx.unwrap_or_else(create_shutdown_rx);
-
-        let _ = PubkyConnector::initialise(self.0.stack.net.pubky_client_testnet_host()).await;
-
-        NexusWatcher::start(shutdown_rx, self.0).await
+        NexusWatcher::start(shutdown_rx, self.0, client).await
     }
 }
