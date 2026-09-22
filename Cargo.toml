@@ -5,6 +5,7 @@ members = [
     "nexus-webapi",
     "nexus-common",
     "nexus-watcher",
+    "pubky-watcher",
     "nexusd",
     "examples",
 ]
