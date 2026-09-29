@@ -3,7 +3,6 @@ use crate::db::graph::Query;
 use crate::db::kv::SortOrder;
 use crate::models::post::{KindFilter, StreamSource};
 use crate::models::resource::stream::ResourceSorting;
-use crate::models::user::USER_DELETED_SENTINEL;
 use crate::types::routes::HotTagsInputDTO;
 use crate::types::DomainTrust;
 use crate::types::Pagination;
@@ -65,7 +64,8 @@ pub fn post_counts(author_id: &str, post_id: &str) -> Query {
                 tags: tags_count,
                 unique_tags: unique_tags_count,
                 replies: COUNT { (p)<-[:REPLIED]-() },
-                reposts: COUNT { (p)<-[:REPOSTED]-() }
+                reposts: COUNT { (p)<-[:REPOSTED]-() },
+                collections: COUNT { (p)<-[:COLLECTED]-() }
             } AS counts,
             EXISTS { (p)-[:REPLIED]->(:Post) } AS is_reply
     ",
@@ -274,13 +274,12 @@ pub fn global_tags_by_user() -> Query {
         // create_user_tag MERGEs one TAGGED edge per (tagger, tagged, label),
         // so COUNT(t) is the distinct tagger count.
         MATCH (tagger:User)-[t:TAGGED]->(u:User)
-        WHERE u.name <> $deleted
+        WHERE NOT coalesce(u.deleted, false)
         WITH t.label AS label, u.id AS user_id, COUNT(t) AS score
         WITH label, COLLECT([toFloat(score), user_id]) AS sorted_set
         RETURN label, sorted_set
         ",
     )
-    .param("deleted", USER_DELETED_SENTINEL)
 }
 
 /// Enumerates the distinct (tagged user, label) pairs carried by user
@@ -291,26 +290,94 @@ pub fn get_user_tag_pairs() -> Query {
         "get_user_tag_pairs",
         "
         MATCH (:User)-[t:TAGGED]->(u:User)
-        WHERE u.name <> $deleted
+        WHERE NOT coalesce(u.deleted, false)
         RETURN DISTINCT u.id AS user_id, t.label AS label
         ",
     )
-    .param("deleted", USER_DELETED_SENTINEL)
+}
+
+/// Users carrying positive trust, highest first: the ranked population behind
+/// the social graph badge.
+///
+/// A node unreachable from the seed set may carry `0.0` or no `trust` property
+/// at all, and `null > 0` is null, so both drop out here. Only positive scores
+/// are ranked: everyone at zero shares one value, so their order would be
+/// arbitrary and would reshuffle every run. Absence from the ranking is what
+/// marks them new.
+///
+/// `user_id ASC` breaks score ties deterministically, so two runs over the same
+/// graph agree.
+pub fn get_trust_ranked_user_ids() -> Query {
+    Query::new(
+        "get_trust_ranked_user_ids",
+        "
+        MATCH (u:User)
+        WHERE u.trust > 0
+          AND NOT coalesce(u.deleted, false)
+        RETURN u.id AS user_id
+        ORDER BY u.trust DESC, user_id ASC
+        ",
+    )
 }
 
 /// Users whose profile carries any of the given tag labels, scored by distinct
 /// tagger count summed across the searched labels.
 pub fn search_users_by_tags(labels: &[String], skip: Option<usize>, limit: Option<usize>) -> Query {
-    let mut cypher = String::from(
+    Query::new(
+        "search_users_by_tags",
+        users_by_tags_cypher("", skip, limit),
+    )
+    .param("labels", labels.to_vec())
+}
+
+/// [`search_users_by_tags`] restricted to the users in `user_id`'s `reach`,
+/// excluding `user_id` itself. Pages inside the graph, so only the requested
+/// window leaves Neo4j.
+pub fn search_users_by_tags_with_reach(
+    labels: &[String],
+    user_id: &str,
+    reach: &StreamReach,
+    skip: Option<usize>,
+    limit: Option<usize>,
+) -> Query {
+    let reach_prefix = format!(
+        "MATCH (user:User {{id: $user_id}})
+        {}
+        WHERE reach.id <> $user_id
+        // A WoT expand yields one row per path, so dedupe the reach before the
+        // tag join, or a user's tags count once per path. DISTINCT right after
+        // the variable-length expand also lets the planner use a pruning BFS.
+        // Starting from the tag with an EXISTS {{ (user)-[:FOLLOWS*1..d]->(u) }}
+        // check was slower: it runs an unpruned expand per tagged user.
+        WITH DISTINCT reach AS u",
+        stream_reach_to_graph_subquery(reach)
+    );
+
+    reach_attrs(
+        Query::new(
+            "search_users_by_tags_with_reach",
+            users_by_tags_cypher(&reach_prefix, skip, limit),
+        ),
+        reach,
+    )
+    .param("labels", labels.to_vec())
+    .param("user_id", user_id)
+}
+
+/// Shared scoring for the user tag searches. `prefix` may bind `u` to narrow
+/// the tagged users; empty searches every user.
+fn users_by_tags_cypher(prefix: &str, skip: Option<usize>, limit: Option<usize>) -> String {
+    let mut cypher = format!(
         "
+        {prefix}
         MATCH (tagger:User)-[tag:TAGGED]->(u:User)
-        WHERE tag.label IN $labels AND u.name <> $deleted
+        WHERE tag.label IN $labels AND NOT coalesce(u.deleted, false)
         WITH u, COUNT(tag) AS score
         RETURN u.id AS user_id, score
         // id DESC matches how Redis breaks equal scores (reverse-lex member
         // order), keeping pagination windows identical across both paths
         ORDER BY score DESC, u.id DESC
-        ",
+        "
     );
 
     if let Some(skip) = skip {
@@ -319,10 +386,7 @@ pub fn search_users_by_tags(labels: &[String], skip: Option<usize>, limit: Optio
     if let Some(limit) = limit {
         cypher.push_str(&format!("LIMIT {}\n", limit.min(MAX_QUERY_LIMIT)));
     }
-
-    Query::new("search_users_by_tags", &cypher)
-        .param("labels", labels.to_vec())
-        .param("deleted", USER_DELETED_SENTINEL)
+    cypher
 }
 
 // Retrieve all the tags of the post
@@ -485,15 +549,32 @@ pub fn get_homeserver_by_id(id: &str) -> Query {
 /// Retrieves all homeserver IDs that have at least one active user
 /// (incoming `HOSTED_BY` relationships from `User` nodes).
 ///
-/// The results are sorted by the number of active users in descending order.
+/// Sorted by aggregate hosted trust descending, then by active user count.
+/// The caller truncates this list, so the order decides which homeservers get
+/// polled at all: ranking by hosted trust spends a bounded polling budget on
+/// the homeservers whose users are expensive to fake, rather than on whichever
+/// one registered the most keys.
+///
+/// Homeservers with equal trust and equal user count are deliberately left in
+/// no particular order: with no tiebreak, which of them lands past the cut can
+/// vary from run to run, so a tie straddling the limit is shared out rather
+/// than always falling on the same homeserver.
+///
+/// `coalesce(u.trust, 0.0)` matters for the default install: `[trust_rank] seed`
+/// ships empty, so no user carries trust, every sum is 0.0, and the ordering
+/// falls through to `active_users` — exactly today's behaviour. The trust term
+/// only starts doing work once an operator configures a seed set.
+///
 /// Returns a single `homeservers_list` column containing the collected IDs.
 pub fn get_all_homeservers_with_active_users() -> Query {
     Query::new(
         "get_all_homeservers_with_active_users",
         "MATCH (u:User)-[r:HOSTED_BY]->(hs:Homeserver)
-        WHERE u.name <> '[DELETED]' AND NOT coalesce(r.stale, false)
-        WITH hs.id AS id, count(u) AS active_users
-        ORDER BY active_users DESC
+        WHERE NOT coalesce(u.deleted, false) AND NOT coalesce(r.stale, false)
+        WITH hs.id AS id,
+             sum(coalesce(u.trust, 0.0)) AS hosted_trust,
+             count(u) AS active_users
+        ORDER BY hosted_trust DESC, active_users DESC
         RETURN collect(id) AS homeservers_list",
     )
 }
@@ -504,7 +585,7 @@ pub fn get_users_needing_hs_resolution(ttl_ms: u64) -> Query {
     Query::new(
         "get_users_needing_hs_resolution",
         "MATCH (u:User)
-         WHERE u.name <> '[DELETED]'
+         WHERE NOT coalesce(u.deleted, false)
          OPTIONAL MATCH (u)-[r:HOSTED_BY]->(:Homeserver)
          WITH u, r
          WHERE r IS NULL
@@ -526,6 +607,18 @@ pub fn get_user_homeserver(user_id: &str) -> Query {
     .param("user_id", user_id.to_string())
 }
 
+/// Counts users with a `HOSTED_BY` mapping, and how many of those mappings are
+/// marked `stale`. Deleted users are excluded from both counts.
+pub fn count_user_homeserver_mappings() -> Query {
+    Query::new(
+        "count_user_homeserver_mappings",
+        "MATCH (u:User)-[r:HOSTED_BY]->(:Homeserver)
+         WHERE NOT coalesce(u.deleted, false)
+         RETURN count(r) AS mapped_users,
+                count(CASE WHEN r.stale = true THEN 1 END) AS stale_users",
+    )
+}
+
 /// Retrieves all user IDs actively hosted on a given homeserver.
 ///
 /// Excludes users whose mapping is marked `stale` — i.e. whose published
@@ -535,7 +628,7 @@ pub fn get_active_users_by_homeserver(hs_id: &str) -> Query {
     Query::new(
         "get_active_users_by_homeserver",
         "MATCH (u:User)-[r:HOSTED_BY]->(:Homeserver {id: $hs_id})
-         WHERE u.name <> '[DELETED]' AND NOT coalesce(r.stale, false)
+         WHERE NOT coalesce(u.deleted, false) AND NOT coalesce(r.stale, false)
          RETURN collect(u.id) AS user_ids",
     )
     .param("hs_id", hs_id.to_string())
@@ -736,6 +829,62 @@ fn stream_reach_to_graph_subquery(reach: &StreamReach) -> String {
     }
 }
 
+/// Up to `limit` distinct users in `user_id`'s `reach` who authored at least
+/// one post, excluding `user_id`, the most prolific first. Users without posts
+/// are left out: they cannot match a post search, so keeping them would spend
+/// `limit` on authors that match nothing. The post count matches
+/// `UserCounts::posts` (every authored post, replies included); equal counts
+/// break ties by id descending.
+pub fn get_reach_authors_by_posts(user_id: &str, reach: &StreamReach, limit: usize) -> Query {
+    let cypher = format!(
+        "
+        MATCH (user:User {{id: $user_id}})
+        {}
+        WHERE reach.id <> $user_id
+        WITH DISTINCT reach
+        // AUTHORED only ever points at posts, so the unlabelled pattern is a
+        // degree lookup rather than an expansion
+        WITH reach, COUNT {{ (reach)-[:AUTHORED]->() }} AS posts
+        WHERE posts > 0
+        RETURN reach.id AS author_id
+        ORDER BY posts DESC, author_id DESC
+        LIMIT $limit
+        ",
+        stream_reach_to_graph_subquery(reach)
+    );
+    reach_attrs(Query::new("get_reach_authors_by_posts", &cypher), reach)
+        .param("user_id", user_id)
+        .param("limit", i64::try_from(limit).unwrap_or(i64::MAX))
+}
+
+/// Whether `target_id` is in `user_id`'s `reach`. `false` for the user itself
+/// and for unknown users.
+pub fn reach_contains_user(user_id: &str, target_id: &str, reach: &StreamReach) -> Query {
+    let check = match reach {
+        StreamReach::Following => "EXISTS { (user)-[:FOLLOWS]->(target) }".to_string(),
+        StreamReach::Followers => "EXISTS { (target)-[:FOLLOWS]->(user) }".to_string(),
+        StreamReach::Friends => {
+            "EXISTS { (user)-[:FOLLOWS]->(target) } AND EXISTS { (target)-[:FOLLOWS]->(user) }"
+                .to_string()
+        }
+        // shortestPath searches from both ends; a variable-length EXISTS runs
+        // as an unpruned expand
+        StreamReach::Wot(depth) => {
+            format!("EXISTS {{ MATCH shortestPath((user)-[:FOLLOWS*1..{depth}]->(target)) }}")
+        }
+    };
+    let cypher = format!(
+        "
+        MATCH (user:User {{id: $user_id}}), (target:User {{id: $target_id}})
+        WHERE target.id <> $user_id
+        RETURN {check} AS reached
+        "
+    );
+    reach_attrs(Query::new("reach_contains_user", &cypher), reach)
+        .param("user_id", user_id)
+        .param("target_id", target_id)
+}
+
 pub fn get_tags_by_label_prefix(label_prefix: &str) -> Query {
     Query::new(
         "get_tags_by_label_prefix",
@@ -756,6 +905,13 @@ pub fn get_tags() -> Query {
         RETURN COLLECT(DISTINCT t.label) AS tag_labels
         ",
     )
+}
+
+fn reach_attrs(query: Query, reach: &StreamReach) -> Query {
+    let (name, depth) = reach.telemetry_dimensions();
+    query
+        .telemetry_attr("reach", name)
+        .telemetry_attr_opt("depth", depth)
 }
 
 pub fn get_tag_taggers_by_reach(
@@ -785,7 +941,7 @@ pub fn get_tag_taggers_by_reach(
             ",
         stream_reach_to_graph_subquery(&reach)
     );
-    Query::new("get_tag_taggers_by_reach", &cypher)
+    reach_attrs(Query::new("get_tag_taggers_by_reach", &cypher), &reach)
         .param("label", label)
         .param("user_id", user_id)
         .param("skip", skip as i64)
@@ -827,7 +983,7 @@ pub fn get_hot_tags_by_reach(
         input_tagged_type,
         tags_query.taggers_limit
     );
-    Query::new("get_hot_tags_by_reach", &cypher)
+    reach_attrs(Query::new("get_hot_tags_by_reach", &cypher), &reach)
         .param("user_id", user_id)
         .param("skip", tags_query.skip as i64)
         .param("limit", tags_query.limit as i64)
@@ -882,7 +1038,7 @@ pub fn get_influencers_by_reach(
         {}
         WHERE user.id = $user_id
         WITH DISTINCT reach
-        WHERE reach.name <> '[DELETED]'
+        WHERE NOT coalesce(reach.deleted, false)
 
         CALL (reach) {{
             MATCH (others:User)-[follow:FOLLOWS]->(reach)
@@ -911,7 +1067,7 @@ pub fn get_influencers_by_reach(
     ",
         stream_reach_to_graph_subquery(&reach),
     );
-    Query::new("get_influencers_by_reach", &cypher)
+    reach_attrs(Query::new("get_influencers_by_reach", &cypher), &reach)
         .param("user_id", user_id)
         .param("skip", skip as i64)
         .param("limit", limit as i64)
@@ -921,47 +1077,69 @@ pub fn get_influencers_by_reach(
 
 pub fn get_global_influencers(skip: usize, limit: usize, timeframe: &Timeframe) -> Query {
     let (from, to) = timeframe.to_timestamp_range();
-    Query::new(
-        "get_global_influencers",
+    // AllTime seeds the live influencers set, whose incremental scores count
+    // tags the user assigned to posts AND to users, so the seed must match
+    // that definition. Windowed timeframes keep their post-tags-only scoring;
+    // they only feed their own per-timeframe cache.
+    let tag_targets = match timeframe {
+        Timeframe::AllTime => ":Post|User",
+        _ => ":Post",
+    };
+    let query_string = format!(
         "
         MATCH (user:User)
-        WHERE user.name <> '[DELETED]'
+        WHERE NOT coalesce(user.deleted, false)
         WITH DISTINCT user
 
-        // Each count is a scoped CALL(user){} subquery so it stays per-user
+        // Each count is a scoped CALL(user){{}} subquery so it stays per-user
         // instead of multiplying into a cartesian product. Mirrors
         // get_influencers_by_reach.
-        CALL (user) {
+        CALL (user) {{
             MATCH (others:User)-[follow:FOLLOWS]->(user)
             WHERE follow.indexed_at >= $from AND follow.indexed_at < $to
             RETURN count(DISTINCT follow) AS followers_count
-        }
-        CALL (user) {
-            MATCH (user)-[tag:TAGGED]->(:Post)
+        }}
+        CALL (user) {{
+            MATCH (user)-[tag:TAGGED]->({tag_targets})
             WHERE tag.indexed_at >= $from AND tag.indexed_at < $to
             RETURN count(DISTINCT tag) AS tags_count
-        }
-        CALL (user) {
-            MATCH (user)-[authored:AUTHORED]->(post:Post)
-            WHERE authored.indexed_at >= $from AND authored.indexed_at < $to
+        }}
+        CALL (user) {{
+            // Filter on the Post node's indexed_at, like get_influencers_by_reach does.
+            // The AUTHORED edge carries no indexed_at property (create_post never sets
+            // one), so filtering on the edge would always yield posts_count = 0.
+            MATCH (user)-[:AUTHORED]->(post:Post)
+            WHERE post.indexed_at >= $from AND post.indexed_at < $to
             RETURN count(DISTINCT post) AS posts_count
-        }
-        WITH {
+        }}
+        WITH {{
             id: user.id,
             score: (tags_count + posts_count) * sqrt(followers_count)
-        } AS influencer
+        }} AS influencer
         WHERE influencer.id IS NOT NULL
 
         ORDER BY influencer.score DESC, influencer.id ASC
         SKIP $skip
         LIMIT $limit
         RETURN COLLECT([influencer.id, influencer.score]) as influencers
-    ",
+    "
+    );
+    Query::new("get_global_influencers", &query_string)
+        .param("skip", skip as i64)
+        .param("limit", limit as i64)
+        .param("from", from)
+        .param("to", to)
+}
+
+/// Every Collection post key, for backfills.
+pub fn get_collection_posts() -> Query {
+    Query::new(
+        "get_collection_posts",
+        "
+        MATCH (u:User)-[:AUTHORED]->(c:Post {kind: 'collection'})
+        RETURN u.id AS author_id, c.id AS post_id
+        ",
     )
-    .param("skip", skip as i64)
-    .param("limit", limit as i64)
-    .param("from", from)
-    .param("to", to)
 }
 
 pub fn get_files_by_ids(key_pair: &[&[&str]]) -> Query {
@@ -1049,6 +1227,13 @@ pub fn post_stream(
              WHERE endorsement.label IN $domain_tags\n\
              WITH DISTINCT author\n"
         )),
+        // Anchor on the item's unique id (see `post_counts`), then bind `p` to
+        // the collections that curate it; the posts MATCH below adds the curator.
+        StreamSource::PostCollections { .. } => cypher.push_str(
+            "MATCH (item:Post {id: $post_id})\n\
+             WHERE EXISTS { (:User {id: $author_id})-[:AUTHORED]->(item) }\n\
+             MATCH (item)<-[:COLLECTED]-(p:Post)\n",
+        ),
         _ => {}
     }
 
@@ -1212,25 +1397,17 @@ pub fn post_stream(
         cypher.push_str(&format!("LIMIT {}\n", limit.min(MAX_QUERY_LIMIT)));
     }
 
-    let query_name = match &source {
-        StreamSource::Following { .. } => "post_stream_following",
-        StreamSource::Followers { .. } => "post_stream_followers",
-        StreamSource::Friends { .. } => "post_stream_friends",
-        StreamSource::Bookmarks { .. } => "post_stream_bookmarks",
-        StreamSource::Author { .. } => "post_stream_author",
-        StreamSource::AuthorReplies { .. } => "post_stream_author_replies",
-        StreamSource::PostReplies { .. } => "post_stream_post_replies",
-        // Short-circuited upstream in collect_post_keys.
-        StreamSource::Collection { .. } => {
-            return Err(GraphError::QueryBuildError(
-                "StreamSource::Collection must be served by collect_post_keys".to_string(),
-            ));
-        }
-        StreamSource::Wot { .. } => "post_stream_wot",
-        StreamSource::WotDomain { .. } => "post_stream_wot_domain",
-        StreamSource::All => "post_stream_all",
-    };
-    let query = Query::new(query_name, &cypher);
+    // Short-circuited upstream in collect_post_keys.
+    if matches!(&source, StreamSource::Collection { .. }) {
+        return Err(GraphError::QueryBuildError(
+            "StreamSource::Collection must be served by collect_post_keys".to_string(),
+        ));
+    }
+
+    let (source_attr, depth) = source.telemetry_dimensions();
+    let query = Query::new("post_stream", &cypher)
+        .telemetry_attr("source", source_attr)
+        .telemetry_attr_opt("depth", depth);
     Ok(build_query_with_params(
         query,
         &source,
@@ -1285,6 +1462,11 @@ fn build_query_with_params(
     }
     if let Some(author_id) = source.get_author() {
         query = query.param("author_id", author_id.to_string());
+    }
+    if let Some((author_id, post_id)) = source.get_anchor_post() {
+        query = query
+            .param("author_id", author_id.to_string())
+            .param("post_id", post_id.to_string());
     }
     match kind {
         Some(KindFilter::Kind(post_kind)) => {
@@ -1351,6 +1533,10 @@ pub fn post_is_safe_to_delete(author_id: &str, post_id: &str) -> Query {
                 OR
                 // 3. Outgoing REPLIED relationship to another post
                 (type(r) = 'REPLIED' AND startNode(r) = p)
+                OR
+                // 4. COLLECTED either way: a curated post drops out of its
+                // collections on deletion, and a collection may hold items.
+                type(r) = 'COLLECTED'
             )
         } AS flag
 ",
@@ -1360,7 +1546,8 @@ pub fn post_is_safe_to_delete(author_id: &str, post_id: &str) -> Query {
 }
 
 /// Find user recommendations: active users (with 5+ posts) who are 1-3 degrees of separation away
-/// from the given user, but not directly followed by them
+/// from the given user, but not directly followed by them.
+/// Deleted users are filtered in Cypher; only the user ID is projected (no name column).
 pub fn recommend_users(user_id: &str, limit: usize) -> Query {
     Query::new(
         "recommend_users",
@@ -1369,11 +1556,12 @@ pub fn recommend_users(user_id: &str, limit: usize) -> Query {
         MATCH (user)-[:FOLLOWS*1..3]->(potential:User)
         WHERE NOT (user)-[:FOLLOWS]->(potential)
         AND potential.id <> $user_id
+        AND NOT coalesce(potential.deleted, false)
         WITH DISTINCT potential
         MATCH (potential)-[:AUTHORED]->(post:Post)
         WITH potential, COUNT(post) AS post_count
         WHERE post_count >= 5
-        RETURN potential.id AS recommended_user_id, potential.name AS recommended_user_name
+        RETURN potential.id AS recommended_user_id
         LIMIT $limit
     ",
     )
@@ -1418,8 +1606,7 @@ pub fn starter_pack_users(
                  sum(coalesce(tagger.trust, 0.0)) AS trust_score,
                  count(DISTINCT tagger) AS endorsers
             // Cheaper here than against every endorsement row.
-            // TODO: drop the name check once nothing writes the [DELETED] sentinel.
-            WHERE candidate.name <> '[DELETED]' AND NOT coalesce(candidate.deleted, false)
+            WHERE NOT coalesce(candidate.deleted, false)
               AND (user IS NULL OR (candidate <> user AND NOT (user)-[:FOLLOWS]->(candidate)))
               AND EXISTS { MATCH (candidate)-[:AUTHORED]->(p:Post) WHERE p.indexed_at >= $since }
             WITH candidate.id AS id, trust_score, endorsers
@@ -1462,9 +1649,11 @@ pub fn get_tag_by_tagger_and_id(tagger_id: &str, tag_id: &str) -> Query {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::graph::query::TelemetryValue;
     use crate::types::WotDepth;
+    use TelemetryValue::{Int, Str};
 
-    fn build(source: StreamSource) -> String {
+    fn build_query(source: StreamSource) -> Query {
         post_stream(
             source,
             StreamSorting::Timeline,
@@ -1477,7 +1666,145 @@ mod tests {
             None,
         )
         .unwrap()
-        .to_cypher_populated()
+    }
+
+    fn build(source: StreamSource) -> String {
+        build_query(source).to_cypher_populated()
+    }
+
+    #[test]
+    fn reach_queries_use_base_label_with_reach_and_depth_attrs() {
+        let cases = [
+            (StreamReach::Followers, vec![("reach", Str("followers"))]),
+            (StreamReach::Following, vec![("reach", Str("following"))]),
+            (StreamReach::Friends, vec![("reach", Str("friends"))]),
+            (
+                StreamReach::Wot(WotDepth::new(1).unwrap()),
+                vec![("reach", Str("wot")), ("depth", Int(1))],
+            ),
+            (
+                StreamReach::Wot(WotDepth::new(2).unwrap()),
+                vec![("reach", Str("wot")), ("depth", Int(2))],
+            ),
+            (
+                StreamReach::Wot(WotDepth::new(3).unwrap()),
+                vec![("reach", Str("wot")), ("depth", Int(3))],
+            ),
+        ];
+        for (reach, expected) in cases {
+            let influencers =
+                get_influencers_by_reach("user", reach.clone(), 0, 10, &Timeframe::AllTime);
+            assert_eq!(influencers.label(), "get_influencers_by_reach");
+            assert_eq!(influencers.telemetry_attrs(), expected.as_slice());
+
+            let taggers = get_tag_taggers_by_reach("tag", "user", reach.clone(), 0, 10);
+            assert_eq!(taggers.label(), "get_tag_taggers_by_reach");
+            assert_eq!(taggers.telemetry_attrs(), expected.as_slice());
+
+            let user_tag_search =
+                search_users_by_tags_with_reach(&["label".into()], "user", &reach, None, None);
+            assert_eq!(user_tag_search.label(), "search_users_by_tags_with_reach");
+            assert_eq!(user_tag_search.telemetry_attrs(), expected.as_slice());
+
+            let reach_authors = get_reach_authors_by_posts("user", &reach, 10);
+            assert_eq!(reach_authors.label(), "get_reach_authors_by_posts");
+            assert_eq!(reach_authors.telemetry_attrs(), expected.as_slice());
+
+            let reach_contains = reach_contains_user("user", "target", &reach);
+            assert_eq!(reach_contains.label(), "reach_contains_user");
+            assert_eq!(reach_contains.telemetry_attrs(), expected.as_slice());
+
+            let hot_tags_input = HotTagsInputDTO::new(Timeframe::AllTime, 10, 0, 5, None);
+            let hot_tags = get_hot_tags_by_reach("user", reach, &hot_tags_input);
+            assert_eq!(hot_tags.label(), "get_hot_tags_by_reach");
+            assert_eq!(hot_tags.telemetry_attrs(), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn post_stream_uses_base_label_with_source_and_depth_attrs() {
+        let observer = || "obs".to_string();
+        let cases: Vec<(StreamSource, Vec<(&'static str, TelemetryValue)>)> = vec![
+            (StreamSource::All, vec![("source", Str("all"))]),
+            (
+                StreamSource::Following {
+                    observer_id: observer(),
+                },
+                vec![("source", Str("following"))],
+            ),
+            (
+                StreamSource::Followers {
+                    observer_id: observer(),
+                },
+                vec![("source", Str("followers"))],
+            ),
+            (
+                StreamSource::Friends {
+                    observer_id: observer(),
+                },
+                vec![("source", Str("friends"))],
+            ),
+            (
+                StreamSource::Bookmarks {
+                    observer_id: observer(),
+                },
+                vec![("source", Str("bookmarks"))],
+            ),
+            (
+                StreamSource::Author {
+                    author_id: observer(),
+                },
+                vec![("source", Str("author"))],
+            ),
+            (
+                StreamSource::AuthorReplies {
+                    author_id: observer(),
+                },
+                vec![("source", Str("author_replies"))],
+            ),
+            (
+                StreamSource::PostReplies {
+                    post_id: "post".to_string(),
+                    author_id: observer(),
+                },
+                vec![("source", Str("post_replies"))],
+            ),
+            (
+                StreamSource::Wot {
+                    observer_id: observer(),
+                    depth: WotDepth::new(1).unwrap(),
+                },
+                vec![("source", Str("wot")), ("depth", Int(1))],
+            ),
+            (
+                StreamSource::Wot {
+                    observer_id: observer(),
+                    depth: WotDepth::new(3).unwrap(),
+                },
+                vec![("source", Str("wot")), ("depth", Int(3))],
+            ),
+            (
+                StreamSource::WotDomain {
+                    observer_id: observer(),
+                    trust: DomainTrust::Me,
+                    domain_tags: vec!["bitcoin".to_string()],
+                },
+                vec![("source", Str("wot_domain")), ("depth", Int(0))],
+            ),
+            (
+                StreamSource::WotDomain {
+                    observer_id: observer(),
+                    trust: DomainTrust::Network(WotDepth::new(2).unwrap()),
+                    domain_tags: vec!["bitcoin".to_string()],
+                },
+                vec![("source", Str("wot_domain")), ("depth", Int(2))],
+            ),
+        ];
+        for (source, expected) in cases {
+            let query = build_query(source);
+            assert_eq!(query.label(), "post_stream");
+            assert_eq!(query.telemetry_attrs(), expected.as_slice());
+        }
     }
 
     /// The trust traversal must bind and dedupe authors before the posts MATCH.
@@ -1514,6 +1841,54 @@ mod tests {
                 "author dedup must precede the posts MATCH:\n{cypher}"
             );
         }
+    }
+
+    #[test]
+    fn user_tag_search_dedupes_reach_before_tag_join() {
+        let labels = ["label".to_string()];
+        let reaches = [
+            StreamReach::Followers,
+            StreamReach::Following,
+            StreamReach::Friends,
+            StreamReach::Wot(WotDepth::new(1).unwrap()),
+            StreamReach::Wot(WotDepth::new(2).unwrap()),
+            StreamReach::Wot(WotDepth::new(3).unwrap()),
+        ];
+        for reach in reaches {
+            let cypher = search_users_by_tags_with_reach(&labels, "user", &reach, None, None)
+                .to_cypher_populated();
+            let dedupe = cypher
+                .find("WITH DISTINCT reach AS u")
+                .unwrap_or_else(|| panic!("{reach:?} must dedupe the reach:\n{cypher}"));
+            let tag_join = cypher
+                .find("MATCH (tagger:User)-[tag:TAGGED]->(u:User)")
+                .unwrap_or_else(|| panic!("{reach:?} must join tags on u:\n{cypher}"));
+            assert!(
+                dedupe < tag_join,
+                "{reach:?} must dedupe before the tag join, or tags count once per path:\n{cypher}"
+            );
+        }
+    }
+
+    #[test]
+    fn reach_membership_uses_shortest_path_for_wot() {
+        let wot = reach_contains_user(
+            "user",
+            "target",
+            &StreamReach::Wot(WotDepth::new(3).unwrap()),
+        )
+        .to_cypher_populated();
+        assert!(
+            wot.contains("EXISTS { MATCH shortestPath((user)-[:FOLLOWS*1..3]->(target)) }"),
+            "WoT membership must use shortestPath:\n{wot}"
+        );
+        let friends =
+            reach_contains_user("user", "target", &StreamReach::Friends).to_cypher_populated();
+        assert!(
+            friends.contains("(user)-[:FOLLOWS]->(target)")
+                && friends.contains("(target)-[:FOLLOWS]->(user)"),
+            "friends must check both directions:\n{friends}"
+        );
     }
 
     #[test]

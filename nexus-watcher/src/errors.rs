@@ -79,9 +79,6 @@ pub enum EventProcessorError {
     #[error("HsBlacklisted: {hs_id}")]
     HsBlacklisted { hs_id: String },
 
-    #[error("MediaProcessor: {0}")]
-    MediaProcessorError(String),
-
     #[error("Internal error: {0}")]
     InternalError(String),
 
@@ -103,12 +100,6 @@ impl From<ModelError> for EventProcessorError {
             ModelError::KvOperationFailed(source) => {
                 let should_not_retry_now = source.should_not_retry_now();
                 EventProcessorError::IndexOperationFailed(should_not_retry_now, source.to_string())
-            }
-            ModelError::MediaProcessorError(source) => {
-                EventProcessorError::MediaProcessorError(source.to_string())
-            }
-            ModelError::FileOperationFailed(source) => {
-                EventProcessorError::InternalError(source.to_string())
             }
             ModelError::HsBlacklisted { hs_id } => EventProcessorError::HsBlacklisted { hs_id },
             ModelError::Generic(message) => EventProcessorError::Generic(message),

@@ -182,16 +182,16 @@ impl WatcherClient {
     }
 
     fn build(testnet_host: Option<&str>) -> ClientResult<Self> {
-        let mut builder = PubkyHttpClient::builder();
-        builder.request_timeout(HTTP_REQUEST_TIMEOUT);
+        let mut client_builder = PubkyHttpClient::builder();
+        client_builder.request_timeout(HTTP_REQUEST_TIMEOUT);
 
         if let Some(host) = testnet_host {
-            builder
+            client_builder
                 .testnet_with_host(host)
                 .pkarr(|pkarr| pkarr.dht(|dht| dht.port(0)));
         }
 
-        Ok(Self::from_pubky(Pubky::with_client(builder.build()?)))
+        Ok(Self::from_pubky(Pubky::with_client(client_builder.build()?)))
     }
 }
 

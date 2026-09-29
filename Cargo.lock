@@ -549,6 +549,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1442,6 +1448,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2110,7 +2125,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3314d5adb5d94bcdf56771f2e50dbbc80bb4bdf88967526706205ac9eff24eb"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "headers-core",
  "http",
@@ -2408,7 +2423,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -3022,7 +3037,7 @@ dependencies = [
  "blake3",
  "chrono",
  "deadpool-redis",
- "dirs",
+ "dirs 7.0.0",
  "futures",
  "hex",
  "neo4rs",
@@ -3040,7 +3055,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-shared-rt",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.6+spec-1.1.0",
  "tracing",
  "tracing-log",
  "tracing-opentelemetry",
@@ -3070,16 +3085,18 @@ dependencies = [
  "base32",
  "bytes",
  "chrono",
+ "deadpool-redis",
  "futures",
  "http",
  "nexus-common",
  "opentelemetry 0.32.0",
+ "opentelemetry_sdk 0.32.1",
  "pubky",
  "pubky-app-specs",
  "pubky-testnet",
  "pubky-watcher",
  "rand 0.10.2",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "tempfile",
@@ -3106,7 +3123,9 @@ dependencies = [
  "http-body-util",
  "httpc-test",
  "nexus-common",
+ "nexus-webapi",
  "opentelemetry 0.32.0",
+ "opentelemetry_sdk 0.32.1",
  "pubky",
  "pubky-app-specs",
  "pubky-testnet",
@@ -3136,13 +3155,13 @@ dependencies = [
  "chrono",
  "clap",
  "cron",
- "dirs",
  "futures",
  "nexus-common",
  "nexus-watcher",
  "nexus-webapi",
  "opentelemetry 0.32.0",
  "opentelemetry_sdk 0.32.1",
+ "pubky-app-specs",
  "pubky-watcher",
  "redis",
  "serde",
@@ -3303,7 +3322,7 @@ checksum = "42afda58fa2cf50914402d132cc1caacff116a85d10c72ab2082bb7c50021754"
 dependencies = [
  "anyhow",
  "backon",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures",
@@ -3420,7 +3439,7 @@ dependencies = [
  "bytes",
  "http",
  "opentelemetry 0.32.0",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
 ]
 
 [[package]]
@@ -3435,7 +3454,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk 0.32.1",
  "prost",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
@@ -3702,7 +3721,7 @@ dependencies = [
  "ntimestamp",
  "page_size",
  "pkcs8 0.11.0-rc.11",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "rustls",
  "rustls-webpki",
  "self_cell",
@@ -3994,7 +4013,7 @@ version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3dabfa82f58ad04e2b65fcecc02ca953dec608533dfa820b03ee174b2593e8af"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "cookie",
  "eventsource-stream",
  "flume 0.11.1",
@@ -4004,7 +4023,7 @@ dependencies = [
  "log",
  "pkarr",
  "pubky-common",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "rustls",
  "serde",
  "thiserror 2.0.20",
@@ -4074,13 +4093,13 @@ dependencies = [
  "axum-server",
  "axum-test",
  "base32",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "dashmap",
  "dav-server",
  "dav-server-opendalfs",
- "dirs",
+ "dirs 6.0.0",
  "dyn-clone",
  "fast-glob",
  "flume 0.11.1",
@@ -4101,7 +4120,7 @@ dependencies = [
  "prometheus",
  "pubky-common",
  "pubky_test_utils",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "sea-query",
  "sea-query-binder",
  "serde",
@@ -4130,7 +4149,7 @@ checksum = "e1c662f45e102c01454c80859f3354a30e6e88fe7412dd1f6a61c7983a1558fe"
 dependencies = [
  "anyhow",
  "clap",
- "dirs",
+ "dirs 6.0.0",
  "http-relay",
  "mainline",
  "once_cell",
@@ -4170,7 +4189,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "pubky",
- "reqwest 0.13.4",
+ "reqwest 0.13.5",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -4438,9 +4457,9 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "1.6.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e37a4ca5c6ca42aa3e6df2fd32b987a65d32a4c2159a6f3fe0fd1df306a2658f"
+checksum = "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed"
 dependencies = [
  "arcstr",
  "async-lock",
@@ -4539,7 +4558,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "cookie",
  "cookie_store 0.22.1",
@@ -4584,11 +4603,11 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "bytes",
  "cookie",
  "cookie_store 0.22.1",
@@ -5391,7 +5410,7 @@ version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "crc",
@@ -5467,7 +5486,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa003f0038df784eb8fecbbac13affe3da23b45194bd57dba231c8f48199c526"
 dependencies = [
  "atoi",
- "base64",
+ "base64 0.22.1",
  "bitflags",
  "byteorder",
  "bytes",
@@ -5510,7 +5529,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
 dependencies = [
  "atoi",
- "base64",
+ "base64 0.22.1",
  "bitflags",
  "byteorder",
  "chrono",
@@ -5929,9 +5948,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -6023,7 +6042,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "http",
  "http-body",
@@ -6423,7 +6442,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d047458f1b5b65237c2f6dc6db136945667f40a7668627b3490b9513a3d43a55"
 dependencies = [
  "axum",
- "base64",
+ "base64 0.22.1",
  "mime_guess",
  "regex",
  "rust-embed",
