@@ -81,11 +81,14 @@ where
     E: Send + Sync + 'static,
     Err: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
 {
+    /// Value produced after a successful processor run.
+    type Output: Send + 'static;
+
     fn event_handler(&self) -> &Arc<dyn EventHandler<E, Err> + Send + Sync>;
 
     fn instance_name(&self) -> String;
 
-    async fn run(self: Arc<Self>) -> Result<(), RunError<Err>> {
+    async fn run(self: Arc<Self>) -> Result<Self::Output, RunError<Err>> {
         let timeout = self
             .custom_timeout()
             .unwrap_or(Duration::from_secs(PROCESSING_TIMEOUT_SECS));
@@ -110,7 +113,7 @@ where
             .map_err(RunError::Internal)
     }
 
-    async fn run_internal(self: Arc<Self>) -> Result<(), Err>;
+    async fn run_internal(self: Arc<Self>) -> Result<Self::Output, Err>;
 
     fn custom_timeout(&self) -> Option<Duration> {
         None

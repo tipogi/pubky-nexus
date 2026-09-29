@@ -22,6 +22,9 @@ pub enum ClientError {
     #[error("Request failed: {message}")]
     RequestFailed { message: String },
 
+    #[error("Transport failed: {message}")]
+    TransportFailed { message: String },
+
     #[error("Pkarr failed: {0}")]
     PkarrFailed(#[from] PkarrError),
 
@@ -35,16 +38,24 @@ pub enum ClientError {
     ParseFailed(#[from] url::ParseError),
 }
 
+impl ClientError {
+    pub fn from_status(status: StatusCode, message: String) -> Self {
+        match status {
+            StatusCode::NOT_FOUND => Self::NotFound404 { message },
+            StatusCode::TOO_MANY_REQUESTS => Self::TooManyRequests429 { message },
+            status if status.is_server_error() => Self::ServerError5xx { message },
+            _ => Self::RequestFailed { message },
+        }
+    }
+}
+
 impl From<pubky::Error> for ClientError {
     fn from(err: pubky::Error) -> Self {
         match err {
-            pubky::Error::Request(RequestError::Server { status, message }) => match status {
-                StatusCode::NOT_FOUND => Self::NotFound404 { message },
-                StatusCode::TOO_MANY_REQUESTS => Self::TooManyRequests429 { message },
-                s if s.is_server_error() => Self::ServerError5xx { message },
-                _ => Self::RequestFailed { message },
-            },
-            pubky::Error::Request(RequestError::Transport(e)) => Self::RequestFailed {
+            pubky::Error::Request(RequestError::Server { status, message }) => {
+                Self::from_status(status, message)
+            }
+            pubky::Error::Request(RequestError::Transport(e)) => Self::TransportFailed {
                 message: e.to_string(),
             },
             pubky::Error::Request(

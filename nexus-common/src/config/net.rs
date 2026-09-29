@@ -33,7 +33,7 @@ impl NetConfig {
         DEFAULT_TESTNET_HOST.to_string()
     }
 
-    /// Returns the testnet relay hostname for [`pubky_watcher::PubkyConnector::initialise`]
+    /// Returns the testnet relay hostname used to construct a Pubky watcher client.
     pub fn pubky_client_testnet_host(&self) -> Option<&str> {
         self.testnet.then_some(self.testnet_host.as_str())
     }

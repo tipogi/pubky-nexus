@@ -1,9 +1,10 @@
-use std::{fmt::Debug, path::PathBuf};
+use std::{fmt::Debug, path::PathBuf, sync::Arc};
 
 use nexus_common::DaemonConfig;
 use nexus_common::{types::DynError, utils::create_shutdown_rx};
 use nexus_watcher::NexusWatcherBuilder;
 use nexus_webapi::{api_context::ApiContextBuilder, NexusApiBuilder};
+use pubky_watcher::WatcherClient;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::watch::Receiver, try_join};
 
@@ -38,7 +39,13 @@ impl DaemonLauncher {
         // bad cron fails fast at startup.
         let jobs = job_registry.scheduled_jobs(&config)?;
 
+        let pubky_client = Arc::new(match config.stack.net.pubky_client_testnet_host() {
+            Some(host) => WatcherClient::testnet(host)?,
+            None => WatcherClient::mainnet()?,
+        });
+
         let api_context = ApiContextBuilder::from_config_dir(config_dir)
+            .pubky_client(pubky_client.clone())
             .try_build()
             .await?;
         let nexus_webapi_builder = NexusApiBuilder::new(api_context);
@@ -47,7 +54,7 @@ impl DaemonLauncher {
 
         try_join!(
             nexus_webapi_builder.start(Some(shutdown_rx.clone())),
-            nexus_watcher_builder.start(Some(shutdown_rx.clone())),
+            nexus_watcher_builder.start_with_client(Some(shutdown_rx.clone()), pubky_client),
             // Erase JobError to DynError so it unifies with the webapi/watcher
             // arms (try_join! needs one error type).
             async {

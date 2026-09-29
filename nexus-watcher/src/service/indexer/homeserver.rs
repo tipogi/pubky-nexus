@@ -7,9 +7,10 @@ use nexus_common::models::error::ModelError;
 use nexus_common::models::homeserver::Homeserver;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
-use pubky::Method;
 use pubky_app_specs::PubkyId;
-use pubky_watcher::{dispatch_retryable_error, EventBatch, EventRetryScheduler, PubkyConnector};
+use pubky_watcher::{
+    dispatch_retryable_error, EventBatch, EventRetryScheduler, HomeserverEventSource,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::watch::Receiver;
@@ -84,6 +85,7 @@ pub struct HsEventProcessor {
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
     pub event_handler: Arc<DynEventHandler>,
+    pub event_source: Arc<dyn HomeserverEventSource>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Scheduler used to enqueue failed events onto the retry queue
@@ -100,6 +102,8 @@ pub struct HsEventProcessor {
 
 #[async_trait::async_trait]
 impl TEventProcessor<Event, EventProcessorError> for HsEventProcessor {
+    type Output = ();
+
     fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
@@ -222,20 +226,16 @@ impl HsEventProcessor {
         debug!(cursor = %self.homeserver.cursor, "Polling events");
 
         let response_text = {
-            let pubky = PubkyConnector::get()?;
-            let url = format!(
-                "https://{}/events/?cursor={}&limit={}",
-                self.homeserver.id, self.homeserver.cursor, self.limit
-            );
+            let response = self
+                .event_source
+                .fetch_homeserver_events(
+                    &self.homeserver.id.to_public_key(),
+                    pubky::EventCursor::new(self.homeserver.cursor),
+                    self.limit,
+                )
+                .await?;
 
-            let response = pubky
-                .client()
-                .request(Method::GET, &url)
-                .send()
-                .await
-                .map_err(|e| EventProcessorError::client_error(e.to_string()))?;
-
-            let (buf, exceeded) = read_stream_capped(response.bytes_stream(), MAX_EVENTS_BODY)
+            let (buf, exceeded) = read_stream_capped(response.body, MAX_EVENTS_BODY)
                 .await
                 .map_err(|e| EventProcessorError::client_error(e.to_string()))?;
             if exceeded {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use nexus_common::models::user::UserIngestor;
 use nexus_common::{file::default_config_dir_path, types::DynError, ApiConfig, DaemonConfig};
 use pubky::pkarr::{self, Keypair};
-use pubky_watcher::PubkyConnector;
+use pubky_watcher::WatcherClient;
 
 #[derive(Debug, Clone)]
 pub struct ApiContext {
@@ -18,6 +18,7 @@ pub struct ApiContextBuilder {
     api_config: Option<ApiConfig>,
     config_dir: PathBuf,
     pkarr_builder: Option<pkarr::ClientBuilder>,
+    pubky_client: Option<Arc<WatcherClient>>,
 }
 
 impl ApiContextBuilder {
@@ -30,6 +31,7 @@ impl ApiContextBuilder {
             api_config: None,
             config_dir: config_dir.clone(),
             pkarr_builder: None,
+            pubky_client: None,
         }
     }
 
@@ -46,6 +48,11 @@ impl ApiContextBuilder {
         self
     }
 
+    pub fn pubky_client(mut self, client: Arc<WatcherClient>) -> Self {
+        self.pubky_client = Some(client);
+        self
+    }
+
     pub async fn try_build(&self) -> Result<ApiContext, DynError> {
         // Ensure path to config dir exists, regardless of how the builder was initialized
         std::fs::create_dir_all(self.config_dir.clone())?;
@@ -58,9 +65,14 @@ impl ApiContextBuilder {
             Some(ac) => ac.clone(),
         };
 
-        PubkyConnector::initialise(api_config.stack.net.pubky_client_testnet_host()).await?;
-
-        let ingestor = UserIngestor::from_config(&api_config.stack);
+        let client = match &self.pubky_client {
+            Some(client) => client.clone(),
+            None => Arc::new(match api_config.stack.net.pubky_client_testnet_host() {
+                Some(host) => WatcherClient::testnet(host)?,
+                None => WatcherClient::mainnet()?,
+            }),
+        };
+        let ingestor = UserIngestor::from_config(&api_config.stack, client);
 
         let pkarr_builder = self.pkarr_builder.clone().unwrap_or_default();
         let pkarr_client = pkarr_builder.build()?;

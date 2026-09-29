@@ -1,5 +1,8 @@
-mod connector;
 mod error;
+mod watcher_client;
 
-pub use connector::PubkyConnector;
 pub use error::{ClientError, ClientResult};
+pub use watcher_client::{
+    ClientResponse, HomeserverEventSource, HomeserverResolver, KeyEventSource, KeyEventStream,
+    ResourceReader, ResponseBody, WatcherClient,
+};

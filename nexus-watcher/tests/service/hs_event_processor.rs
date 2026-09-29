@@ -10,7 +10,9 @@ use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};
 use nexus_watcher::events::DynEventHandler;
 use nexus_watcher::service::HsEventProcessor;
+use pubky::{EventCursor, PublicKey};
 use pubky_app_specs::{post_uri_builder, PubkyId};
+use pubky_watcher::{ClientResponse, ClientResult, HomeserverEventSource};
 use tokio::sync::watch;
 
 use crate::service::utils::common::create_mock_handler;
@@ -24,6 +26,20 @@ const TEST_HS_ID: &str = "1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy";
 /// single shared one keeps it valid however many of these tests persist it for
 /// [`TEST_HS_ID`]: re-persisting the same cursor is not a rewind.
 const TEST_NEXT_CURSOR: &str = "cursor: 1";
+
+struct UnusedEventSource;
+
+#[async_trait::async_trait]
+impl HomeserverEventSource for UnusedEventSource {
+    async fn fetch_homeserver_events(
+        &self,
+        _homeserver: &PublicKey,
+        _cursor: EventCursor,
+        _limit: u16,
+    ) -> ClientResult<ClientResponse> {
+        unreachable!("these tests process constructed event lines directly")
+    }
+}
 
 /// Returns a fresh random user id (z32 public key) that has no graph state yet.
 fn random_user_id() -> String {
@@ -86,6 +102,7 @@ fn build_processor(
         homeserver: Homeserver::new(hs_id),
         limit: 100,
         event_handler,
+        event_source: Arc::new(UnusedEventSource),
         shutdown_rx,
         retry_scheduler,
         hs_mapping_cache: Default::default(),
@@ -120,6 +137,7 @@ async fn build_processor_at_cursor(
         homeserver,
         limit: 100,
         event_handler,
+        event_source: Arc::new(UnusedEventSource),
         shutdown_rx,
         retry_scheduler,
         hs_mapping_cache: Default::default(),

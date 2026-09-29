@@ -13,10 +13,9 @@ use nexus_common::models::homeserver::HsBlacklist;
 use nexus_common::models::user::UserHsCursor;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
-use pubky::errors::RequestError;
 use pubky::{Event as StreamEvent, EventCursor, PublicKey};
 use pubky_app_specs::PubkyId;
-use pubky_watcher::{dispatch_retryable_error, EventRetryScheduler, PubkyConnector};
+use pubky_watcher::{dispatch_retryable_error, ClientError, EventRetryScheduler, KeyEventSource};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
@@ -46,7 +45,15 @@ pub trait KeyBasedEventSource: Send + Sync + 'static {
     ) -> Result<Vec<StreamEvent>, EventProcessorError>;
 }
 
-pub struct PubkyKeyBasedEventSource;
+pub struct PubkyKeyBasedEventSource {
+    source: Arc<dyn KeyEventSource>,
+}
+
+impl PubkyKeyBasedEventSource {
+    pub fn new(source: Arc<dyn KeyEventSource>) -> Self {
+        Self { source }
+    }
+}
 
 #[async_trait::async_trait]
 impl KeyBasedEventSource for PubkyKeyBasedEventSource {
@@ -57,20 +64,15 @@ impl KeyBasedEventSource for PubkyKeyBasedEventSource {
         cursor: EventCursor,
         limit: u16,
     ) -> Result<Vec<StreamEvent>, EventProcessorError> {
-        let pubky = PubkyConnector::get()?;
-
         // We are building the stream without the live flag, so it performs an HTTP GET and closes.
         // See rustdoc of EventStreamBuilder::live()
-        let mut stream = pubky
-            .event_stream_for(hs_pk)
-            .add_users(vec![(user_pk, Some(cursor))])?
-            .limit(limit)
-            .path("/pub/")
-            .subscribe()
+        let mut stream = self
+            .source
+            .key_event_stream(hs_pk, user_pk, cursor, limit, "/pub/")
             .await
             .map_err(|error| match error {
-                pubky::Error::Request(RequestError::Transport(error)) => {
-                    EventProcessorError::hs_transport_failed(error)
+                ClientError::TransportFailed { message } => {
+                    EventProcessorError::hs_transport_failed(message)
                 }
                 error => error.into(),
             })
@@ -93,7 +95,12 @@ impl KeyBasedEventSource for PubkyKeyBasedEventSource {
 
             // Pubky uses SSE framing regardless of EventStreamBuilder::live().
             // Failures after response headers are emitted as stream item errors.
-            let event = result.map_err(EventProcessorError::hs_transport_failed)?;
+            let event = result.map_err(|error| match error {
+                ClientError::TransportFailed { message } => {
+                    EventProcessorError::hs_transport_failed(message)
+                }
+                error => error.into(),
+            })?;
             events.push(event);
         }
 
@@ -128,6 +135,8 @@ pub struct KeyBasedEventProcessor {
 
 #[async_trait::async_trait]
 impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
+    type Output = ();
+
     fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }

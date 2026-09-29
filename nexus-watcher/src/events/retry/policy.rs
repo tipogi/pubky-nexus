@@ -27,6 +27,7 @@ impl RetryableError for EventProcessorError {
                 | ClientError::TooManyRequests429 { .. }
                 | ClientError::ServerError5xx { .. }
                 | ClientError::RequestFailed { .. }
+                | ClientError::TransportFailed { .. }
                 | ClientError::PkarrFailed(_) => true,
 
                 ClientError::NotFound404 { .. }

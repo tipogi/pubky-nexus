@@ -19,7 +19,7 @@ use nexus_watcher::service::runner::UserNotFoundBackoff;
 use nexus_watcher::service::{KeyBasedEventProcessorRunner, TEventProcessorRunner};
 use pubky::{Event as StreamEvent, EventCursor, EventType, Keypair, PubkyResource, PublicKey};
 use pubky_app_specs::PubkyId;
-use pubky_watcher::ClientError;
+use pubky_watcher::{ClientError, WatcherClient};
 use tokio::sync::watch;
 
 use crate::service::utils::{
@@ -333,9 +333,11 @@ async fn key_based_runner_backs_off_homeserver_after_out_of_order_cursor() -> Re
             stream_event(1, &user_id, "/pub/pubky.app/profile.json")?,
         ],
     )]));
+    let client = Arc::new(WatcherClient::mainnet()?);
     let mut runner = KeyBasedEventProcessorRunner::from_config(
         &WatcherConfig::default(),
         watch::channel(false).1,
+        client,
     );
     runner.monitored_hs_limit = usize::MAX;
     runner.event_handler = create_mock_handler(Ok(()), None);

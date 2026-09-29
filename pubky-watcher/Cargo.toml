@@ -9,7 +9,10 @@ license = "MIT"
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1.12.1"
+futures-util = "0.3.34"
 pubky = { workspace = true }
+reqwest = { version = "0.13.4", features = ["stream"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
@@ -21,3 +24,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 [[example]]
 name = "poll_homeserver"
 path = "examples/poll_homeserver.rs"
+
+[[example]]
+name = "poll_homeserver_builder"
+path = "examples/poll_homeserver_builder.rs"
+
+[[example]]
+name = "poll_key_stream_builder"
+path = "examples/poll_key_stream_builder.rs"

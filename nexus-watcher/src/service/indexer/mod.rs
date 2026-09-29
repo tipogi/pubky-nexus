@@ -8,7 +8,8 @@ pub use crate::errors::{EventProcessorError, RunError};
 pub use crate::events::Event;
 pub use pubky_watcher::TEventProcessor;
 
-pub type DynEventProcessor = dyn TEventProcessor<Event, EventProcessorError> + Send + Sync;
+pub type DynEventProcessor =
+    dyn TEventProcessor<Event, EventProcessorError, Output = ()> + Send + Sync;
 
 /// OpenTelemetry meter name shared by all watcher indexer metrics.
 pub(super) const METER_NAME: &str = "nexus.watcher";

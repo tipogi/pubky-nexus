@@ -72,7 +72,9 @@ impl RunAllProcessorsStats {
 
 pub struct ProcessedStats(pub RunAllProcessorsStats);
 
-pub fn status_from_run_result<Err>(result: Result<(), RunError<Err>>) -> ProcessorRunStatus {
+pub fn status_from_run_result<Output, Err>(
+    result: Result<Output, RunError<Err>>,
+) -> ProcessorRunStatus {
     match result {
         Ok(_) => ProcessorRunStatus::Ok,
         Err(RunError::Internal(_)) => ProcessorRunStatus::Error,
@@ -94,7 +96,7 @@ where
         &self,
         hs_id: &str,
     ) -> Result<
-        Arc<dyn TEventProcessor<E, Err> + Send + Sync>,
+        Arc<dyn TEventProcessor<E, Err, Output = ()> + Send + Sync>,
         Box<dyn std::error::Error + Send + Sync>,
     >;
 
