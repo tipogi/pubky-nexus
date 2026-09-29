@@ -8,9 +8,11 @@ use nexus_common::models::user::UserDetails;
 use nexus_common::utils::test_utils::{random_pk, random_pubky_id};
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};
-use nexus_watcher::events::EventHandler;
+use nexus_watcher::events::DynEventHandler;
 use nexus_watcher::service::HsEventProcessor;
+use pubky::{EventCursor, PublicKey};
 use pubky_app_specs::{post_uri_builder, PubkyId};
+use pubky_watcher::{ClientResponse, ClientResult, HomeserverEventSource};
 use tokio::sync::watch;
 
 use crate::service::utils::common::create_mock_handler;
@@ -24,6 +26,20 @@ const TEST_HS_ID: &str = "1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy";
 /// single shared one keeps it valid however many of these tests persist it for
 /// [`TEST_HS_ID`]: re-persisting the same cursor is not a rewind.
 const TEST_NEXT_CURSOR: &str = "cursor: 1";
+
+struct UnusedEventSource;
+
+#[async_trait::async_trait]
+impl HomeserverEventSource for UnusedEventSource {
+    async fn fetch_homeserver_events(
+        &self,
+        _homeserver: &PublicKey,
+        _cursor: EventCursor,
+        _limit: u16,
+    ) -> ClientResult<ClientResponse> {
+        unreachable!("these tests process constructed event lines directly")
+    }
+}
 
 /// Returns a fresh random user id (z32 public key) that has no graph state yet.
 fn random_user_id() -> String {
@@ -70,7 +86,7 @@ async fn create_user_hosted_on(user_id: &str, hs_id: Option<&str>) {
 /// calling `process_event_lines` directly with constructed event lines.
 fn build_processor(
     store: Arc<dyn RetryStore>,
-    event_handler: Arc<dyn EventHandler>,
+    event_handler: Arc<DynEventHandler>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Arc<HsEventProcessor> {
     let retry_scheduler = Arc::new(RetryScheduler::new(
@@ -86,6 +102,7 @@ fn build_processor(
         homeserver: Homeserver::new(hs_id),
         limit: 100,
         event_handler,
+        event_source: Arc::new(UnusedEventSource),
         shutdown_rx,
         retry_scheduler,
         hs_mapping_cache: Default::default(),
@@ -101,7 +118,7 @@ fn build_processor(
 async fn build_processor_at_cursor(
     cursor: u64,
     store: Arc<dyn RetryStore>,
-    event_handler: Arc<dyn EventHandler>,
+    event_handler: Arc<DynEventHandler>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<Arc<HsEventProcessor>> {
     let hs_id = random_pubky_id();
@@ -120,6 +137,7 @@ async fn build_processor_at_cursor(
         homeserver,
         limit: 100,
         event_handler,
+        event_source: Arc::new(UnusedEventSource),
         shutdown_rx,
         retry_scheduler,
         hs_mapping_cache: Default::default(),

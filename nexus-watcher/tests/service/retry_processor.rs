@@ -9,7 +9,7 @@ use nexus_watcher::events::retry::{
     IndexKey, RedisRetryStore, RetryEvent, RetryProcessor, RetryStore, RETRY_MANAGER_EVENTS_INDEX,
     RETRY_MANAGER_PREFIX,
 };
-use nexus_watcher::events::EventHandler;
+use nexus_watcher::events::DynEventHandler;
 use nexus_watcher::events::EventType;
 use nexus_watcher::service::TEventProcessor;
 use pubky_app_specs::post_uri_builder;
@@ -66,7 +66,7 @@ fn create_index_key(post_id: &str) -> IndexKey {
 fn build_processor(
     store: Arc<dyn RetryStore>,
     config: EventRetryConfig,
-    event_handler: Arc<dyn EventHandler>,
+    event_handler: Arc<DynEventHandler>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Arc<RetryProcessor> {
     Arc::new(RetryProcessor {
@@ -405,7 +405,7 @@ async fn test_retry_404_removes_from_queue() -> Result<()> {
         store.clone(),
         create_test_config(10, 50, 60, 3600, 60, 3600),
         create_mock_handler(
-            Err(nexus_common::db::PubkyClientError::NotFound404 { message: event_uri }.into()),
+            Err(pubky_watcher::ClientError::NotFound404 { message: event_uri }.into()),
             Some(post_id),
         ),
         shutdown_rx,

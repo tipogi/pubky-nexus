@@ -21,3 +21,4 @@ pub mod service;
 
 pub use builder::NexusWatcherBuilder;
 pub use errors::EventProcessorError;
+pub use events::DynEventHandler;

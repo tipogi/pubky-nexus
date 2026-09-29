@@ -19,6 +19,7 @@ nexus-common = { version = "0.4.1", path = "../nexus-common" }
 opentelemetry = { workspace = true }
 redis = { workspace = true, features = ["tokio-comp"] }
 nexus-watcher = { version = "0.4.1", path = "../nexus-watcher" }
+pubky-watcher = { version = "0.1.0", path = "../pubky-watcher" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

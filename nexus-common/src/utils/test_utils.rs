@@ -6,8 +6,18 @@ use std::sync::Arc;
 
 use pubky::{Keypair, PublicKey};
 use pubky_app_specs::PubkyId;
+use pubky_watcher::{ClientResult, HomeserverResolver};
 
 use crate::models::user::UserIngestor;
+
+struct NoopHomeserverResolver;
+
+#[async_trait::async_trait]
+impl HomeserverResolver for NoopHomeserverResolver {
+    async fn resolve_homeserver(&self, _user: &PublicKey) -> ClientResult<Option<PublicKey>> {
+        Ok(None)
+    }
+}
 
 /// Generates a random public key.
 pub fn random_pk() -> PublicKey {
@@ -19,7 +29,7 @@ pub fn random_pubky_id() -> PubkyId {
     PubkyId::from(random_pk())
 }
 
-/// Default user ingestor for tests: empty HS blacklist (ingest everything).
+/// Builds a user ingestor for tests with an empty HS blacklist.
 pub fn default_ingestor_tests() -> Arc<UserIngestor> {
-    Arc::new(UserIngestor::default())
+    Arc::new(UserIngestor::new([], Arc::new(NoopHomeserverResolver)))
 }

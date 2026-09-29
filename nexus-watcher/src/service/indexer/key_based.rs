@@ -4,24 +4,22 @@ use std::{
 };
 
 use crate::errors::EventProcessorError;
+use crate::events::DynEventHandler;
 use crate::events::Event;
+use crate::service::runner::UserNotFoundBackoff;
+use crate::service::user_hs_resolver;
 use futures::StreamExt;
-use nexus_common::db::PubkyConnector;
 use nexus_common::models::homeserver::HsBlacklist;
 use nexus_common::models::user::UserHsCursor;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
-use pubky::errors::RequestError;
 use pubky::{Event as StreamEvent, EventCursor, PublicKey};
 use pubky_app_specs::PubkyId;
+use pubky_watcher::{dispatch_retryable_error, ClientError, EventRetryScheduler, KeyEventSource};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
-use super::TEventProcessor;
-use crate::events::retry::RetryScheduler;
-use crate::events::EventHandler;
-use crate::service::runner::UserNotFoundBackoff;
-use crate::service::user_hs_resolver;
+use super::{handle_event_with_tracing, TEventProcessor};
 
 const FETCH_EVENTS_429_BACKOFF_SECS: [u64; 3] = [1, 2, 3];
 
@@ -47,7 +45,15 @@ pub trait KeyBasedEventSource: Send + Sync + 'static {
     ) -> Result<Vec<StreamEvent>, EventProcessorError>;
 }
 
-pub struct PubkyKeyBasedEventSource;
+pub struct PubkyKeyBasedEventSource {
+    source: Arc<dyn KeyEventSource>,
+}
+
+impl PubkyKeyBasedEventSource {
+    pub fn new(source: Arc<dyn KeyEventSource>) -> Self {
+        Self { source }
+    }
+}
 
 #[async_trait::async_trait]
 impl KeyBasedEventSource for PubkyKeyBasedEventSource {
@@ -58,20 +64,15 @@ impl KeyBasedEventSource for PubkyKeyBasedEventSource {
         cursor: EventCursor,
         limit: u16,
     ) -> Result<Vec<StreamEvent>, EventProcessorError> {
-        let pubky = PubkyConnector::get()?;
-
         // We are building the stream without the live flag, so it performs an HTTP GET and closes.
         // See rustdoc of EventStreamBuilder::live()
-        let mut stream = pubky
-            .event_stream_for(hs_pk)
-            .add_users(vec![(user_pk, Some(cursor))])?
-            .limit(limit)
-            .path("/pub/")
-            .subscribe()
+        let mut stream = self
+            .source
+            .key_event_stream(hs_pk, user_pk, cursor, limit, "/pub/")
             .await
             .map_err(|error| match error {
-                pubky::Error::Request(RequestError::Transport(error)) => {
-                    EventProcessorError::hs_transport_failed(error)
+                ClientError::TransportFailed { message } => {
+                    EventProcessorError::hs_transport_failed(message)
                 }
                 error => error.into(),
             })
@@ -94,7 +95,12 @@ impl KeyBasedEventSource for PubkyKeyBasedEventSource {
 
             // Pubky uses SSE framing regardless of EventStreamBuilder::live().
             // Failures after response headers are emitted as stream item errors.
-            let event = result.map_err(EventProcessorError::hs_transport_failed)?;
+            let event = result.map_err(|error| match error {
+                ClientError::TransportFailed { message } => {
+                    EventProcessorError::hs_transport_failed(message)
+                }
+                error => error.into(),
+            })?;
             events.push(event);
         }
 
@@ -112,7 +118,7 @@ pub struct KeyBasedEventProcessor {
     /// Bounds execution time per user, preventing timeout and starvation.
     pub limit: u16,
 
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<DynEventHandler>,
     pub event_source: Arc<dyn KeyBasedEventSource>,
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
@@ -122,27 +128,39 @@ pub struct KeyBasedEventProcessor {
     pub hs_blacklist: HsBlacklist,
 
     /// Scheduler used to enqueue failed events onto the retry queue
-    pub retry_scheduler: Arc<RetryScheduler>,
+    pub retry_scheduler: Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>,
 
     pub shutdown_rx: Receiver<bool>,
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for KeyBasedEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
+impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
+    type Output = ();
+
+    fn event_handler(&self) -> &Arc<DynEventHandler> {
         &self.event_handler
     }
 
-    fn instance_name(&self) -> &'static str {
-        "KeyBasedEventProcessor"
+    fn instance_name(&self) -> String {
+        "KeyBasedEventProcessor".to_string()
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
-        Some(&self.retry_scheduler)
+    async fn handle_event(&self, event: &Event) -> Result<(), EventProcessorError> {
+        handle_event_with_tracing(self, event).await
     }
 
-    fn homeserver_id(&self) -> Option<&str> {
-        Some(self.homeserver_id.as_ref())
+    async fn handle_error(
+        &self,
+        event: &Event,
+        error: EventProcessorError,
+    ) -> Result<(), EventProcessorError> {
+        dispatch_retryable_error(
+            event,
+            error,
+            self.retry_scheduler.as_ref(),
+            self.homeserver_id.as_ref(),
+        )
+        .await
     }
 
     fn custom_timeout(&self) -> Option<Duration> {

@@ -1,7 +1,9 @@
 use crate::service::utils::processor::MockEventProcessor;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
-use nexus_watcher::service::{TEventProcessor, TEventProcessorRunner};
+use nexus_watcher::errors::EventProcessorError;
+use nexus_watcher::events::Event;
+use nexus_watcher::service::{DynEventProcessor, TEventProcessorRunner};
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 
@@ -55,7 +57,7 @@ impl MockEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner for MockEventProcessorRunner {
+impl TEventProcessorRunner<Event, EventProcessorError> for MockEventProcessorRunner {
     fn shutdown_rx(&self) -> Receiver<bool> {
         self.shutdown_rx.clone()
     }
@@ -63,7 +65,7 @@ impl TEventProcessorRunner for MockEventProcessorRunner {
     /// Returns the event processor for the specified homeserver.
     ///
     /// The mock event processor was pre-built and given to the mock runner on initialization, so this returns a reference to it.
-    async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
+    async fn build(&self, hs_id: &str) -> Result<Arc<DynEventProcessor>, DynError> {
         let mock_event_processor = self
             .event_processors
             .iter()

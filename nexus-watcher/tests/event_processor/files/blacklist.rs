@@ -6,13 +6,14 @@ use nexus_common::models::traits::Collection;
 use nexus_common::models::user::UserIngestor;
 use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_common::DEFAULT_MAX_FILE_SIZE;
-use nexus_watcher::events::handlers::file::sync_put;
+use nexus_watcher::events::handlers::file::{sync_put, FileFetch};
 use nexus_watcher::EventProcessorError;
 use pubky::Keypair;
 use pubky_app_specs::traits::{HasIdPath, HashId, TimestampId};
 use pubky_app_specs::{
     blob_uri_builder, file_uri_builder, PubkyAppBlob, PubkyAppFile, PubkyAppUser, PubkyId,
 };
+use std::sync::Arc;
 
 /// Creates a user on the test homeserver, uploads a blob and returns the
 /// `PubkyAppFile` pointing at it, along with the ids needed for `sync_put`.
@@ -61,7 +62,7 @@ async fn test_file_ingest_aborts_on_blacklisted_source_homeserver() -> Result<()
     let file_uri = file_uri_builder(user_id.clone(), file_id.clone());
 
     // Ingestor blacklisting the HS that hosts the blob source (the test homeserver)
-    let ingestor = UserIngestor::new([test.homeserver_id.clone()]);
+    let ingestor = UserIngestor::new([test.homeserver_id.clone()], Arc::new(test.client.clone()));
 
     let err = sync_put(
         file,
@@ -69,8 +70,11 @@ async fn test_file_ingest_aborts_on_blacklisted_source_homeserver() -> Result<()
         user_pubky_id,
         file_id.clone(),
         test.temp_dir.path(),
-        DEFAULT_MAX_FILE_SIZE,
         &ingestor,
+        FileFetch {
+            max_size: DEFAULT_MAX_FILE_SIZE,
+            resources: Arc::new(test.client.clone()),
+        },
     )
     .await
     .expect_err("file ingest should be refused for a blacklisted source HS");
@@ -121,7 +125,7 @@ async fn test_file_ingest_aborts_when_source_is_blacklisted_hs_pk_directly() -> 
     let file_uri = file_uri_builder(owner_id.to_string(), file_id.clone());
 
     // Ingestor blacklisting the HS PK used as the direct blob source.
-    let ingestor = UserIngestor::new([test.homeserver_id.clone()]);
+    let ingestor = UserIngestor::new([test.homeserver_id.clone()], Arc::new(test.client.clone()));
 
     let err = sync_put(
         file,
@@ -129,8 +133,11 @@ async fn test_file_ingest_aborts_when_source_is_blacklisted_hs_pk_directly() -> 
         owner_id.clone(),
         file_id.clone(),
         test.temp_dir.path(),
-        DEFAULT_MAX_FILE_SIZE,
         &ingestor,
+        FileFetch {
+            max_size: DEFAULT_MAX_FILE_SIZE,
+            resources: Arc::new(test.client.clone()),
+        },
     )
     .await
     .expect_err("file ingest should be refused when src addresses a blacklisted HS PK directly");
@@ -170,7 +177,7 @@ async fn test_file_ingest_proceeds_when_source_homeserver_not_blacklisted() -> R
     let file_uri = file_uri_builder(user_id.clone(), file_id.clone());
 
     // Ingestor blacklisting an unrelated HS; the source HS is not in the list
-    let ingestor = UserIngestor::new([random_pubky_id()]);
+    let ingestor = UserIngestor::new([random_pubky_id()], Arc::new(test.client.clone()));
 
     sync_put(
         file.clone(),
@@ -178,8 +185,11 @@ async fn test_file_ingest_proceeds_when_source_homeserver_not_blacklisted() -> R
         user_pubky_id,
         file_id.clone(),
         test.temp_dir.path(),
-        DEFAULT_MAX_FILE_SIZE,
         &ingestor,
+        FileFetch {
+            max_size: DEFAULT_MAX_FILE_SIZE,
+            resources: Arc::new(test.client.clone()),
+        },
     )
     .await
     .expect("file ingest should proceed when the source HS is not blacklisted");
