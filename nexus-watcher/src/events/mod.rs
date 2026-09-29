@@ -1,11 +1,14 @@
-use nexus_common::{db::PubkyConnector, models::user::UserIngestor};
+use nexus_common::{models::user::UserIngestor, WatcherConfig};
 pub mod event;
 
 pub use event::{Event, EventType, ParseResult};
+pub use pubky_watcher::EventHandler;
 
 use crate::errors::EventProcessorError;
-use nexus_common::WatcherConfig;
+
+pub type DynEventHandler = dyn EventHandler<Event, EventProcessorError> + Send + Sync;
 use pubky_app_specs::{ExtendedParsedUri, PubkyAppObject, Resource};
+use pubky_watcher::{ResourceReader, WatcherClient};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,16 +26,7 @@ pub(crate) use fetch::{
 };
 pub use moderation::Moderation;
 
-/// Trait for handling events.
-///
-/// This trait abstracts event handling logic to allow for flexible implementations,
-/// including mocked versions for testing.
-#[async_trait::async_trait]
-pub trait EventHandler: Send + Sync {
-    async fn handle(&self, event: &Event) -> Result<(), EventProcessorError>;
-}
-
-/// Default implementation of `EventHandler` that uses the actual event handling logic.
+/// Default implementation of [`EventHandler`] that uses the actual event handling logic.
 pub struct DefaultEventHandler {
     moderation: Arc<Moderation>,
     ingestor: Arc<UserIngestor>,
@@ -40,6 +34,7 @@ pub struct DefaultEventHandler {
 
     /// Local files directory on Nexus used for file-backed events.
     files_path: PathBuf,
+    resources: Arc<dyn ResourceReader>,
 }
 
 impl DefaultEventHandler {
@@ -48,28 +43,31 @@ impl DefaultEventHandler {
         ingestor: Arc<UserIngestor>,
         max_file_size: u64,
         files_path: PathBuf,
+        resources: Arc<dyn ResourceReader>,
     ) -> Self {
         Self {
             moderation,
             ingestor,
             max_file_size,
             files_path,
+            resources,
         }
     }
 
     /// Builds a handler, deriving its moderation rules and user ingestor from config.
-    pub fn from_config(config: &WatcherConfig) -> Self {
+    pub fn from_config(config: &WatcherConfig, client: Arc<WatcherClient>) -> Self {
         Self::new(
             Moderation::from_config(config),
-            Arc::new(UserIngestor::from_config(&config.stack)),
+            Arc::new(UserIngestor::from_config(&config.stack, client.clone())),
             config.max_file_size,
             config.stack.files_path.clone(),
+            client,
         )
     }
 }
 
 #[async_trait::async_trait]
-impl EventHandler for DefaultEventHandler {
+impl EventHandler<Event, EventProcessorError> for DefaultEventHandler {
     async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
         match event.event_type {
             EventType::Put => {
@@ -79,6 +77,7 @@ impl EventHandler for DefaultEventHandler {
                     self.files_path.as_path(),
                     self.moderation.clone(),
                     self.ingestor.clone(),
+                    self.resources.clone(),
                 )
                 .await
             }
@@ -98,13 +97,13 @@ pub async fn handle_put_event(
     files_path: &Path,
     moderation: Arc<Moderation>,
     ingestor: Arc<UserIngestor>,
+    resources: Arc<dyn ResourceReader>,
 ) -> Result<(), EventProcessorError> {
-    let pubky = PubkyConnector::get()?;
-    let response = pubky.public_storage().get(&event.uri).await?;
+    let response = resources.get_resource(&event.uri).await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let (body, _exceeded) = read_stream_capped(response.bytes_stream(), MAX_ERROR_BODY)
+    if !response.status.is_success() {
+        let status = response.status;
+        let (body, _exceeded) = read_stream_capped(response.body, MAX_ERROR_BODY)
             .await
             .unwrap_or_default();
         let body = format_error_body(&body, MAX_ERROR_BODY);
@@ -174,8 +173,11 @@ pub async fn handle_put_event(
                 user_id,
                 file_id,
                 files_path,
-                max_file_size,
                 &ingestor,
+                handlers::file::FileFetch {
+                    max_size: max_file_size,
+                    resources,
+                },
             )
             .await?
         }

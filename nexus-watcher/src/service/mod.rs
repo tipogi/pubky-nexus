@@ -7,8 +7,13 @@ pub mod user_hs_resolver;
 
 /// Module exports
 pub use constants::{PROCESSING_TIMEOUT_SECS, WATCHER_CONFIG_FILE_NAME};
-pub use indexer::{HsEventProcessor, KeyBasedEventProcessor, RunError, TEventProcessor};
-pub use runner::{HsEventProcessorRunner, KeyBasedEventProcessorRunner, TEventProcessorRunner};
+pub use indexer::{
+    DynEventProcessor, HsEventProcessor, KeyBasedEventProcessor, RunError, TEventProcessor,
+};
+pub use runner::{
+    DynEventProcessorRunner, HsEventProcessorRunner, KeyBasedEventProcessorRunner,
+    TEventProcessorRunner,
+};
 pub(crate) use task_runner::{run_periodic_tasks, PeriodicTask};
 pub use user_hs_resolver::UserHsResolverRunner;
 
@@ -20,6 +25,7 @@ use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::{DaemonConfig, WatcherConfig};
+use pubky_watcher::WatcherClient;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
@@ -81,7 +87,11 @@ impl NexusWatcher {
     /// All tasks listen for the shutdown signal to exit gracefully. If any task panics,
     /// an internal cancellation signal is sent so that sibling tasks can finish their
     /// current iteration and exit.
-    pub async fn start(shutdown_rx: Receiver<bool>, config: WatcherConfig) -> Result<(), DynError> {
+    pub async fn start(
+        shutdown_rx: Receiver<bool>,
+        config: WatcherConfig,
+        client: Arc<WatcherClient>,
+    ) -> Result<(), DynError> {
         debug!(?config, "Running NexusWatcher with ");
 
         Homeserver::persist_if_unknown(config.homeserver.clone()).await?;
@@ -94,19 +104,21 @@ impl NexusWatcher {
         let hs_runner = Arc::new(HsEventProcessorRunner::from_config(
             &config,
             shutdown_rx.clone(),
+            client.clone(),
         ));
         let key_based_runner = Arc::new(KeyBasedEventProcessorRunner::from_config(
             &config,
             shutdown_rx.clone(),
+            client.clone(),
         ));
         let user_hs_resolver_runner = Arc::new(UserHsResolverRunner::from_config(
             &config,
-            Box::new(user_hs_resolver::PubkyConnectorResolver),
             shutdown_rx.clone(),
+            client.clone(),
         ));
 
         // Create retry processor
-        let retry_processor = Arc::new(RetryProcessor::new(&config, shutdown_rx.clone()));
+        let retry_processor = Arc::new(RetryProcessor::new(&config, shutdown_rx.clone(), client));
 
         let tasks = vec![
             PeriodicTask::new(

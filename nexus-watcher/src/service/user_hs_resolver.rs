@@ -3,10 +3,7 @@
 //! Periodic task that resolves each user's homeserver and persists
 //! the `(:User)-[:HOSTED_BY]->(:Homeserver)` relationship in Neo4j.
 
-use nexus_common::db::{
-    fetch_key_from_graph, fetch_row_from_graph, queries, GraphResult, PubkyClientResult,
-    PubkyConnector,
-};
+use nexus_common::db::{fetch_key_from_graph, fetch_row_from_graph, queries, GraphResult};
 use nexus_common::models::user::{set_user_homeserver, set_user_homeserver_stale};
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
@@ -14,60 +11,37 @@ use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use opentelemetry::{global, KeyValue};
 use pubky::PublicKey;
 use pubky_app_specs::PubkyId;
+use pubky_watcher::{HomeserverResolver, WatcherClient};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
 static HS_RESOLVER_METRICS: LazyLock<HsResolverMetrics> = LazyLock::new(HsResolverMetrics::new);
 
-/// Resolves a user's currently published homeserver from PKDNS/DHT.
-///
-/// Abstracted behind a trait so the resolver loop can be driven with a mock in
-/// tests instead of hitting the network.
-#[async_trait::async_trait]
-pub trait PkdnsHomeserverResolver: Send + Sync {
-    /// Returns the HS published for `user_pk`, if any is currently published.
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>>;
-}
-
-/// Production resolver backed by the shared [`PubkyConnector`].
-pub struct PubkyConnectorResolver;
-
-#[async_trait::async_trait]
-impl PkdnsHomeserverResolver for PubkyConnectorResolver {
-    async fn resolve_homeserver(&self, user_pk: &PublicKey) -> PubkyClientResult<Option<PubkyId>> {
-        let pubky = PubkyConnector::get()?;
-        match pubky.get_homeserver_of(user_pk).await {
-            Some(hs_pk) => Ok(Some(PubkyId::from(hs_pk))),
-            None => Ok(None),
-        }
-    }
-}
-
 pub struct UserHsResolverRunner {
-    resolver: Box<dyn PkdnsHomeserverResolver>,
     ttl_ms: u64,
     shutdown_rx: Receiver<bool>,
+    resolver: Arc<dyn HomeserverResolver>,
 }
 
 impl UserHsResolverRunner {
     pub fn from_config(
         config: &WatcherConfig,
-        resolver: Box<dyn PkdnsHomeserverResolver>,
         shutdown_rx: Receiver<bool>,
+        client: Arc<WatcherClient>,
     ) -> Self {
         Self {
-            resolver,
             ttl_ms: config.hs_resolver_ttl,
             shutdown_rx,
+            resolver: client,
         }
     }
 
     pub async fn run(&self) -> Result<(), DynError> {
         let mut shutdown_rx = self.shutdown_rx.clone();
-        run(self.resolver.as_ref(), self.ttl_ms, &mut shutdown_rx).await
+        run(self.ttl_ms, &mut shutdown_rx, self.resolver.as_ref()).await
     }
 }
 
@@ -79,9 +53,9 @@ impl UserHsResolverRunner {
 /// `shutdown_rx` cancels the in-flight resolution on shutdown; cancelled users
 /// get re-picked-up on the next run via TTL.
 pub async fn run(
-    resolver: &dyn PkdnsHomeserverResolver,
     ttl_ms: u64,
     shutdown_rx: &mut Receiver<bool>,
+    resolver: &dyn HomeserverResolver,
 ) -> Result<(), DynError> {
     let user_ids = get_users_needing_resolution(ttl_ms).await?;
     let user_pks: Vec<PublicKey> = user_ids
@@ -137,7 +111,7 @@ pub async fn run(
                 shutting_down = true;
                 break;
             }
-            result = resolve_user(resolver, &user_pk) => {
+            result = resolve_user(&user_pk, resolver) => {
                 let user_id = user_pk.z32();
                 processed += 1;
                 let (outcome, mapping) = match result {
@@ -395,8 +369,8 @@ impl Resolution {
 /// A failed lookup is reported as a [`Resolution`] and leaves the graph
 /// untouched; only graph errors are returned as `Err`.
 async fn resolve_user(
-    resolver: &dyn PkdnsHomeserverResolver,
     user_pk: &PublicKey,
+    resolver: &dyn HomeserverResolver,
 ) -> Result<Resolution, DynError> {
     let user_id = user_pk.z32();
 
@@ -405,7 +379,7 @@ async fn resolve_user(
     let stored_mapping = get_user_homeserver(&user_id).await?;
 
     let maybe_resolved_hs_id = match resolver.resolve_homeserver(user_pk).await {
-        Ok(resolved) => resolved,
+        Ok(resolved) => resolved.map(PubkyId::from),
         Err(e) => {
             warn!(%user_id, error = %e, "PKDNS lookup failed");
             return Ok(Resolution::LookupFailed {
@@ -593,11 +567,12 @@ impl HsResolverMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nexus_common::db::exec_single_row;
     use nexus_common::db::graph::Query;
-    use nexus_common::db::{exec_single_row, PubkyClientError};
     use nexus_common::types::DynError;
     use nexus_common::utils::test_utils::{random_pk, random_pubky_id};
     use nexus_common::{StackConfig, StackManager};
+    use pubky_watcher::{ClientError, ClientResult};
 
     async fn setup() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await
@@ -610,12 +585,9 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl PkdnsHomeserverResolver for MockResolver {
-        async fn resolve_homeserver(
-            &self,
-            _user_pk: &PublicKey,
-        ) -> PubkyClientResult<Option<PubkyId>> {
-            Ok(self.result.clone())
+    impl HomeserverResolver for MockResolver {
+        async fn resolve_homeserver(&self, _user: &PublicKey) -> ClientResult<Option<PublicKey>> {
+            Ok(self.result.as_ref().map(PubkyId::to_public_key))
         }
     }
 
@@ -623,12 +595,9 @@ mod tests {
     struct FailingResolver;
 
     #[async_trait::async_trait]
-    impl PkdnsHomeserverResolver for FailingResolver {
-        async fn resolve_homeserver(
-            &self,
-            _user_pk: &PublicKey,
-        ) -> PubkyClientResult<Option<PubkyId>> {
-            Err(PubkyClientError::RequestFailed {
+    impl HomeserverResolver for FailingResolver {
+        async fn resolve_homeserver(&self, _user: &PublicKey) -> ClientResult<Option<PublicKey>> {
+            Err(ClientError::RequestFailed {
                 message: "dht unreachable".into(),
             })
         }
@@ -845,7 +814,7 @@ mod tests {
         let resolver = MockResolver {
             result: Some(hs_id.clone()),
         };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&user_pk, &resolver).await?;
         assert_eq!(outcome, Resolution::Bound);
 
         assert_eq!(
@@ -873,7 +842,7 @@ mod tests {
         create_test_user(&user_id).await?;
 
         let resolver = MockResolver { result: None };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&user_pk, &resolver).await?;
         assert_eq!(outcome, Resolution::Unbound);
 
         assert_eq!(get_user_homeserver(&user_id).await?, None);
@@ -907,7 +876,7 @@ mod tests {
         let resolver = MockResolver {
             result: Some(new_hs.clone()),
         };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&user_pk, &resolver).await?;
         assert_eq!(
             outcome,
             Resolution::Diverged {
@@ -950,7 +919,7 @@ mod tests {
 
         // DHT no longer publishes a homeserver
         let resolver = MockResolver { result: None };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&user_pk, &resolver).await?;
         assert_eq!(
             outcome,
             Resolution::Diverged {
@@ -997,7 +966,7 @@ mod tests {
         let resolver = MockResolver {
             result: Some(stored_hs.clone()),
         };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&user_pk, &resolver).await?;
         assert_eq!(outcome, Resolution::Confirmed { was_stale: true });
 
         assert!(get_user_ids_by_homeserver(&stored_hs)
@@ -1028,7 +997,7 @@ mod tests {
         let resolver = MockResolver {
             result: Some(new_hs.clone()),
         };
-        let outcome = resolve_user(&resolver, &user_pk).await?;
+        let outcome = resolve_user(&user_pk, &resolver).await?;
         assert_eq!(
             outcome,
             Resolution::Diverged {
@@ -1064,7 +1033,7 @@ mod tests {
         .param("user_id", user_id.as_str());
         exec_single_row(backdate_query).await?;
 
-        let outcome = resolve_user(&FailingResolver, &user_pk).await?;
+        let outcome = resolve_user(&user_pk, &FailingResolver).await?;
         assert_eq!(
             outcome,
             Resolution::LookupFailed {

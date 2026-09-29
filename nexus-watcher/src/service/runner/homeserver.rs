@@ -1,12 +1,14 @@
 use super::TEventProcessorRunner;
+use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
-use crate::events::{DefaultEventHandler, EventHandler};
-use crate::service::indexer::{HsEventProcessor, TEventProcessor};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event};
+use crate::service::indexer::{DynEventProcessor, HsEventProcessor};
 use crate::service::stats::{ProcessedStats, RunAllProcessorsStats};
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use pubky_app_specs::PubkyId;
+use pubky_watcher::{EventRetryScheduler, HomeserverEventSource, WatcherClient};
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 use tracing::debug;
@@ -15,22 +17,28 @@ pub struct HsEventProcessorRunner {
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
 
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<DynEventHandler>,
+    pub event_source: Arc<dyn HomeserverEventSource>,
     pub shutdown_rx: Receiver<bool>,
 
     /// See [WatcherConfig::homeserver]
     pub primary_homeserver: PubkyId,
 
     /// Scheduler shared with every processor this runner builds
-    pub retry_scheduler: Arc<RetryScheduler>,
+    pub retry_scheduler: Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>,
 }
 
 impl HsEventProcessorRunner {
     /// Creates a new instance from the provided configuration
-    pub fn from_config(config: &WatcherConfig, shutdown_rx: Receiver<bool>) -> Self {
+    pub fn from_config(
+        config: &WatcherConfig,
+        shutdown_rx: Receiver<bool>,
+        client: Arc<WatcherClient>,
+    ) -> Self {
         Self {
             limit: config.events_limit,
-            event_handler: Arc::new(DefaultEventHandler::from_config(config)),
+            event_handler: Arc::new(DefaultEventHandler::from_config(config, client.clone())),
+            event_source: client,
             shutdown_rx,
             primary_homeserver: config.homeserver.clone(),
             retry_scheduler: Arc::new(RetryScheduler::from_config(config)),
@@ -43,13 +51,13 @@ impl HsEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner for HsEventProcessorRunner {
+impl TEventProcessorRunner<Event, EventProcessorError> for HsEventProcessorRunner {
     fn shutdown_rx(&self) -> Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
     /// Creates and returns a new event processor instance for the specified homeserver
-    async fn build(&self, homeserver_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
+    async fn build(&self, homeserver_id: &str) -> Result<Arc<DynEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(homeserver_id)?;
         let homeserver = Homeserver::get_by_id(homeserver_id)
             .await?
@@ -59,6 +67,7 @@ impl TEventProcessorRunner for HsEventProcessorRunner {
             homeserver,
             limit: self.limit,
             event_handler: self.event_handler.clone(),
+            event_source: self.event_source.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             retry_scheduler: self.retry_scheduler.clone(),
             hs_mapping_cache: Default::default(),

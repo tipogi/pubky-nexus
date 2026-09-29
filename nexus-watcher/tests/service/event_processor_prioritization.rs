@@ -1,6 +1,8 @@
 use crate::event_processor::utils::default_moderation_tests;
 use crate::service::utils::HS_IDS;
-use crate::service::utils::{create_mock_event_processors, setup, MockEventProcessorRunner};
+use crate::service::utils::{
+    create_mock_event_processors, setup, MockEventProcessorRunner, MockKeyBasedEventSource,
+};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -13,12 +15,12 @@ use nexus_common::types::DynError;
 use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
 use nexus_common::DEFAULT_MAX_FILE_SIZE;
 use nexus_watcher::events::retry::{InitialBackoff, RedisRetryStore, RetryScheduler, RetryStore};
-use nexus_watcher::events::{DefaultEventHandler, EventHandler};
-use nexus_watcher::service::indexer::PubkyKeyBasedEventSource;
+use nexus_watcher::events::{DefaultEventHandler, DynEventHandler};
 use nexus_watcher::service::runner::HomeserverBackoff;
 use nexus_watcher::service::runner::UserNotFoundBackoff;
 use nexus_watcher::service::{KeyBasedEventProcessorRunner, TEventProcessorRunner};
 use pubky_app_specs::PubkyId;
+use pubky_watcher::WatcherClient;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -27,12 +29,14 @@ use tokio::sync::Mutex;
 async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(), DynError> {
     // Initialize the test
     setup().await?;
+    let client = Arc::new(WatcherClient::mainnet()?);
 
-    let event_handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
+    let event_handler: Arc<DynEventHandler> = Arc::new(DefaultEventHandler::new(
         default_moderation_tests(),
         default_ingestor_tests(),
         DEFAULT_MAX_FILE_SIZE,
         PathBuf::from("/tmp/nexus-watcher-test"),
+        client,
     ));
     let store: Arc<dyn RetryStore> = Arc::new(RedisRetryStore::new());
     let retry_scheduler = Arc::new(RetryScheduler::new(
@@ -46,7 +50,7 @@ async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(),
         limit: 1000,
         monitored_hs_limit: HS_IDS.len(),
         event_handler,
-        event_source: Arc::new(PubkyKeyBasedEventSource),
+        event_source: Arc::new(MockKeyBasedEventSource::default()),
         shutdown_rx: tokio::sync::watch::channel(false).1,
         primary_homeserver: PubkyId::try_from(HS_IDS[3]).unwrap(),
         hs_blacklist: HsBlacklist::default(),
@@ -75,12 +79,14 @@ async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(),
 async fn test_event_processor_runner_blacklisted_homeserver_excluded() -> Result<(), DynError> {
     // Initialize the test
     setup().await?;
+    let client = Arc::new(WatcherClient::mainnet()?);
 
-    let event_handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
+    let event_handler: Arc<DynEventHandler> = Arc::new(DefaultEventHandler::new(
         default_moderation_tests(),
         default_ingestor_tests(),
         DEFAULT_MAX_FILE_SIZE,
         PathBuf::from("/tmp/nexus-watcher-test"),
+        client,
     ));
     let store: Arc<dyn RetryStore> = Arc::new(RedisRetryStore::new());
     let retry_scheduler = Arc::new(RetryScheduler::new(
@@ -98,7 +104,7 @@ async fn test_event_processor_runner_blacklisted_homeserver_excluded() -> Result
         limit: 1000,
         monitored_hs_limit: 100,
         event_handler,
-        event_source: Arc::new(PubkyKeyBasedEventSource),
+        event_source: Arc::new(MockKeyBasedEventSource::default()),
         shutdown_rx: tokio::sync::watch::channel(false).1,
         primary_homeserver: PubkyId::try_from(HS_IDS[3]).unwrap(),
         hs_blacklist: HsBlacklist::new([blacklisted_hs.clone()]),

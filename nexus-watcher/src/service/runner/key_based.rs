@@ -1,8 +1,9 @@
 use super::{TEventProcessorRunner, UserNotFoundBackoff};
+use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
-use crate::events::{DefaultEventHandler, EventHandler};
+use crate::events::{DefaultEventHandler, DynEventHandler, Event};
 use crate::service::indexer::{
-    KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource, TEventProcessor,
+    DynEventProcessor, KeyBasedEventProcessor, KeyBasedEventSource, PubkyKeyBasedEventSource,
     METER_NAME,
 };
 use crate::service::runner::key_based_hs_backoff::HomeserverBackoff;
@@ -13,6 +14,7 @@ use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
 use pubky_app_specs::PubkyId;
+use pubky_watcher::{EventRetryScheduler, WatcherClient};
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{watch::Receiver, Mutex};
 use tracing::{debug, info, warn};
@@ -71,7 +73,7 @@ pub struct KeyBasedEventProcessorRunner {
     /// See [WatcherConfig::monitored_homeservers_limit]
     pub monitored_hs_limit: usize,
 
-    pub event_handler: Arc<dyn EventHandler>,
+    pub event_handler: Arc<DynEventHandler>,
     pub event_source: Arc<dyn KeyBasedEventSource>,
     pub shutdown_rx: Receiver<bool>,
 
@@ -88,17 +90,21 @@ pub struct KeyBasedEventProcessorRunner {
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
     /// Scheduler shared with every processor this runner builds
-    pub retry_scheduler: Arc<RetryScheduler>,
+    pub retry_scheduler: Arc<dyn EventRetryScheduler<Event, EventProcessorError> + Send + Sync>,
 }
 
 impl KeyBasedEventProcessorRunner {
     /// Creates a new instance from the provided configuration
-    pub fn from_config(config: &WatcherConfig, shutdown_rx: Receiver<bool>) -> Self {
+    pub fn from_config(
+        config: &WatcherConfig,
+        shutdown_rx: Receiver<bool>,
+        client: Arc<WatcherClient>,
+    ) -> Self {
         Self {
             limit: config.key_based_events_limit,
             monitored_hs_limit: config.monitored_homeservers_limit,
-            event_handler: Arc::new(DefaultEventHandler::from_config(config)),
-            event_source: Arc::new(PubkyKeyBasedEventSource),
+            event_handler: Arc::new(DefaultEventHandler::from_config(config, client.clone())),
+            event_source: Arc::new(PubkyKeyBasedEventSource::new(client)),
             shutdown_rx,
             primary_homeserver: config.homeserver.clone(),
             hs_blacklist: HsBlacklist::from_config(&config.stack),
@@ -128,12 +134,12 @@ impl KeyBasedEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
+impl TEventProcessorRunner<Event, EventProcessorError> for KeyBasedEventProcessorRunner {
     fn shutdown_rx(&self) -> Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
-    async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
+    async fn build(&self, hs_id: &str) -> Result<Arc<DynEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(hs_id)?;
 
         Ok(Arc::new(KeyBasedEventProcessor {

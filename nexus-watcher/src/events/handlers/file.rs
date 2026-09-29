@@ -1,13 +1,18 @@
 use crate::events::{fetch_capped, EventProcessorError};
 
-use nexus_common::db::PubkyConnector;
 use nexus_common::media::FileVariant;
 use nexus_common::models::user::UserIngestor;
 use nexus_common::models::{file::FileDetails, traits::Collection};
 use pubky_app_specs::{ParsedUri, PubkyAppBlob, PubkyAppFile, PubkyAppObject, PubkyId};
-use std::path::Path;
+use pubky_watcher::ResourceReader;
+use std::{path::Path, sync::Arc};
 use tokio::fs::{self, remove_dir_all};
 use tracing::{debug, warn};
+
+pub struct FileFetch {
+    pub max_size: u64,
+    pub resources: Arc<dyn ResourceReader>,
+}
 
 #[tracing::instrument(name = "file.put", skip_all, fields(user_id = %user_id, file_id = %file_id))]
 pub async fn sync_put(
@@ -16,8 +21,8 @@ pub async fn sync_put(
     user_id: PubkyId,
     file_id: String,
     files_path: &Path,
-    max_file_size: u64,
     ingestor: &UserIngestor,
+    fetch: FileFetch,
 ) -> Result<(), EventProcessorError> {
     debug!("Indexing file");
 
@@ -26,8 +31,9 @@ pub async fn sync_put(
         file_id.as_str(),
         &file,
         files_path,
-        max_file_size,
+        fetch.max_size,
         ingestor,
+        fetch.resources,
     )
     .await?;
 
@@ -58,6 +64,7 @@ async fn ingest(
     files_path: &Path,
     max_file_size: u64,
     ingestor: &UserIngestor,
+    resources: Arc<dyn ResourceReader>,
 ) -> Result<(), EventProcessorError> {
     let file_src = &pubkyapp_file.src;
     let parsed_source_uri = ParsedUri::try_from(file_src.to_string()).map_err(|e| {
@@ -70,8 +77,7 @@ async fn ingest(
         .await
         .inspect_err(|e| warn!("Aborting file ingest: source {file_src}: {e}"))?;
 
-    let pubky = PubkyConnector::get()?;
-    let response = pubky.public_storage().get(&pubkyapp_file.src).await?;
+    let response = resources.get_resource(&pubkyapp_file.src).await?;
 
     let path = Path::new(&user_id.to_string()).join(file_id);
     let full_path = files_path.join(&path);
