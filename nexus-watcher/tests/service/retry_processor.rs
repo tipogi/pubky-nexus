@@ -1,4 +1,6 @@
-use crate::event_processor::users::utils::set_user_epoch;
+use crate::event_processor::users::utils::{
+    find_cached_user_details, find_user_epoch, set_user_epoch,
+};
 use crate::event_processor::utils::default_moderation_tests;
 use crate::service::utils::common::create_mock_handler;
 use crate::service::utils::{
@@ -11,7 +13,7 @@ use nexus_common::db::kv::RedisOps;
 use nexus_common::db::{exec_single_row, queries};
 use nexus_common::models::post::PostDetails;
 use nexus_common::models::traits::Collection;
-use nexus_common::models::user::UserDetails;
+use nexus_common::models::user::{Epoch, UserDetails};
 use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{
@@ -19,13 +21,13 @@ use nexus_watcher::events::retry::{
     RETRY_MANAGER_PREFIX,
 };
 use nexus_watcher::events::EventType;
-use nexus_watcher::events::{DefaultEventHandler, EventHandler};
+use nexus_watcher::events::{handlers, DefaultEventHandler, EventHandler};
 use nexus_watcher::service::RunOutcome;
 use nexus_watcher::service::TEventProcessor;
 use pubky_social_specs::legacy_v0::traits::TimestampId;
 use pubky_social_specs::legacy_v0::{post_uri_builder, PubkyAppPost, PubkyAppPostKind};
-use pubky_social_specs::traits::TimestampId as _;
-use pubky_social_specs::{PubkySocialPost, PubkySocialPostKind, Root};
+use pubky_social_specs::traits::{HasPath as _, TimestampId as _};
+use pubky_social_specs::{PubkySocialPost, PubkySocialPostKind, PubkySocialUser, Root};
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -1548,6 +1550,73 @@ async fn test_social_v1_entry_of_a_v0_user_is_removed_and_nothing_indexed() -> R
     );
 
     exec_single_row(queries::del::delete_user(&user_id)).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// A queued `social/v1` profile flips its `v0` user
+// A v1 profile line queued for a user still at `v0` goes through the real
+// handler: the profile is indexed, the user moves to `v1` in the graph and the
+// cache, and the entry is removed.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_social_v1_profile_entry_flips_a_v0_user() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    // No epoch on the node: the user reads as `v0`
+    UserDetails::from_pubky(user.clone()).put_to_graph().await?;
+
+    let profile = PubkySocialUser::new("Retry:EpochGate:Flip".to_string(), None, None, None, None);
+    let event_uri = format!("pubky://{user_id}{}", PubkySocialUser::create_path());
+    let client = Arc::new(
+        MockHomeserverClient::default().with_resource(&event_uri, serde_json::to_vec(&profile)?),
+    );
+    let files = tempfile::TempDir::new()?;
+    let handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
+        default_moderation_tests(),
+        default_ingestor_tests(),
+        client,
+        files.path().to_path_buf(),
+    ));
+
+    let store = new_in_memory_store();
+    let retry_event = RetryEvent {
+        retry_count: 0,
+        event_type: EventType::Put,
+        event_uri: event_uri.clone(),
+        next_retry_at: Utc::now().timestamp_millis() - 1000,
+        origin_homeserver_id: TEST_HOMESERVER_ID.to_string(),
+        nonce: 0,
+    };
+    store.put(&retry_event).await?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(10, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("the flip must not fail the batch");
+
+    assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
+    let cached = find_cached_user_details(&user_id).await?;
+    assert_eq!(cached.epoch, Epoch::V1);
+    assert_eq!(cached.name, "Retry:EpochGate:Flip");
+    assert!(
+        store.get(&IndexKey::for_uri(&event_uri)).await?.is_none(),
+        "Handled entry must be removed from the queue"
+    );
+
+    handlers::user::del(user).await?;
     let _ = shutdown_tx.send(true);
     Ok(())
 }

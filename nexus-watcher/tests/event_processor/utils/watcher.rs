@@ -31,8 +31,10 @@ use pubky_social_specs::legacy_v0::{
     traits::{HasIdPath, HasPath, TimestampId},
     PubkyAppFile, PubkyAppFollow, PubkyAppPost, PubkyAppUser,
 };
-use pubky_social_specs::traits::HasPath as _;
-use pubky_social_specs::{PubkyId, PubkySocialPost, PubkySocialUser, Root};
+use pubky_social_specs::traits::{HasIdPath as _, HasPath as _, HashId as _};
+use pubky_social_specs::{
+    PubkyId, PubkySocialFollow, PubkySocialPost, PubkySocialTag, PubkySocialUser, Root,
+};
 use pubky_testnet::Testnet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -394,6 +396,30 @@ impl WatcherTest {
             PubkySocialPost::create_path_in(Root::Pub, post_id, edit_id, None).parse()?;
         self.put(user_kp, &version_path, post).await?;
         Ok(version_path)
+    }
+
+    /// Writes a `social/v1` follow of `followee_id`, at
+    /// `/pub/social/v1/follows/{followee_id}.json`.
+    pub async fn put_v1_follow(
+        &mut self,
+        follower_kp: &Keypair,
+        followee_id: &str,
+    ) -> Result<ResourcePath> {
+        let follow_path: ResourcePath = PubkySocialFollow::create_path(followee_id).parse()?;
+        self.put(follower_kp, &follow_path, PubkySocialFollow::new())
+            .await?;
+        Ok(follow_path)
+    }
+
+    /// Writes `tag` as a `social/v1` tag, at `/pub/social/v1/tags/{tag_id}.json`.
+    pub async fn put_v1_tag(
+        &mut self,
+        tagger_kp: &Keypair,
+        tag: &PubkySocialTag,
+    ) -> Result<ResourcePath> {
+        let tag_path: ResourcePath = PubkySocialTag::create_path(&tag.create_id()).parse()?;
+        self.put(tagger_kp, &tag_path, tag).await?;
+        Ok(tag_path)
     }
 
     pub async fn cleanup_user(&mut self, user_kp: &Keypair) -> Result<()> {

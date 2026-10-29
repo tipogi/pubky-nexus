@@ -1,20 +1,12 @@
-use super::utils::{find_user_details, find_user_epoch, set_user_epoch};
+use super::utils::{find_cached_user_details, find_user_details, find_user_epoch, set_user_epoch};
 use crate::event_processor::posts::utils::{pubky_id, short_post, test_user};
 use crate::event_processor::utils::watcher::WatcherTest;
 use anyhow::Result;
-use nexus_common::models::user::{Epoch, UserDetails};
+use nexus_common::models::user::Epoch;
 use nexus_watcher::events::handlers;
 use nexus_watcher::events::inputs::UserInput;
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::user_uri_builder;
-
-/// The epoch in the user's cached details.
-async fn cached_epoch(user_id: &str) -> Result<Epoch> {
-    let user = UserDetails::get_by_id(user_id)
-        .await?
-        .expect("the user's details are cached");
-    Ok(user.epoch)
-}
 
 /// A profile edit never overwrites a stored epoch, and caches it.
 ///
@@ -44,7 +36,7 @@ async fn test_user_edit_keeps_epoch() -> Result<()> {
         "Watcher:UserEpoch:Put:Edited"
     );
     assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
-    assert_eq!(cached_epoch(&user_id).await?, Epoch::V1);
+    assert_eq!(find_cached_user_details(&user_id).await?.epoch, Epoch::V1);
 
     // Back to `v0`, so the gate lets the cleanup through
     set_user_epoch(&user_id, "v0").await?;
@@ -74,11 +66,11 @@ async fn test_user_tombstone_keeps_epoch() -> Result<()> {
 
     assert!(find_user_details(&user_id).await?.deleted);
     assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
-    assert_eq!(cached_epoch(&user_id).await?, Epoch::V1);
+    assert_eq!(find_cached_user_details(&user_id).await?.epoch, Epoch::V1);
 
     // Back to `v0`, so the gate lets the cleanup through
     set_user_epoch(&user_id, "v0").await?;
-    test.cleanup_user(&user_kp).await?;
     test.cleanup_post(&user_kp, &post_path).await?;
+    test.cleanup_user(&user_kp).await?;
     Ok(())
 }

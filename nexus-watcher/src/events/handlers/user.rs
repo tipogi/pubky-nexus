@@ -23,7 +23,7 @@ pub async fn sync_put(user: UserInput, user_id: PubkyId) -> Result<(), EventProc
 
     // Step 2: Save to graph, with the address the profile is stored under. The node keeps its
     // epoch, which the cache copies.
-    user_details.epoch = user_details.put_profile_to_graph(&uri).await?;
+    user_details.put_profile_to_graph(&uri).await?;
 
     // Step 3: Reindex search BEFORE refreshing the details cache. `put_to_index`
     // resolves the stale `name:id` member from the cached JSON, so a concurrent
@@ -99,7 +99,7 @@ pub async fn del(user_id: PubkyId) -> Result<(), EventProcessorError> {
             // would let a concurrent read cache the live profile again afterwards.
             // The tombstone keeps the stored `uri` and its epoch in the graph.
             let mut tombstone = UserDetails::tombstone(&user_id);
-            tombstone.epoch = tombstone.put_tombstone_to_graph().await?;
+            tombstone.put_tombstone_to_graph().await?;
 
             // 3. Cache the tombstone rather than invalidating: the users-by-tag removal
             // guard reads `$.deleted` from this document and a missing key reads as

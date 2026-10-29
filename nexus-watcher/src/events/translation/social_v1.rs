@@ -171,6 +171,9 @@ impl PostInput {
     /// resolved; the attachments as their addresses, `alt` and `name` dropped.
     pub fn from_v1(post: PubkySocialPost, author: &PubkyId, post_id: &str) -> Self {
         Self {
+            // TODO(specs-migration): the edit id is dropped, so an older version retried after a
+            // newer one overwrites it; "newest version wins" comes with the v1 edit design (E1),
+            // before clients write v1.
             uri: post_uri_builder(author.to_string(), post_id.to_string()),
             collection_items: collection_items(&post),
             parent: post.parent.as_deref().map(resolve_reference),

@@ -1,15 +1,21 @@
-use super::utils::{find_user_details, find_user_epoch, find_user_uri, set_user_epoch};
+use super::utils::{
+    find_cached_user_details, find_user_details, find_user_epoch, find_user_uri, set_user_epoch,
+};
+use crate::event_processor::follows::utils::find_follow_relationship;
 use crate::event_processor::posts::utils::{
     find_post_details, find_post_uri, short_post, test_user, v1_note, v1_test_user,
 };
+use crate::event_processor::tags::utils::find_post_tag;
 use crate::event_processor::utils::watcher::{
     generate_post_id, retrieve_and_handle_event_line, WatcherTest,
 };
 use anyhow::Result;
 use nexus_common::models::event::EventLine;
-use nexus_common::models::user::{Epoch, UserDetails};
+use nexus_common::models::user::Epoch;
+use nexus_watcher::events::retry::{IndexKey, RetryEvent};
 use pubky::{Keypair, ResourcePath};
 use pubky_social_specs::legacy_v0::post_uri_builder;
+use pubky_social_specs::{post_uri_builder as v1_post_uri_builder, PubkySocialTag};
 
 /// Whether the shared event log holds `line`.
 async fn event_line_stored(line: &str) -> Result<bool> {
@@ -20,7 +26,18 @@ async fn event_line_stored(line: &str) -> Result<bool> {
 
 /// The event line of `kind` on `user_id`'s `path`.
 fn line(kind: &str, user_id: &str, path: &ResourcePath) -> String {
-    format!("{kind} pubky://{user_id}{path}")
+    format!("{kind} {}", uri(user_id, path))
+}
+
+/// The address of `user_id`'s `path`.
+fn uri(user_id: &str, path: &ResourcePath) -> String {
+    format!("pubky://{user_id}{path}")
+}
+
+/// Whether the retry queue holds an entry for `uri`: an ignored event leaves none, a failed
+/// one may.
+async fn queued_for_retry(uri: &str) -> Result<bool> {
+    Ok(RetryEvent::check_index_key(&IndexKey::for_uri(uri)).await?)
 }
 
 /// A `pubky.app` post PUT of a user at `v1` is ignored: the post is not indexed and the event
@@ -48,6 +65,7 @@ async fn test_v1_user_pubky_app_post_put_is_ignored() -> Result<()> {
         !event_line_stored(&format!("PUT {uri}")).await?,
         "an ignored event must store no event line"
     );
+    assert!(!queued_for_retry(&uri).await?);
 
     // Ignored as well: there is no post to delete
     test.cleanup_post(&user_kp, &post_path).await?;
@@ -81,6 +99,7 @@ async fn test_v1_user_pubky_app_post_del_is_ignored() -> Result<()> {
         !event_line_stored(&del_line).await?,
         "an ignored event must store no event line"
     );
+    assert!(!queued_for_retry(&uri).await?);
 
     // Back to `v0`, then delete the post the homeserver no longer holds
     set_user_epoch(&user_id, "v0").await?;
@@ -142,6 +161,7 @@ async fn test_v0_user_social_v1_post_put_is_ignored() -> Result<()> {
             !event_line_stored(&line("PUT", &user_id, path)).await?,
             "an ignored event must store no event line"
         );
+        assert!(!queued_for_retry(&uri(&user_id, path)).await?);
     }
 
     // Ignored as well
@@ -189,6 +209,7 @@ async fn test_v0_user_social_v1_post_del_is_ignored() -> Result<()> {
         !event_line_stored(&line("DEL", &user_id, &copy_path)).await?,
         "an ignored event must store no event line"
     );
+    assert!(!queued_for_retry(&uri(&user_id, &copy_path)).await?);
 
     test.cleanup_post(&user_kp, &post_path).await?;
     test.cleanup_user(&user_kp).await?;
@@ -197,10 +218,7 @@ async fn test_v0_user_social_v1_post_del_is_ignored() -> Result<()> {
 
 /// The cached details without `indexed_at`, which every profile write renews.
 async fn cached_details(user_id: &str) -> Result<serde_json::Value> {
-    let user = UserDetails::get_by_id(user_id)
-        .await?
-        .expect("the user's details are cached");
-    let mut user = serde_json::to_value(user)?;
+    let mut user = serde_json::to_value(find_cached_user_details(user_id).await?)?;
     user.as_object_mut()
         .expect("details serialize as an object")
         .remove("indexed_at");
@@ -231,9 +249,7 @@ async fn test_v0_user_flips_on_social_v1_profile_put() -> Result<()> {
     let profile_path = test.put_v1_profile(&user_kp, &profile).await?;
 
     assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
-    let user = UserDetails::get_by_id(&user_id)
-        .await?
-        .expect("the flipped user is cached");
+    let user = find_cached_user_details(&user_id).await?;
     assert_eq!(user.epoch, Epoch::V1);
     assert_eq!(user.name, "Watcher:EpochGate:Flip:V1");
     assert_eq!(
@@ -282,9 +298,7 @@ async fn test_new_user_social_v1_profile_put_creates_the_user_at_v1() -> Result<
         .await?;
 
     assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
-    let user = UserDetails::get_by_id(&user_id)
-        .await?
-        .expect("the new user is cached");
+    let user = find_cached_user_details(&user_id).await?;
     assert_eq!(user.epoch, Epoch::V1);
     assert_eq!(user.name, "Watcher:EpochGate:NewV1");
     assert_eq!(
@@ -322,9 +336,7 @@ async fn test_flipped_user_is_read_through_social_v1() -> Result<()> {
         &v1_test_user("Watcher:EpochGate:Flipped:Edited", "epoch_gate"),
     )
     .await?;
-    let user = UserDetails::get_by_id(&user_id)
-        .await?
-        .expect("the flipped user is cached");
+    let user = find_cached_user_details(&user_id).await?;
     assert_eq!(user.name, "Watcher:EpochGate:Flipped:Edited");
     assert_eq!(user.epoch, Epoch::V1);
     assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
@@ -396,9 +408,7 @@ async fn test_flipped_user_tombstone_keeps_v1() -> Result<()> {
     let tombstone = find_user_details(&user_id).await?;
     assert!(tombstone.deleted);
     assert_eq!(tombstone.epoch, Epoch::V1);
-    let cached = UserDetails::get_by_id(&user_id)
-        .await?
-        .expect("the tombstone is cached");
+    let cached = find_cached_user_details(&user_id).await?;
     assert!(cached.deleted);
     assert_eq!(cached.epoch, Epoch::V1);
 
@@ -493,5 +503,109 @@ async fn test_v1_user_social_v1_edit_of_a_pubky_app_post_keeps_indexed_at() -> R
     test.cleanup_post(&user_kp, &post_path).await?;
     test.del(&user_kp, &version_path).await?;
     test.cleanup_user(&user_kp).await?;
+    Ok(())
+}
+
+/// A `social/v1` follow PUT of a user at `v1` creates the `FOLLOWS` edge, and its DEL removes
+/// it.
+#[tokio_shared_rt::test(shared)]
+async fn test_v1_user_social_v1_follow_is_indexed() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let follower_kp = Keypair::random();
+    let follower_id = test
+        .create_user(
+            &follower_kp,
+            &test_user("Watcher:EpochGate:V1Follow:Follower", "epoch_gate"),
+        )
+        .await?;
+    let followee_kp = Keypair::random();
+    let followee_id = test
+        .create_user(
+            &followee_kp,
+            &test_user("Watcher:EpochGate:V1Follow:Followee", "epoch_gate"),
+        )
+        .await?;
+    set_user_epoch(&follower_id, "v1").await?;
+
+    let follow_path = test.put_v1_follow(&follower_kp, &followee_id).await?;
+    assert!(
+        find_follow_relationship(&follower_id, &followee_id).await?,
+        "a v1 user's social/v1 follow must create the edge"
+    );
+    assert!(event_line_stored(&line("PUT", &follower_id, &follow_path)).await?);
+
+    test.del(&follower_kp, &follow_path).await?;
+    assert!(
+        !find_follow_relationship(&follower_id, &followee_id).await?,
+        "a v1 user's social/v1 follow DEL must remove the edge"
+    );
+
+    // Back to `v0`, so the gate lets the cleanup through
+    set_user_epoch(&follower_id, "v0").await?;
+    test.cleanup_user(&follower_kp).await?;
+    test.cleanup_user(&followee_kp).await?;
+    Ok(())
+}
+
+/// A `social/v1` tag PUT of a user at `v1` on a post, named by its v1 address, creates the
+/// `TAGGED` edge, and its DEL removes it.
+#[tokio_shared_rt::test(shared)]
+async fn test_v1_user_social_v1_post_tag_is_indexed() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let author_kp = Keypair::random();
+    let author_id = test
+        .create_user(
+            &author_kp,
+            &test_user("Watcher:EpochGate:V1Tag:Author", "epoch_gate"),
+        )
+        .await?;
+    let tagger_kp = Keypair::random();
+    let tagger_id = test
+        .create_user(
+            &tagger_kp,
+            &test_user("Watcher:EpochGate:V1Tag:Tagger", "epoch_gate"),
+        )
+        .await?;
+    set_user_epoch(&author_id, "v1").await?;
+    set_user_epoch(&tagger_id, "v1").await?;
+
+    let post_id = generate_post_id();
+    let version_path = test
+        .put_v1_post_version(
+            &author_kp,
+            &post_id,
+            &post_id,
+            &v1_note("Watcher:EpochGate:V1Tag:Post"),
+        )
+        .await?;
+
+    let label = "epochgate";
+    let tag = PubkySocialTag::new(
+        v1_post_uri_builder(author_id.clone(), post_id.clone()),
+        label.to_string(),
+    );
+    let tag_path = test.put_v1_tag(&tagger_kp, &tag).await?;
+    let post_tag = find_post_tag(&author_id, &post_id, label)
+        .await?
+        .expect("a v1 user's social/v1 tag must tag the post");
+    assert_eq!(post_tag.taggers_count, 1);
+    assert_eq!(post_tag.taggers, [tagger_id.as_str()]);
+    assert!(event_line_stored(&line("PUT", &tagger_id, &tag_path)).await?);
+
+    test.del(&tagger_kp, &tag_path).await?;
+    assert!(
+        find_post_tag(&author_id, &post_id, label).await?.is_none(),
+        "a v1 user's social/v1 tag DEL must remove the tag"
+    );
+
+    // Handled at `v1`
+    test.del(&author_kp, &version_path).await?;
+    // Back to `v0`, so the gate lets the cleanup through
+    set_user_epoch(&author_id, "v0").await?;
+    set_user_epoch(&tagger_id, "v0").await?;
+    test.cleanup_user(&tagger_kp).await?;
+    test.cleanup_user(&author_kp).await?;
     Ok(())
 }

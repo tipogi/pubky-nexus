@@ -1,3 +1,4 @@
+use crate::db::graph::Query;
 use crate::db::{exec_single_row, fetch_key_from_graph, queries, GraphResult};
 use serde::de::{value, IntoDeserializer};
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,12 @@ impl Epoch {
     /// The epoch stored on `user_id`'s `User` node; `V0` when the node has none, or when
     /// there is no node yet.
     pub async fn get_from_graph(user_id: &str) -> GraphResult<Self> {
-        let epoch = fetch_key_from_graph(queries::get::get_user_epoch(user_id), "epoch").await?;
+        Self::fetch_from_graph(queries::get::get_user_epoch(user_id)).await
+    }
+
+    /// Runs `query`, which returns a user's stored epoch as `epoch`; `V0` when it returns none.
+    pub(crate) async fn fetch_from_graph(query: Query) -> GraphResult<Self> {
+        let epoch = fetch_key_from_graph(query, "epoch").await?;
         Ok(epoch.unwrap_or_default())
     }
 
@@ -109,34 +115,26 @@ mod tests {
         Ok(())
     }
 
-    /// A profile or tombstone write returns the stored epoch and keeps it, the in-memory
-    /// `V0` notwithstanding.
+    /// A profile or tombstone write sets the stored epoch on the struct and keeps it, the
+    /// in-memory `V0` notwithstanding.
     #[tokio_shared_rt::test(shared)]
-    async fn user_writes_return_and_keep_the_stored_epoch() -> Result<(), DynError> {
+    async fn user_writes_set_and_keep_the_stored_epoch() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await?;
 
         let user_id = random_pubky_id();
         let id = user_id.to_string();
         let uri = format!("pubky://{id}/pub/social/v1/profile.json");
-        let profile = UserDetails::from_pubky(user_id.clone());
-        assert_eq!(
-            profile.put_profile_to_graph(&uri).await?,
-            Epoch::V0,
-            "new node"
-        );
+        let mut profile = UserDetails::from_pubky(user_id.clone());
+        profile.put_profile_to_graph(&uri).await?;
+        assert_eq!(profile.epoch, Epoch::V0, "new node");
 
         Epoch::set_v1_in_graph(&id).await?;
-        assert_eq!(
-            profile.put_profile_to_graph(&uri).await?,
-            Epoch::V1,
-            "profile"
-        );
-        let tombstone = UserDetails::tombstone(&user_id);
-        assert_eq!(
-            tombstone.put_tombstone_to_graph().await?,
-            Epoch::V1,
-            "tombstone"
-        );
+        let mut profile = UserDetails::from_pubky(user_id.clone());
+        profile.put_profile_to_graph(&uri).await?;
+        assert_eq!(profile.epoch, Epoch::V1, "profile");
+        let mut tombstone = UserDetails::tombstone(&user_id);
+        tombstone.put_tombstone_to_graph().await?;
+        assert_eq!(tombstone.epoch, Epoch::V1, "tombstone");
         assert_eq!(Epoch::get_from_graph(&id).await?, Epoch::V1, "kept");
 
         exec_single_row(queries::del::delete_user(&id)).await?;
