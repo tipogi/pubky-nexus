@@ -2,6 +2,7 @@ use nexus_common::models::user::UserIngestor;
 mod classify;
 mod epoch_metrics;
 pub mod event;
+mod gate;
 pub mod inputs;
 mod route;
 pub mod target;
@@ -93,6 +94,12 @@ impl DefaultEventHandler {
 #[async_trait::async_trait]
 impl EventHandler for DefaultEventHandler {
     async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
+        // Before any fetch. An ignored event stores no event line, and `Ok` moves the cursor
+        // on and removes its retry entry.
+        if !gate::admits(event).await? {
+            return Ok(());
+        }
+
         match event.event_type {
             EventType::Put => {
                 handle_put_event(

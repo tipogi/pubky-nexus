@@ -1,3 +1,4 @@
+use nexus_common::models::user::Epoch;
 use pubky_social_specs::legacy_v0::ExtendedParsedUri;
 use pubky_social_specs::{ParsedUri, PubkyId};
 
@@ -17,6 +18,14 @@ pub enum EventTarget {
 }
 
 impl EventTarget {
+    /// The epoch the event's address is written in.
+    pub fn epoch(&self) -> Epoch {
+        match self {
+            Self::Legacy(_) => Epoch::V0,
+            Self::Social(_) => Epoch::V1,
+        }
+    }
+
     /// The user whose storage the event addresses.
     pub fn user_id(&self) -> &PubkyId {
         match self {

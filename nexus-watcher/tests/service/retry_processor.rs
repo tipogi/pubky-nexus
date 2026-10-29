@@ -1,19 +1,29 @@
+use crate::event_processor::users::utils::set_user_epoch;
+use crate::event_processor::utils::default_moderation_tests;
 use crate::service::utils::common::create_mock_handler;
-use crate::service::utils::{new_in_memory_store, setup, HS_IDS, TEST_USER_ID};
+use crate::service::utils::{
+    new_in_memory_store, setup, MockHomeserverClient, HS_IDS, TEST_USER_ID,
+};
 use anyhow::Result;
 use chrono::Utc;
 use nexus_common::config::EventRetryConfig;
 use nexus_common::db::kv::RedisOps;
+use nexus_common::db::{exec_single_row, queries};
+use nexus_common::models::post::PostDetails;
+use nexus_common::models::traits::Collection;
+use nexus_common::models::user::UserDetails;
+use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::retry::{
     IndexKey, RedisRetryStore, RetryEvent, RetryProcessor, RetryStore, RETRY_MANAGER_EVENTS_INDEX,
     RETRY_MANAGER_PREFIX,
 };
-use nexus_watcher::events::EventHandler;
 use nexus_watcher::events::EventType;
+use nexus_watcher::events::{DefaultEventHandler, EventHandler};
 use nexus_watcher::service::RunOutcome;
 use nexus_watcher::service::TEventProcessor;
-use pubky_social_specs::legacy_v0::post_uri_builder;
+use pubky_social_specs::legacy_v0::traits::TimestampId;
+use pubky_social_specs::legacy_v0::{post_uri_builder, PubkyAppPost, PubkyAppPostKind};
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -1381,6 +1391,83 @@ async fn test_skipped_entry_is_removed_without_handler_call() -> Result<()> {
         "Handled v0 entry must be removed from the queue"
     );
 
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// Entry the epoch gate ignores is removed
+// A `pubky.app` line queued for a user since moved to `v1` goes through the real
+// handler: the gate ignores it, so the entry is removed and nothing is indexed.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_gated_entry_is_removed_and_nothing_indexed() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    UserDetails::from_pubky(user).put_to_graph().await?;
+    set_user_epoch(&user_id, "v1").await?;
+
+    // The homeserver still serves the post: only the gate keeps it out
+    let post = PubkyAppPost {
+        content: "Retry:EpochGate:Post".to_string(),
+        kind: PubkyAppPostKind::Short,
+        parent: None,
+        embed: None,
+        attachments: None,
+        lock: None,
+    };
+    let post_id = post.create_id();
+    let event_uri = post_uri_builder(user_id.clone(), post_id.clone());
+    let client = Arc::new(
+        MockHomeserverClient::default().with_resource(&event_uri, serde_json::to_vec(&post)?),
+    );
+    let files = tempfile::TempDir::new()?;
+    let handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
+        default_moderation_tests(),
+        default_ingestor_tests(),
+        client,
+        files.path().to_path_buf(),
+    ));
+
+    let store = new_in_memory_store();
+    let retry_event = RetryEvent {
+        retry_count: 0,
+        event_type: EventType::Put,
+        event_uri: event_uri.clone(),
+        next_retry_at: Utc::now().timestamp_millis() - 1000,
+        origin_homeserver_id: TEST_HOMESERVER_ID.to_string(),
+        nonce: 0,
+    };
+    store.put(&retry_event).await?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(10, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("an ignored entry must not fail the batch");
+
+    assert!(
+        store.get(&IndexKey::for_uri(&event_uri)).await?.is_none(),
+        "Ignored entry must be removed from the queue"
+    );
+    assert!(
+        PostDetails::get_from_graph(&user_id, &post_id)
+            .await?
+            .is_none(),
+        "Ignored entry must index nothing"
+    );
+
+    exec_single_row(queries::del::delete_user(&user_id)).await?;
     let _ = shutdown_tx.send(true);
     Ok(())
 }
