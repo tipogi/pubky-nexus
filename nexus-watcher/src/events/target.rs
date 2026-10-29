@@ -12,8 +12,8 @@ pub enum EventTarget {
     /// A `pubky.app` path parsed by the frozen v0 reader. Another app's tag file
     /// (`/pub/mapky/tags/…`) is skipped before it becomes one.
     Legacy(ExtendedParsedUri),
-    /// A `/pub/social/v1/…` path parsed by the v1 parser. Only the router builds it: the
-    /// classifier still skips every `social/v1` event before the fetch.
+    /// A `/pub/social/v1/…` path parsed by the v1 parser. A resource the v1 translator has no
+    /// handler for, a file until N5 among them, is skipped before it becomes one.
     Social(ParsedUri),
 }
 

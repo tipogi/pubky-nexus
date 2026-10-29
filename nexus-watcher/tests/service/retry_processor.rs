@@ -24,6 +24,8 @@ use nexus_watcher::service::RunOutcome;
 use nexus_watcher::service::TEventProcessor;
 use pubky_social_specs::legacy_v0::traits::TimestampId;
 use pubky_social_specs::legacy_v0::{post_uri_builder, PubkyAppPost, PubkyAppPostKind};
+use pubky_social_specs::traits::TimestampId as _;
+use pubky_social_specs::{PubkySocialPost, PubkySocialPostKind, Root};
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -1339,8 +1341,8 @@ async fn test_future_events_not_picked_up() -> Result<()> {
 
 // ============================================================================
 // Skipped-by-design entry is removed without a handler call
-// A `social/v1` line left in the queue from before the epoch router re-parses
-// to `Skipped`: the processor drops it and still handles the v0 line next to it.
+// A `social/v1` file line left in the queue re-parses to `Skipped`: the
+// processor drops it unfetched and still handles the v0 line next to it.
 // ============================================================================
 
 #[tokio_shared_rt::test(shared)]
@@ -1350,12 +1352,13 @@ async fn test_skipped_entry_is_removed_without_handler_call() -> Result<()> {
     let store = new_in_memory_store();
     let now = Utc::now().timestamp_millis();
 
-    // A v0 post line and, next to it, a `social/v1` post line as a processor
-    // without the epoch router stored it; both ready now.
+    // A v0 post line and, next to it, a `social/v1` file line, which no handler
+    // takes until v1 files are supported; both ready now.
     let post_id = "skipnextv0";
     let v0_event = create_test_retry_event(post_id, EventType::Put, 0, now - 1000);
     let v0_uri = v0_event.event_uri.clone();
-    let v1_uri = format!("pubky://{TEST_USER_ID}/pub/social/v1/posts/0032SSN7Q4EVG");
+    let v1_uri =
+        format!("pubky://{TEST_USER_ID}/pub/social/v1/files/8Z8CWH8NVYQY39ZEBFGKQWWEKG.jpg");
     let v1_event = RetryEvent {
         event_uri: v1_uri.clone(),
         ..v0_event.clone()
@@ -1421,6 +1424,83 @@ async fn test_gated_entry_is_removed_and_nothing_indexed() -> Result<()> {
     };
     let post_id = post.create_id();
     let event_uri = post_uri_builder(user_id.clone(), post_id.clone());
+    let client = Arc::new(
+        MockHomeserverClient::default().with_resource(&event_uri, serde_json::to_vec(&post)?),
+    );
+    let files = tempfile::TempDir::new()?;
+    let handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
+        default_moderation_tests(),
+        default_ingestor_tests(),
+        client,
+        files.path().to_path_buf(),
+    ));
+
+    let store = new_in_memory_store();
+    let retry_event = RetryEvent {
+        retry_count: 0,
+        event_type: EventType::Put,
+        event_uri: event_uri.clone(),
+        next_retry_at: Utc::now().timestamp_millis() - 1000,
+        origin_homeserver_id: TEST_HOMESERVER_ID.to_string(),
+        nonce: 0,
+    };
+    store.put(&retry_event).await?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(10, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("an ignored entry must not fail the batch");
+
+    assert!(
+        store.get(&IndexKey::for_uri(&event_uri)).await?.is_none(),
+        "Ignored entry must be removed from the queue"
+    );
+    assert!(
+        PostDetails::get_from_graph(&user_id, &post_id)
+            .await?
+            .is_none(),
+        "Ignored entry must index nothing"
+    );
+
+    exec_single_row(queries::del::delete_user(&user_id)).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// `social/v1` entry of a `v0` user is removed
+// A v1 line queued for a user still at `v0` goes through the real handler:
+// the gate ignores it, so the entry is removed and nothing is indexed.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_social_v1_entry_of_a_v0_user_is_removed_and_nothing_indexed() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    // No epoch on the node: the user reads as `v0`
+    UserDetails::from_pubky(user).put_to_graph().await?;
+
+    // The homeserver still serves the post version: only the gate keeps it out
+    let post = PubkySocialPost::new(
+        "Retry:EpochGate:SocialV1".to_string(),
+        PubkySocialPostKind::Note,
+        None,
+        None,
+        vec![],
+    );
+    let post_id = post.create_id();
+    let path = PubkySocialPost::create_path_in(Root::Pub, &post_id, &post_id, None);
+    let event_uri = format!("pubky://{user_id}{path}");
     let client = Arc::new(
         MockHomeserverClient::default().with_resource(&event_uri, serde_json::to_vec(&post)?),
     );
