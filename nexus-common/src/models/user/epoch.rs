@@ -1,4 +1,4 @@
-use crate::db::{fetch_key_from_graph, queries, GraphResult};
+use crate::db::{exec_single_row, fetch_key_from_graph, queries, GraphResult};
 use serde::de::{value, IntoDeserializer};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -34,6 +34,12 @@ impl Epoch {
         let epoch = fetch_key_from_graph(queries::get::get_user_epoch(user_id), "epoch").await?;
         Ok(epoch.unwrap_or_default())
     }
+
+    /// Moves `user_id`'s `User` node to `V1`; a missing node stays missing. Nothing writes
+    /// `V0` over a stored epoch, so the epoch only moves up.
+    pub async fn set_v1_in_graph(user_id: &str) -> GraphResult<()> {
+        exec_single_row(queries::put::set_user_epoch_v1(user_id)).await
+    }
 }
 
 impl FromStr for Epoch {
@@ -49,7 +55,6 @@ impl FromStr for Epoch {
 #[cfg(test)]
 mod tests {
     use super::Epoch;
-    use crate::db::graph::Query;
     use crate::db::{exec_single_row, queries};
     use crate::models::traits::Collection;
     use crate::models::user::UserDetails;
@@ -86,13 +91,53 @@ mod tests {
         UserDetails::from_pubky(user_id).put_to_graph().await?;
         assert_eq!(Epoch::get_from_graph(&id).await?, Epoch::V0, "no epoch");
 
-        let set_v1 = Query::new(
-            "test_set_user_epoch",
-            "MATCH (u:User {id: $user_id}) SET u.epoch = 'v1'",
-        )
-        .param("user_id", id.clone());
-        exec_single_row(set_v1).await?;
+        Epoch::set_v1_in_graph(&id).await?;
         assert_eq!(Epoch::get_from_graph(&id).await?, Epoch::V1, "stored v1");
+
+        exec_single_row(queries::del::delete_user(&id)).await?;
+        Ok(())
+    }
+
+    /// The `v1` write leaves a missing node missing.
+    #[tokio_shared_rt::test(shared)]
+    async fn set_v1_in_graph_creates_no_node() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+
+        let id = random_pubky_id().to_string();
+        Epoch::set_v1_in_graph(&id).await?;
+        assert!(UserDetails::get_from_graph(&[id.as_str()]).await?[0].is_none());
+        Ok(())
+    }
+
+    /// A profile or tombstone write returns the stored epoch and keeps it, the in-memory
+    /// `V0` notwithstanding.
+    #[tokio_shared_rt::test(shared)]
+    async fn user_writes_return_and_keep_the_stored_epoch() -> Result<(), DynError> {
+        StackManager::setup(&StackConfig::default()).await?;
+
+        let user_id = random_pubky_id();
+        let id = user_id.to_string();
+        let uri = format!("pubky://{id}/pub/social/v1/profile.json");
+        let profile = UserDetails::from_pubky(user_id.clone());
+        assert_eq!(
+            profile.put_profile_to_graph(&uri).await?,
+            Epoch::V0,
+            "new node"
+        );
+
+        Epoch::set_v1_in_graph(&id).await?;
+        assert_eq!(
+            profile.put_profile_to_graph(&uri).await?,
+            Epoch::V1,
+            "profile"
+        );
+        let tombstone = UserDetails::tombstone(&user_id);
+        assert_eq!(
+            tombstone.put_tombstone_to_graph().await?,
+            Epoch::V1,
+            "tombstone"
+        );
+        assert_eq!(Epoch::get_from_graph(&id).await?, Epoch::V1, "kept");
 
         exec_single_row(queries::del::delete_user(&id)).await?;
         Ok(())

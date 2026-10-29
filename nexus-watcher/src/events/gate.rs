@@ -1,15 +1,19 @@
 //! The epoch gate: every user is read through one path, the one their epoch names.
 
 use super::epoch_metrics::record_gated;
-use super::event::Event;
+use super::event::{Event, EventType};
+use super::target::EventTarget;
 use crate::errors::EventProcessorError;
 use nexus_common::models::user::Epoch;
+use pubky_social_specs::Resource;
 
 /// What the gate does with an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Gate {
+pub(super) enum Gate {
     /// The event goes on to the handlers.
     Handle,
+    /// The event goes on to the handlers, then its user moves to `v1`: the flip.
+    Flip,
     /// The event is skipped: no fetch, no stored event line, no error, no retry.
     Ignore,
 }
@@ -21,25 +25,30 @@ fn decide(event: &Event, user_epoch: Epoch) -> Gate {
         (Epoch::V0, Epoch::V0) | (Epoch::V1, Epoch::V1) => Gate::Handle,
         // A user at `v1` is no longer read through `pubky.app`, PUT or DEL.
         (Epoch::V0, Epoch::V1) => Gate::Ignore,
+        // The migrator writes the `social/v1` profile last, so its PUT ends the user's migration.
+        (Epoch::V1, Epoch::V0) if is_profile_put(event) => Gate::Flip,
         // A user at `v0` is not read through `social/v1`, PUT or DEL: these are the migrator's
         // copies, which must not go through the edit path.
-        // TODO(flip): a `social/v1` profile PUT flips the user to `v1` instead.
         (Epoch::V1, Epoch::V0) => Gate::Ignore,
     }
 }
 
-/// Whether `event` goes on to the handlers, by its user's epoch in the graph: never the cached
+/// Whether `event` is a PUT of a `social/v1` profile.
+fn is_profile_put(event: &Event) -> bool {
+    event.event_type == EventType::Put
+        && matches!(&event.target, EventTarget::Social(parsed) if parsed.resource == Resource::User)
+}
+
+/// The gate's decision for `event`, by its user's epoch in the graph: never the cached
 /// `User:Details` copy, which a concurrent profile write can leave stale. An ignored event is
 /// counted on `watcher.epoch.skipped`.
-pub(super) async fn admits(event: &Event) -> Result<bool, EventProcessorError> {
+pub(super) async fn check(event: &Event) -> Result<Gate, EventProcessorError> {
     let user_epoch = Epoch::get_from_graph(event.target.user_id()).await?;
-    match decide(event, user_epoch) {
-        Gate::Handle => Ok(true),
-        Gate::Ignore => {
-            record_gated(&event.target, &event.uri, user_epoch);
-            Ok(false)
-        }
+    let gate = decide(event, user_epoch);
+    if gate == Gate::Ignore {
+        record_gated(&event.target, &event.uri, user_epoch);
     }
+    Ok(gate)
 }
 
 #[cfg(test)]
@@ -97,12 +106,31 @@ mod tests {
         }
     }
 
-    /// The v1 profile PUT included: it is ignored until the flip.
+    /// All but the v1 profile PUT, which flips the user.
     #[test]
     fn a_v0_user_has_social_v1_events_ignored() {
+        let profile_put = format!("PUT pubky://{USER}/pub/social/v1/profile.json");
         for line in social_v1_lines() {
-            assert_eq!(decide(&event(&line), Epoch::V0), Gate::Ignore, "{line}");
+            let expected = if line == profile_put {
+                Gate::Flip
+            } else {
+                Gate::Ignore
+            };
+            assert_eq!(decide(&event(&line), Epoch::V0), expected, "{line}");
         }
+    }
+
+    /// A `pubky.app` profile PUT is no flip: only the `social/v1` one ends a migration.
+    #[test]
+    fn only_the_social_v1_profile_put_flips() {
+        let line = format!("PUT pubky://{USER}/pub/pubky.app/profile.json");
+        assert_eq!(decide(&event(&line), Epoch::V0), Gate::Handle);
+        let line = format!("PUT pubky://{USER}/pub/social/v1/profile.json");
+        assert_eq!(
+            decide(&event(&line), Epoch::V1),
+            Gate::Handle,
+            "a profile edit"
+        );
     }
 
     #[test]

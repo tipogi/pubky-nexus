@@ -37,6 +37,7 @@ pub mod handlers;
 mod moderation;
 pub mod retry;
 
+use gate::Gate;
 use handlers::utils::bounded;
 use inputs::{ReferenceTarget, ResourceKey, TagInput};
 pub use moderation::Moderation;
@@ -96,7 +97,8 @@ impl EventHandler for DefaultEventHandler {
     async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
         // Before any fetch. An ignored event stores no event line, and `Ok` moves the cursor
         // on and removes its retry entry.
-        if !gate::admits(event).await? {
+        let gate = gate::check(event).await?;
+        if gate == Gate::Ignore {
             return Ok(());
         }
 
@@ -115,6 +117,11 @@ impl EventHandler for DefaultEventHandler {
                 handle_del_event(event, self.files_path.as_path(), self.ingestor.clone()).await
             }
         }?;
+
+        // After the profile is indexed, so a failure there leaves the user at `v0`.
+        if gate == Gate::Flip {
+            handlers::user::flip(event.target.user_id()).await?;
+        }
 
         event.to_event_line().store().await?;
         Ok(())

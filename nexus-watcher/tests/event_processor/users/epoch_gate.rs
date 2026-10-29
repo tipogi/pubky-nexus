@@ -7,8 +7,9 @@ use crate::event_processor::utils::watcher::{
 };
 use anyhow::Result;
 use nexus_common::models::event::EventLine;
+use nexus_common::models::user::{Epoch, UserDetails};
 use pubky::{Keypair, ResourcePath};
-use pubky_social_specs::legacy_v0::{post_uri_builder, user_uri_builder};
+use pubky_social_specs::legacy_v0::post_uri_builder;
 
 /// Whether the shared event log holds `line`.
 async fn event_line_stored(line: &str) -> Result<bool> {
@@ -194,41 +195,217 @@ async fn test_v0_user_social_v1_post_del_is_ignored() -> Result<()> {
     Ok(())
 }
 
-/// A `social/v1` profile PUT of a user at `v0` is ignored like any other `social/v1` event
-/// until the flip: the profile, its address and the epoch stay as they were.
+/// The cached details without `indexed_at`, which every profile write renews.
+async fn cached_details(user_id: &str) -> Result<serde_json::Value> {
+    let user = UserDetails::get_by_id(user_id)
+        .await?
+        .expect("the user's details are cached");
+    let mut user = serde_json::to_value(user)?;
+    user.as_object_mut()
+        .expect("details serialize as an object")
+        .remove("indexed_at");
+    Ok(user)
+}
+
+/// The `social/v1` profile address of `user_id`.
+fn v1_profile_uri(user_id: &str) -> String {
+    format!("pubky://{user_id}/pub/social/v1/profile.json")
+}
+
+/// A `social/v1` profile PUT of a user at `v0` flips them: the profile is indexed with its v1
+/// address, the user is at `v1` in the graph and the cache, and their `pubky.app` post stays.
+/// Writing the same profile again changes nothing.
 #[tokio_shared_rt::test(shared)]
-async fn test_v0_user_social_v1_profile_put_is_ignored() -> Result<()> {
+async fn test_v0_user_flips_on_social_v1_profile_put() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let user_kp = Keypair::random();
+    let user_id = test
+        .create_user(&user_kp, &test_user("Watcher:EpochGate:Flip", "epoch_gate"))
+        .await?;
+    let (post_id, post_path) = test
+        .create_post(&user_kp, &short_post("Watcher:EpochGate:Flip:Post"))
+        .await?;
+
+    let profile = v1_test_user("Watcher:EpochGate:Flip:V1", "epoch_gate");
+    let profile_path = test.put_v1_profile(&user_kp, &profile).await?;
+
+    assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
+    let user = UserDetails::get_by_id(&user_id)
+        .await?
+        .expect("the flipped user is cached");
+    assert_eq!(user.epoch, Epoch::V1);
+    assert_eq!(user.name, "Watcher:EpochGate:Flip:V1");
+    assert_eq!(
+        find_user_uri(&user_id).await,
+        Some(v1_profile_uri(&user_id))
+    );
+    assert!(event_line_stored(&line("PUT", &user_id, &profile_path)).await?);
+    assert_eq!(
+        find_post_details(&user_id, &post_id).await?.content,
+        "Watcher:EpochGate:Flip:Post"
+    );
+
+    // The same profile again: a profile edit that changes nothing
+    let before = cached_details(&user_id).await?;
+    test.put_v1_profile(&user_kp, &profile).await?;
+    assert_eq!(cached_details(&user_id).await?, before);
+    assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
+    assert_eq!(
+        find_user_uri(&user_id).await,
+        Some(v1_profile_uri(&user_id))
+    );
+
+    // Back to `v0`, so the gate lets the `pubky.app` cleanup through; the v1 DEL is then ignored
+    set_user_epoch(&user_id, "v0").await?;
+    test.cleanup_post(&user_kp, &post_path).await?;
+    test.del(&user_kp, &profile_path).await?;
+    test.cleanup_user(&user_kp).await?;
+    Ok(())
+}
+
+/// A user whose first event is a `social/v1` profile PUT is created at `v1`.
+#[tokio_shared_rt::test(shared)]
+async fn test_new_user_social_v1_profile_put_creates_the_user_at_v1() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let user_kp = Keypair::random();
+    let user_id = user_kp.public_key().to_z32();
+    test.register_user(&user_kp).await?;
+    assert!(find_user_details(&user_id).await.is_err(), "no node yet");
+
+    let profile_path = test
+        .put_v1_profile(
+            &user_kp,
+            &v1_test_user("Watcher:EpochGate:NewV1", "epoch_gate"),
+        )
+        .await?;
+
+    assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
+    let user = UserDetails::get_by_id(&user_id)
+        .await?
+        .expect("the new user is cached");
+    assert_eq!(user.epoch, Epoch::V1);
+    assert_eq!(user.name, "Watcher:EpochGate:NewV1");
+    assert_eq!(
+        find_user_uri(&user_id).await,
+        Some(v1_profile_uri(&user_id))
+    );
+
+    // Handled at `v1`
+    test.del(&user_kp, &profile_path).await?;
+    Ok(())
+}
+
+/// After the flip, the user is read through `social/v1` only: a profile edit is indexed and
+/// keeps `v1`, a `pubky.app` post is ignored and a `social/v1` post is indexed.
+#[tokio_shared_rt::test(shared)]
+async fn test_flipped_user_is_read_through_social_v1() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
 
     let user_kp = Keypair::random();
     let user_id = test
         .create_user(
             &user_kp,
-            &test_user("Watcher:EpochGate:V1Profile", "epoch_gate"),
+            &test_user("Watcher:EpochGate:Flipped", "epoch_gate"),
         )
         .await?;
-
     let profile_path = test
         .put_v1_profile(
             &user_kp,
-            &v1_test_user("Watcher:EpochGate:V1Profile:Copy", "epoch_gate"),
+            &v1_test_user("Watcher:EpochGate:Flipped:V1", "epoch_gate"),
         )
         .await?;
 
-    let user = find_user_details(&user_id).await?;
-    assert_eq!(user.name, "Watcher:EpochGate:V1Profile");
-    assert_eq!(
-        find_user_uri(&user_id).await,
-        Some(user_uri_builder(user_id.clone()))
-    );
-    assert_eq!(find_user_epoch(&user_id).await, None);
+    test.put_v1_profile(
+        &user_kp,
+        &v1_test_user("Watcher:EpochGate:Flipped:Edited", "epoch_gate"),
+    )
+    .await?;
+    let user = UserDetails::get_by_id(&user_id)
+        .await?
+        .expect("the flipped user is cached");
+    assert_eq!(user.name, "Watcher:EpochGate:Flipped:Edited");
+    assert_eq!(user.epoch, Epoch::V1);
+    assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
+
+    let (v0_post_id, v0_post_path) = test
+        .create_post(&user_kp, &short_post("Watcher:EpochGate:Flipped:V0Post"))
+        .await?;
     assert!(
-        !event_line_stored(&line("PUT", &user_id, &profile_path)).await?,
-        "an ignored event must store no event line"
+        find_post_details(&user_id, &v0_post_id).await.is_err(),
+        "a flipped user's pubky.app post must not be indexed"
     );
 
-    // Ignored as well
+    let post_id = generate_post_id();
+    let version_path = test
+        .put_v1_post_version(
+            &user_kp,
+            &post_id,
+            &post_id,
+            &v1_note("Watcher:EpochGate:Flipped:V1Post"),
+        )
+        .await?;
+    assert_eq!(
+        find_post_details(&user_id, &post_id).await?.content,
+        "Watcher:EpochGate:Flipped:V1Post"
+    );
+
+    // Handled at `v1`
+    test.del(&user_kp, &version_path).await?;
+    // Ignored at `v1`
+    test.cleanup_post(&user_kp, &v0_post_path).await?;
+    // Back to `v0`, so the gate lets the `pubky.app` cleanup through; the v1 DEL is then ignored
+    set_user_epoch(&user_id, "v0").await?;
     test.del(&user_kp, &profile_path).await?;
+    test.cleanup_user(&user_kp).await?;
+    Ok(())
+}
+
+/// A flipped user who deletes their `social/v1` profile while a post remains keeps `v1` in
+/// the tombstone and in the cache.
+#[tokio_shared_rt::test(shared)]
+async fn test_flipped_user_tombstone_keeps_v1() -> Result<()> {
+    let mut test = WatcherTest::setup(None).await?;
+
+    let user_kp = Keypair::random();
+    let user_id = test
+        .create_user(
+            &user_kp,
+            &test_user("Watcher:EpochGate:Tombstone", "epoch_gate"),
+        )
+        .await?;
+    let profile_path = test
+        .put_v1_profile(
+            &user_kp,
+            &v1_test_user("Watcher:EpochGate:Tombstone:V1", "epoch_gate"),
+        )
+        .await?;
+    let post_id = generate_post_id();
+    let version_path = test
+        .put_v1_post_version(
+            &user_kp,
+            &post_id,
+            &post_id,
+            &v1_note("Watcher:EpochGate:Tombstone:Post"),
+        )
+        .await?;
+
+    test.del(&user_kp, &profile_path).await?;
+
+    let tombstone = find_user_details(&user_id).await?;
+    assert!(tombstone.deleted);
+    assert_eq!(tombstone.epoch, Epoch::V1);
+    let cached = UserDetails::get_by_id(&user_id)
+        .await?
+        .expect("the tombstone is cached");
+    assert!(cached.deleted);
+    assert_eq!(cached.epoch, Epoch::V1);
+
+    // Handled at `v1`
+    test.del(&user_kp, &version_path).await?;
+    // Back to `v0`, so the gate lets the `pubky.app` cleanup through
+    set_user_epoch(&user_id, "v0").await?;
     test.cleanup_user(&user_kp).await?;
     Ok(())
 }
