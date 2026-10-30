@@ -3,6 +3,7 @@ use crate::db::graph::Query;
 use crate::models::ResourceKey;
 use crate::models::{file::FileDetails, post::PostDetails, user::UserDetails};
 use pubky_social_specs::PubkyId;
+use std::collections::HashMap;
 
 /// Creates or overwrites a `User` node.
 ///
@@ -74,6 +75,29 @@ pub fn set_post_addresses(
     .param("author_id", author_id)
     .param("posts", addresses)
     .param("attachments", attachments)
+}
+
+/// Writes the `id` and the `uri` of each of `tagger_id`'s `TAGGED` edges in `tags`, `(edge,
+/// id, uri)` rows keyed by the edge's element id, in one pass over the tagger's edges, and
+/// returns how many it wrote as `changed`. An edge that is gone, or not the tagger's, is left
+/// alone and not counted.
+pub fn set_tag_addresses(tagger_id: &str, tags: &[(String, String, String)]) -> Query {
+    let tags: HashMap<String, Vec<String>> = tags
+        .iter()
+        .map(|(edge, id, uri)| (edge.clone(), vec![id.clone(), uri.clone()]))
+        .collect();
+    Query::new(
+        "set_tag_addresses",
+        "
+        MATCH (:User {id: $tagger_id})-[t:TAGGED]->()
+        WITH t, $tags[elementId(t)] AS tag
+        WHERE tag IS NOT NULL
+        SET t.id = tag[0], t.uri = tag[1]
+        RETURN count(t) AS changed
+        ",
+    )
+    .param("tagger_id", tagger_id)
+    .param("tags", tags)
 }
 
 /// Creates a Cypher query to add or edit a post to the graph database and handles its relationships.

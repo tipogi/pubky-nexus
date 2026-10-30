@@ -69,8 +69,9 @@ pub fn rewrite(owner: &PubkyId, files: &FileMap, uri: &str) -> String {
     }
 }
 
-/// The owner's blob `hash` at its migrated address, `social/v1/files/{hash}.{ext}`.
-fn media(owner: &PubkyId, files: &FileMap, hash: &str) -> String {
+/// The owner's blob `hash` at its migrated address, `social/v1/files/{hash}.{ext}`: the
+/// address a tag on that file hashes too.
+pub(super) fn media(owner: &PubkyId, files: &FileMap, hash: &str) -> String {
     let filename = format!("{hash}.{}", files.ext_of(hash));
     file_uri_builder(owner.to_string(), filename)
 }

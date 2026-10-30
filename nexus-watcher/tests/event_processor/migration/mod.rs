@@ -2,3 +2,4 @@
 
 mod attachments;
 mod posts;
+mod tags;

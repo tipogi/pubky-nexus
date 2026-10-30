@@ -141,6 +141,40 @@ pub fn get_post_children_page(
     .param("limit", limit.min(MAX_QUERY_LIMIT) as i64)
 }
 
+/// Up to `limit` of the `TAGGED` edges `tagger_id` wrote whose address still starts with
+/// `prefix`, in no particular order and with no offset: the internal migration moves each
+/// edge it rewrites out of this set, so the next read starts over. Each row carries the edge's
+/// element id, its `id` and `label`, the target's `kind` (`post`, `user`, `resource`, or
+/// `other` for anything else) and the target's keys: `target_id` for a post or a user,
+/// `author_id` for a post (null when it has no `AUTHORED` author), `resource_uri` for a
+/// resource.
+pub fn get_tagger_edges_under(tagger_id: &str, prefix: &str, limit: usize) -> Query {
+    Query::new(
+        "get_tagger_edges_under",
+        "
+        MATCH (:User {id: $tagger_id})-[t:TAGGED]->(target)
+        WHERE t.uri STARTS WITH $prefix
+        WITH t, target LIMIT $limit
+        OPTIONAL MATCH (target)<-[:AUTHORED]-(author:User)
+        RETURN elementId(t) AS edge,
+            t.id AS id,
+            t.label AS label,
+            CASE
+                WHEN target:Post THEN 'post'
+                WHEN target:User THEN 'user'
+                WHEN target:Resource THEN 'resource'
+                ELSE 'other'
+            END AS kind,
+            target.id AS target_id,
+            author.id AS author_id,
+            target.uri AS resource_uri
+        ",
+    )
+    .param("tagger_id", tagger_id)
+    .param("prefix", prefix)
+    .param("limit", limit.min(MAX_QUERY_LIMIT) as i64)
+}
+
 pub fn post_counts(author_id: &str, post_id: &str) -> Query {
     Query::new(
         "post_counts",
