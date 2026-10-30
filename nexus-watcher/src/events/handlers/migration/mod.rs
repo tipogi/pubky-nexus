@@ -7,25 +7,35 @@
 //! and the step and returned as the transient graph or Redis error it is, so the flip goes
 //! through the normal retry, which runs it whole again while the user is still `v0`.
 
+pub mod attachments;
+pub mod files;
 pub mod posts;
 
 use crate::events::EventProcessorError;
+use files::FileMap;
 use pubky_social_specs::PubkyId;
 use std::future::Future;
 use tracing::error;
 
-/// Runs every step of `user_id`'s migration, in order.
+/// Runs every step of `user_id`'s migration, in order: the file map first, then the posts
+/// whose attachments it resolves.
 #[tracing::instrument(name = "user.migrate", skip_all, fields(user_id = %user_id))]
 pub async fn run(user_id: &PubkyId) -> Result<(), EventProcessorError> {
-    step(user_id, "posts", posts::migrate(user_id, posts::BATCH_SIZE)).await
+    let files = step(user_id, "files", FileMap::load(user_id)).await?;
+    step(
+        user_id,
+        "posts",
+        posts::migrate(user_id, &files, posts::BATCH_SIZE),
+    )
+    .await
 }
 
 /// Runs one step, logging a failure with the user and the step before returning it.
-async fn step(
+async fn step<T>(
     user_id: &PubkyId,
     name: &'static str,
-    run: impl Future<Output = Result<(), EventProcessorError>>,
-) -> Result<(), EventProcessorError> {
+    run: impl Future<Output = Result<T, EventProcessorError>>,
+) -> Result<T, EventProcessorError> {
     run.await
         .inspect_err(|e| error!(%user_id, step = %name, error = %e, "Internal migration failed"))
 }
@@ -43,7 +53,7 @@ mod tests {
         let user_id = PubkyId::try_from(USER).unwrap();
         let failure = EventProcessorError::GraphQueryFailed(false, "boom".to_string());
 
-        let result = step(&user_id, "posts", async { Err(failure) }).await;
+        let result: Result<(), _> = step(&user_id, "posts", async { Err(failure) }).await;
 
         assert!(
             matches!(result, Err(EventProcessorError::GraphQueryFailed(false, ref m)) if m == "boom"),

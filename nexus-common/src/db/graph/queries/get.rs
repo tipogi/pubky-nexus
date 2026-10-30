@@ -77,16 +77,31 @@ pub fn get_posts_details_by_ids(author_id: &str, post_ids: &[String]) -> Query {
     .param("post_ids", post_ids.to_vec())
 }
 
-/// One keyset page of the ids of the posts `author_id` wrote, strictly after `after_id` (`""`
-/// for the first page), ordered by id, up to `limit`. Tombstones are included: every post the
-/// user authored counts.
-pub fn get_author_post_ids_page(author_id: &str, after_id: &str, limit: usize) -> Query {
+/// Every `File` node `owner_id` owns, attached or not, as `(id, src, content_type)` rows
+/// ordered by id: what the internal migration builds its file map from.
+pub fn get_user_files_sources(owner_id: &str) -> Query {
     Query::new(
-        "get_author_post_ids_page",
+        "get_user_files_sources",
+        "
+        MATCH (f:File {owner_id: $owner_id})
+        RETURN f.id AS id, f.src AS src, f.content_type AS content_type
+        ORDER BY f.id ASC
+        ",
+    )
+    .param("owner_id", owner_id)
+}
+
+/// One keyset page of the posts `author_id` wrote, as `(id, attachments)` rows strictly after
+/// `after_id` (`""` for the first page), ordered by id, up to `limit`. Tombstones are
+/// included: every post the user authored counts. `attachments` is null on a post stored
+/// without any.
+pub fn get_author_posts_page(author_id: &str, after_id: &str, limit: usize) -> Query {
+    Query::new(
+        "get_author_posts_page",
         "
         MATCH (:User {id: $author_id})-[:AUTHORED]->(p:Post)
         WHERE p.id > $after_id
-        RETURN p.id AS id
+        RETURN p.id AS id, p.attachments AS attachments
         ORDER BY p.id ASC
         LIMIT $limit
         ",

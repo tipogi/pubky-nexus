@@ -528,7 +528,8 @@ async fn test_migration_rerun_gives_the_same_result() -> Result<()> {
     }
 
     let author = pubky_id(&author_id)?;
-    migration::posts::migrate(&author, 2).await?;
+    let files = migration::files::FileMap::load(&author).await?;
+    migration::posts::migrate(&author, &files, 2).await?;
     let first = snapshot(&author_id, &post_ids, &children).await?;
     for post_id in &post_ids {
         assert_eq!(
@@ -544,7 +545,7 @@ async fn test_migration_rerun_gives_the_same_result() -> Result<()> {
         assert!(parent.contains("/pub/social/v1/posts/"), "{parent}");
     }
 
-    migration::posts::migrate(&author, 2).await?;
+    migration::posts::migrate(&author, &files, 2).await?;
     assert_eq!(snapshot(&author_id, &post_ids, &children).await?, first);
 
     // Partly migrated, as a failed run leaves it: some addresses back at `pubky.app`
@@ -552,7 +553,7 @@ async fn test_migration_rerun_gives_the_same_result() -> Result<()> {
         let v0_uri = v0_post_uri_builder(author_id.clone(), post_id.clone());
         set_post_uri(&author_id, post_id, Some(&v0_uri)).await?;
     }
-    migration::posts::migrate(&author, 2).await?;
+    migration::posts::migrate(&author, &files, 2).await?;
     assert_eq!(snapshot(&author_id, &post_ids, &children).await?, first);
 
     for child_path in &child_paths {
