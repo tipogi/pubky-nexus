@@ -70,9 +70,10 @@ impl Moderation {
                 // Recorded under the address the tag names, as an event for it carries it: a
                 // `pubky.app` or another app's address may spell it with a trailing slash or a
                 // query, rewritten here; a `social/v1` address is canonical by spec.
-                // TODO(specs-migration): a takedown through a `social/v1` address does not hold
-                // against the record's `pubky.app` events before the flip, nor against a
-                // `social/v1` post's version paths after it; both are settled with the flip (N3).
+                // A takedown under a `pubky.app` post address does not hold against the author's
+                // `social/v1` version paths after the flip, nor a `social/v1` one against later
+                // version paths. A post that comes back is tagged again by the moderator at its
+                // new address, which takes it down there.
                 let address = takedown_key(&uri).map_err(EventProcessorError::generic)?;
 
                 // Posts, tags and files are remembered before they are deleted, so they stay
