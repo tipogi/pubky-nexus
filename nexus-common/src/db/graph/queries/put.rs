@@ -44,6 +44,26 @@ pub fn set_user_epoch_v1(user_id: &str) -> Query {
     .param("user_id", user_id.to_string())
 }
 
+/// Writes the stored address of each of `author_id`'s posts in `posts`, `(post_id, uri)` pairs,
+/// in one batch. A post that is not theirs is left alone.
+pub fn set_post_uris(author_id: &str, posts: &[(String, String)]) -> Query {
+    let posts: Vec<Vec<String>> = posts
+        .iter()
+        .map(|(post_id, uri)| vec![post_id.clone(), uri.clone()])
+        .collect();
+    Query::new(
+        "set_post_uris",
+        "
+        MATCH (u:User {id: $author_id})
+        UNWIND $posts AS post
+        MATCH (u)-[:AUTHORED]->(p:Post {id: post[0]})
+        SET p.uri = post[1]
+        ",
+    )
+    .param("author_id", author_id)
+    .param("posts", posts)
+}
+
 /// Creates a Cypher query to add or edit a post to the graph database and handles its relationships.
 /// # Arguments
 /// * `post` - A reference to a `PostDetails` struct containing information about the post to be created or edited

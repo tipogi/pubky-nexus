@@ -51,6 +51,81 @@ pub fn get_post_by_id(author_id: &str, post_id: &str) -> Query {
     .param("post_id", post_id)
 }
 
+/// The details of `author_id`'s posts `post_ids`, shaped as [`get_post_by_id`] shapes them,
+/// one row per post the graph holds, in `post_ids` order. No reply key.
+pub fn get_posts_details_by_ids(author_id: &str, post_ids: &[String]) -> Query {
+    Query::new(
+        "get_posts_details_by_ids",
+        "
+        MATCH (u:User {id: $author_id})
+        UNWIND $post_ids AS post_id
+        MATCH (u)-[:AUTHORED]->(p:Post {id: post_id})
+        RETURN {
+            uri: p.uri,
+            content: p.content,
+            id: p.id,
+            indexed_at: p.indexed_at,
+            author: u.id,
+            kind: COALESCE(p.kind, 'short'),
+            attachments: p.attachments,
+            lock: p.lock,
+            deleted: COALESCE(p.deleted, false)
+        } AS details
+        ",
+    )
+    .param("author_id", author_id)
+    .param("post_ids", post_ids.to_vec())
+}
+
+/// One keyset page of the ids of the posts `author_id` wrote, strictly after `after_id` (`""`
+/// for the first page), ordered by id, up to `limit`. Tombstones are included: every post the
+/// user authored counts.
+pub fn get_author_post_ids_page(author_id: &str, after_id: &str, limit: usize) -> Query {
+    Query::new(
+        "get_author_post_ids_page",
+        "
+        MATCH (:User {id: $author_id})-[:AUTHORED]->(p:Post)
+        WHERE p.id > $after_id
+        RETURN p.id AS id
+        ORDER BY p.id ASC
+        LIMIT $limit
+        ",
+    )
+    .param("author_id", author_id)
+    .param("after_id", after_id.to_string())
+    .param("limit", limit.min(MAX_QUERY_LIMIT) as i64)
+}
+
+/// One keyset page of the replies and reposts of `author_id`'s posts `post_ids`, whoever wrote
+/// them, as `(author_id, post_id)` rows strictly after the child post id `after_id` (`""` for
+/// the first page), ordered by that id, up to `limit`. A post that both replies to and reposts
+/// one of them is one row; a child with no author is left out.
+pub fn get_post_children_page(
+    author_id: &str,
+    post_ids: &[String],
+    after_id: &str,
+    limit: usize,
+) -> Query {
+    Query::new(
+        "get_post_children_page",
+        "
+        MATCH (u:User {id: $author_id})
+        UNWIND $post_ids AS post_id
+        MATCH (u)-[:AUTHORED]->(:Post {id: post_id})<-[:REPLIED|REPOSTED]-(child:Post)
+        WHERE child.id > $after_id
+        WITH DISTINCT child
+        MATCH (child)<-[:AUTHORED]-(child_author:User)
+        RETURN child_author.id AS author_id, child.id AS post_id
+        ORDER BY child.id ASC
+        LIMIT $limit
+        ",
+    )
+    .param("author_id", author_id)
+    .param("post_ids", post_ids.to_vec())
+    .param("after_id", after_id.to_string())
+    .param("limit", limit.min(MAX_QUERY_LIMIT) as i64)
+}
+
 pub fn post_counts(author_id: &str, post_id: &str) -> Query {
     Query::new(
         "post_counts",
