@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 /// Counter for events skipped because the moderator took their record down.
 static TAKEN_DOWN: LazyLock<Counter<u64>> = LazyLock::new(|| {
@@ -38,6 +38,7 @@ pub mod handlers;
 mod moderation;
 pub mod retry;
 
+pub(crate) use gate::is_profile_put;
 use gate::Gate;
 use handlers::utils::bounded;
 use inputs::{ReferenceTarget, ResourceKey, TagInput};
@@ -103,7 +104,7 @@ impl EventHandler for DefaultEventHandler {
             return Ok(());
         }
 
-        match event.event_type {
+        let handled = match event.event_type {
             EventType::Put => {
                 handle_put_event(
                     event,
@@ -117,11 +118,25 @@ impl EventHandler for DefaultEventHandler {
             EventType::Del => {
                 handle_del_event(event, self.files_path.as_path(), self.ingestor.clone()).await
             }
-        }?;
+        };
 
-        // After the profile is indexed, so a failure there leaves the user at `v0`.
         if gate == Gate::Flip {
-            handlers::user::flip(event.target.user_id()).await?;
+            // After the profile is indexed, so a failure there leaves the user at `v0`. One
+            // summary line per failed flip, whichever step failed: the profile, the migration
+            // (which logs its own step) or the epoch write. The retry runs the flip again.
+            match handled {
+                Ok(()) => handlers::user::flip(event.target.user_id()).await,
+                Err(e) => Err(e),
+            }
+            .inspect_err(|e| {
+                error!(
+                    user_id = %event.target.user_id(),
+                    error = %e,
+                    "Flip failed, the user stays at v0"
+                )
+            })?;
+        } else {
+            handled?;
         }
 
         event.to_event_line().store().await?;

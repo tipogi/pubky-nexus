@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use nexus_common::config::EventRetryConfig;
 use nexus_common::WatcherConfig;
 use tokio::sync::watch::Receiver;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::store::{RedisRetryStore, RetryStore};
 use super::IndexKey;
@@ -171,8 +171,13 @@ impl RetryProcessor {
 
         match error {
             e if !RetryScheduler::should_enqueue_related_event(&e) => {
-                // Not worth retrying (ParseFailed, etc.) - dead-letter immediately
-                warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
+                // Not worth retrying (ParseFailed, etc.) - dead-letter immediately. A dropped
+                // `social/v1` profile PUT may be a lost flip, so it is named and logged at `error`.
+                if gate::is_profile_put(&event) {
+                    error!("social/v1 profile PUT {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
+                } else {
+                    warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
+                }
                 self.remove_if_current(index_key, retry_event.nonce, ev_uri)
                     .await?;
             }
@@ -183,8 +188,15 @@ impl RetryProcessor {
                 self.reschedule(&retry_event, &e, false).await?;
                 return Err(e);
             }
-            _ if limit_reached => {
-                warn!("Event {ev_uri} exceeded max retries ({ev_retry_count}), dead-lettering");
+            e if limit_reached => {
+                // A flip has no limit for a transient fetch error (`limit_reached`), so a
+                // `social/v1` profile PUT reaching it is usually a `v1` user's edit; it is named
+                // and logged at `error` all the same: a lost profile must never be a `warn`.
+                if gate::is_profile_put(&event) {
+                    error!("social/v1 profile PUT {ev_uri} exceeded max retries ({ev_retry_count}), dead-lettering: {e}");
+                } else {
+                    warn!("Event {ev_uri} exceeded max retries ({ev_retry_count}), dead-lettering: {e}");
+                }
                 self.remove_if_current(index_key, retry_event.nonce, ev_uri)
                     .await?;
             }

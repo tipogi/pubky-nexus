@@ -9,7 +9,7 @@ use nexus_common::models::{
     user::{Epoch, UserDetails, UserSearch, UsersByTagSearch},
 };
 use pubky_social_specs::PubkyId;
-use tracing::{debug, Instrument};
+use tracing::{debug, info, Instrument};
 
 use crate::events::inputs::UserInput;
 
@@ -52,8 +52,6 @@ pub async fn sync_put(user: UserInput, user_id: PubkyId) -> Result<(), EventProc
 /// stored `v1`.
 #[tracing::instrument(name = "user.flip", skip_all, fields(user_id = %user_id))]
 pub async fn flip(user_id: &PubkyId) -> Result<(), EventProcessorError> {
-    debug!("Flipping user to v1");
-
     // Step 1: Migrate the user's indexed data to its `social/v1` form, while they are still `v0`
     crate::events::migration::run(user_id).await?;
 
@@ -67,6 +65,8 @@ pub async fn flip(user_id: &PubkyId) -> Result<(), EventProcessorError> {
         .instrument(tracing::info_span!("index.write"))
         .await?;
 
+    // One line per flip, so flips can be counted and found by user.
+    info!("User flipped to v1");
     Ok(())
 }
 
