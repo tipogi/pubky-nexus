@@ -27,7 +27,7 @@ pub struct FileMap {
 impl FileMap {
     /// Builds the map of `owner`'s files from the graph.
     pub async fn load(owner: &PubkyId) -> Result<Self, EventProcessorError> {
-        let query = queries::get::get_user_files_sources(owner.as_ref());
+        let query = queries::migration::get_user_files_sources(owner.as_ref());
         let rows = fetch_all_rows_from_graph(query).await?;
         let files = rows
             .iter()

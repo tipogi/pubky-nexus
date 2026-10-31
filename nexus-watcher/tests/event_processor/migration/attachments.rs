@@ -11,7 +11,7 @@ use chrono::Utc;
 use nexus_common::models::notification::Notification;
 use nexus_common::models::post::PostView;
 use nexus_common::types::Pagination;
-use nexus_watcher::events::handlers::migration;
+use nexus_watcher::events::migration;
 use pubky::{Keypair, ResourcePath};
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HashId};
 use pubky_social_specs::legacy_v0::{

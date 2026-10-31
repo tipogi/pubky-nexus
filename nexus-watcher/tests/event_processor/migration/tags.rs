@@ -26,7 +26,7 @@ use nexus_common::models::tag::post::TagPost;
 use nexus_common::models::tag::traits::TagCollection;
 use nexus_common::models::tag::user::TagUser;
 use nexus_common::models::tag::TagDetails;
-use nexus_watcher::events::handlers::migration;
+use nexus_watcher::events::migration;
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::traits::HashId as V0HashId;
 use pubky_social_specs::legacy_v0::{

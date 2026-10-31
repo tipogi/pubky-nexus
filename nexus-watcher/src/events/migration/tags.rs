@@ -112,7 +112,7 @@ pub async fn migrate(
             })
             .collect();
         let changed = fetch_key_from_graph::<i64>(
-            queries::put::set_tag_addresses(tagger_id, &rows),
+            queries::migration::set_tag_addresses(tagger_id, &rows),
             "changed",
         )
         .await?
@@ -135,7 +135,7 @@ async fn read_page(
     prefix: &str,
     batch_size: usize,
 ) -> Result<Vec<StoredTag>, EventProcessorError> {
-    let page = queries::get::get_tagger_edges_under(tagger_id, prefix, batch_size);
+    let page = queries::migration::get_tagger_edges_under(tagger_id, prefix, batch_size);
     Ok(fetch_all_rows_from_graph(page)
         .await?
         .iter()

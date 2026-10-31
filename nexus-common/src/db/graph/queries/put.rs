@@ -44,65 +44,6 @@ pub fn set_user_epoch_v1(user_id: &str) -> Query {
     .param("user_id", user_id.to_string())
 }
 
-/// Writes the stored address and the attachments of each of `author_id`'s posts in `posts`,
-/// `(post_id, uri, attachments)` rows, in one batch. A post stored with no attachments
-/// (`None`) keeps none, whatever the row carries, so a rewrite never turns a missing list
-/// into an empty one. A post that is not theirs is left alone.
-pub fn set_post_addresses(
-    author_id: &str,
-    posts: &[(String, String, Option<Vec<String>>)],
-) -> Query {
-    let addresses: Vec<Vec<String>> = posts
-        .iter()
-        .map(|(post_id, uri, _)| vec![post_id.clone(), uri.clone()])
-        .collect();
-    let attachments: Vec<Vec<String>> = posts
-        .iter()
-        .map(|(_, _, attachments)| attachments.clone().unwrap_or_default())
-        .collect();
-    Query::new(
-        "set_post_addresses",
-        "
-        MATCH (u:User {id: $author_id})
-        UNWIND range(0, size($posts) - 1) AS i
-        WITH u, $posts[i] AS post, $attachments[i] AS attachments
-        MATCH (u)-[:AUTHORED]->(p:Post {id: post[0]})
-        SET p.uri = post[1],
-            p.attachments = CASE WHEN p.attachments IS NULL THEN null ELSE attachments END
-        ",
-    )
-    .param("author_id", author_id)
-    .param("posts", addresses)
-    .param("attachments", attachments)
-}
-
-/// Writes the `id` and the `uri` of each of `tagger_id`'s `TAGGED` edges in `tags`, `(edge,
-/// id, uri)` rows keyed by the edge's element id, one element-id seek per row, and returns how
-/// many it wrote as `changed`. An edge that is gone, or not the tagger's, is left alone and not
-/// counted.
-///
-/// The anonymous pattern is load-bearing: anchored on the tagger, the planner expands every
-/// edge they wrote for each row; anchored on nothing, it seeks the edge by its element id
-/// (`DirectedRelationshipByElementIdSeek`) and checks the tagger on the start node.
-pub fn set_tag_addresses(tagger_id: &str, tags: &[(String, String, String)]) -> Query {
-    let tags: Vec<Vec<String>> = tags
-        .iter()
-        .map(|(edge, id, uri)| vec![edge.clone(), id.clone(), uri.clone()])
-        .collect();
-    Query::new(
-        "set_tag_addresses",
-        "
-        UNWIND $tags AS tag
-        MATCH ()-[t:TAGGED]->()
-        WHERE elementId(t) = tag[0] AND startNode(t).id = $tagger_id
-        SET t.id = tag[1], t.uri = tag[2]
-        RETURN count(t) AS changed
-        ",
-    )
-    .param("tagger_id", tagger_id)
-    .param("tags", tags)
-}
-
 /// Creates a Cypher query to add or edit a post to the graph database and handles its relationships.
 /// # Arguments
 /// * `post` - A reference to a `PostDetails` struct containing information about the post to be created or edited

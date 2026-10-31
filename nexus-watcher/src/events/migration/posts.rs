@@ -43,7 +43,7 @@ pub async fn migrate(
     // shorter than its batch size: a bigger batch would read a full page as the last one
     let batch_size = batch_size.min(queries::get::MAX_QUERY_LIMIT);
     keyset_scan(batch_size, "migration.posts", |after_id| async move {
-        let page = queries::get::get_author_posts_page(author_id, &after_id, batch_size);
+        let page = queries::migration::get_author_posts_page(author_id, &after_id, batch_size);
         let posts = fetch_all_rows_from_graph(page)
             .await?
             .iter()
@@ -84,7 +84,10 @@ async fn migrate_batch(
             (post_id.clone(), uri, attachments)
         })
         .collect();
-    exec_single_row(queries::put::set_post_addresses(author_id, &addresses)).await?;
+    exec_single_row(queries::migration::set_post_addresses(
+        author_id, &addresses,
+    ))
+    .await?;
 
     let post_ids: Vec<String> = posts.iter().map(|(post_id, _)| post_id.clone()).collect();
     let details = PostDetails::get_many_from_graph(author_id, &post_ids).await?;
@@ -104,8 +107,9 @@ async fn reindex_children_relationships(
         batch_size,
         "migration.posts.children",
         |after_id| async move {
-            let page =
-                queries::get::get_post_children_page(author_id, post_ids, &after_id, batch_size);
+            let page = queries::migration::get_post_children_page(
+                author_id, post_ids, &after_id, batch_size,
+            );
             let rows = fetch_all_rows_from_graph(page).await?;
             let mut last_id = None;
             for row in &rows {

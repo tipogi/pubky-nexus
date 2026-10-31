@@ -19,7 +19,7 @@ use nexus_common::models::post::search::PostsByTagSearch;
 use nexus_common::models::post::{PostDetails, PostRelationships, PostView, PostsByContentSearch};
 use nexus_common::models::user::Epoch;
 use nexus_common::types::Pagination;
-use nexus_watcher::events::handlers::migration;
+use nexus_watcher::events::migration;
 use nexus_watcher::events::retry::{IndexKey, RetryEvent};
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::{post_uri_builder as v0_post_uri_builder, PubkyAppTag};
