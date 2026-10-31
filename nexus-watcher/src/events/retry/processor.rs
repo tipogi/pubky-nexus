@@ -13,6 +13,7 @@ use super::store::{RedisRetryStore, RetryStore};
 use super::IndexKey;
 use super::RetryEvent;
 use super::RetryScheduler;
+use crate::events::gate::{self, Gate};
 use crate::events::EventHandler;
 use crate::service::indexer::{RunOutcome, TEventProcessor};
 
@@ -152,38 +153,69 @@ impl RetryProcessor {
         // we fetched: a live processor may have overwritten the hash(URI)-keyed
         // entry with a newer event (fresh nonce) while this retry was in flight,
         // and that newer entry must not be removed or clobbered.
-        match event_handle_res {
-            Ok(()) => {
-                // Success - event was processed, remove from retry queue
-                debug!("Retry successful for event: {ev_uri}");
-                self.remove_if_current(index_key, retry_event.nonce, ev_uri)
-                    .await?;
-            }
-            Err(e) if !RetryScheduler::should_enqueue_related_event(&e) => {
+        let Err(error) = event_handle_res else {
+            // Success - event was processed, remove from retry queue
+            debug!("Retry successful for event: {ev_uri}");
+            return self
+                .remove_if_current(index_key, retry_event.nonce, ev_uri)
+                .await;
+        };
+
+        // A failed gate read must not dead-letter a flip: its error takes the handler's
+        // place and is classified below as the graph error it is.
+        let (error, limit_reached) = match self.limit_reached(&event, ev_retry_count, &error).await
+        {
+            Ok(limit_reached) => (error, limit_reached),
+            Err(gate_error) => (gate_error, false),
+        };
+
+        match error {
+            e if !RetryScheduler::should_enqueue_related_event(&e) => {
                 // Not worth retrying (ParseFailed, etc.) - dead-letter immediately
                 warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
                 self.remove_if_current(index_key, retry_event.nonce, ev_uri)
                     .await?;
             }
-            Err(e) if e.should_not_retry_now() => {
+            e if e.should_not_retry_now() => {
                 // Errors we should not retry right now (e.g. Neo4j/Redis failures) must NOT count
                 // against the application-level max_retries limit.  Reschedule with backoff but do
                 // NOT increment retry_count, then propagate to stop the current batch.
                 self.reschedule(&retry_event, &e, false).await?;
                 return Err(e);
             }
-            Err(e) if ev_retry_count >= self.max_retries_for(&e) => {
+            _ if limit_reached => {
                 warn!("Event {ev_uri} exceeded max retries ({ev_retry_count}), dead-lettering");
                 self.remove_if_current(index_key, retry_event.nonce, ev_uri)
                     .await?;
             }
-            Err(e) => {
+            e => {
                 // Schedule retry with backoff (increments retry_count)
                 self.reschedule(&retry_event, &e, true).await?;
             }
         }
 
         Ok(())
+    }
+
+    /// Whether `retry_count` attempts have used up the limit `error` gives `event`.
+    ///
+    /// A flip, the `social/v1` profile PUT of a user at `v0`, has no limit for a transient
+    /// fetch error: losing it would strand the user at `v0`, so a homeserver outage of any
+    /// length delays it instead. The gate, a graph read, is asked only once such an entry
+    /// reaches its limit; a `v1` user's profile edit keeps the limit like any other event.
+    async fn limit_reached(
+        &self,
+        event: &Event,
+        retry_count: u32,
+        error: &EventProcessorError,
+    ) -> Result<bool, EventProcessorError> {
+        if retry_count < self.max_retries_for(error) {
+            return Ok(false);
+        }
+        let unlimited = error.is_transient_fetch()
+            && gate::is_profile_put(event)
+            && gate::check(event).await? == Gate::Flip;
+        Ok(!unlimited)
     }
 
     /// Remove the entry for `index_key` only if it still carries `nonce`, i.e.

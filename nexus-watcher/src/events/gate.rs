@@ -33,8 +33,8 @@ fn decide(event: &Event, user_epoch: Epoch) -> Gate {
     }
 }
 
-/// Whether `event` is a PUT of a `social/v1` profile.
-fn is_profile_put(event: &Event) -> bool {
+/// Whether `event` is a PUT of a `social/v1` profile: the flip, for a user at `v0`.
+pub(super) fn is_profile_put(event: &Event) -> bool {
     event.event_type == EventType::Put
         && matches!(&event.target, EventTarget::Social(parsed) if parsed.resource == Resource::User)
 }

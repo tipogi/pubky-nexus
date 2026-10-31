@@ -253,6 +253,24 @@ impl EventProcessorError {
     pub fn is_missing_dependency(&self) -> bool {
         matches!(self, Self::MissingDependency { .. })
     }
+
+    /// Whether this is a fetch failure the homeserver may answer differently next time: a
+    /// 5xx, a 429, a failed request, a PKARR failure or a client not yet initialised. Each is
+    /// retried with the transient backoff; a flip's profile PUT with one is retried without
+    /// limit. A `Generic` or `InternalError` is not one: it would likely repeat on every attempt.
+    pub fn is_transient_fetch(&self) -> bool {
+        matches!(
+            self,
+            Self::PubkyClientError(e) if matches!(
+                e.as_ref(),
+                PubkyClientError::NotInitialized
+                    | PubkyClientError::TooManyRequests429 { .. }
+                    | PubkyClientError::ServerError5xx { .. }
+                    | PubkyClientError::RequestFailed { .. }
+                    | PubkyClientError::PkarrFailed(..)
+            )
+        )
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +427,37 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("HTTP 502: bad gateway"), "{message}");
+    }
+
+    /// A transient fetch error is one the retry queue takes, with the transient class; a 404,
+    /// a graph failure or a `Generic` is not one.
+    #[test]
+    fn transient_fetch_errors_are_the_retried_client_errors() {
+        for kind in [
+            HsErrorKind::ServerError(500, "".into()),
+            HsErrorKind::RateLimited("".into()),
+            HsErrorKind::Rejected(403, "".into()),
+            HsErrorKind::Timeout,
+            HsErrorKind::Sdk("could not resolve".into()),
+        ] {
+            let err = hs_error(HsOp::GetResource, kind);
+            assert!(err.is_transient_fetch(), "{err:?}");
+            assert!(
+                RetryScheduler::should_enqueue_related_event(&err),
+                "{err:?}"
+            );
+            assert!(!err.should_not_retry_now(), "{err:?}");
+        }
+
+        for err in [
+            hs_error(HsOp::GetResource, HsErrorKind::NotFound("".into())),
+            EventProcessorError::GraphQueryFailed(true, "".into()),
+            EventProcessorError::Generic("".into()),
+            EventProcessorError::InternalError("".into()),
+            EventProcessorError::MissingDependency { dependency: vec![] },
+        ] {
+            assert!(!err.is_transient_fetch(), "{err:?}");
+        }
     }
 
     #[test]

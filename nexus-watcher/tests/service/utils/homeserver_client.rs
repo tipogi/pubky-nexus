@@ -37,6 +37,9 @@ pub struct MockHomeserverClient {
     /// Bodies served by `get_resource`, by URI. Any other URI is a 404.
     resources: HashMap<String, Vec<u8>>,
 
+    /// Failures `get_resource` answers instead, by URI. Checked before `resources`.
+    resource_errors: HashMap<String, HsErrorKind>,
+
     /// The homeserver every user resolves to. None by default.
     homeserver_of: Option<PubkyId>,
 }
@@ -82,6 +85,13 @@ impl MockHomeserverClient {
 
     pub fn with_resource(mut self, uri: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
         self.resources.insert(uri.into(), body.into());
+        self
+    }
+
+    /// `get_resource` of `uri` fails with `kind`, labelled with the owner's key as the real
+    /// client labels a failed fetch.
+    pub fn with_resource_error(mut self, uri: impl Into<String>, kind: HsErrorKind) -> Self {
+        self.resource_errors.insert(uri.into(), kind);
         self
     }
 
@@ -165,8 +175,13 @@ impl HomeserverClient for MockHomeserverClient {
     }
 
     async fn get_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        let url = resource.to_pubky_url();
+        if let Some(kind) = self.resource_errors.get(&url) {
+            let owner = PubkyId::from(resource.owner.clone());
+            return Err(HsError::new(&owner, HsOp::GetResource, kind.clone()));
+        }
         self.resources
-            .get(&resource.to_pubky_url())
+            .get(&url)
             .cloned()
             .ok_or_else(|| not_found(resource, HsOp::GetResource))
     }

@@ -22,6 +22,7 @@ use nexus_watcher::events::retry::{
 };
 use nexus_watcher::events::EventType;
 use nexus_watcher::events::{handlers, DefaultEventHandler, EventHandler};
+use nexus_watcher::homeserver::HsErrorKind;
 use nexus_watcher::service::RunOutcome;
 use nexus_watcher::service::TEventProcessor;
 use pubky_social_specs::legacy_v0::traits::TimestampId;
@@ -1617,6 +1618,399 @@ async fn test_social_v1_profile_entry_flips_a_v0_user() -> Result<()> {
     );
 
     handlers::user::del(user).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// The flip is never dead-lettered
+// A `social/v1` profile PUT of a user at `v0` whose fetch fails transiently is
+// rescheduled past `max_retries`, for as long as it takes; the same entry flips
+// the user once the fetch succeeds. These tests go through the real handler, with
+// a homeserver client stub that answers 5xx.
+// ============================================================================
+
+/// The real event handler, fetching through `client`; `files` must outlive it.
+fn default_handler(
+    client: MockHomeserverClient,
+    files: &tempfile::TempDir,
+) -> Arc<dyn EventHandler> {
+    Arc::new(DefaultEventHandler::new(
+        default_moderation_tests(),
+        default_ingestor_tests(),
+        Arc::new(client),
+        files.path().to_path_buf(),
+    ))
+}
+
+/// A PUT entry of `event_uri` at `retry_count` attempts, ready for retry.
+fn ready_put_entry(event_uri: &str, retry_count: u32) -> RetryEvent {
+    RetryEvent {
+        retry_count,
+        event_type: EventType::Put,
+        event_uri: event_uri.to_string(),
+        next_retry_at: Utc::now().timestamp_millis() - 1000,
+        origin_homeserver_id: TEST_HOMESERVER_ID.to_string(),
+        nonce: 0,
+    }
+}
+
+/// The URI of `user_id`'s `social/v1` profile.
+fn social_v1_profile_uri(user_id: &str) -> String {
+    format!("pubky://{user_id}{}", PubkySocialUser::create_path())
+}
+
+/// A homeserver outage: the fetch answers 503.
+fn outage() -> HsErrorKind {
+    HsErrorKind::ServerError(503, "service unavailable".to_string())
+}
+
+const MAX_RETRIES: u32 = 10;
+
+#[tokio_shared_rt::test(shared)]
+async fn test_flip_at_max_retries_with_5xx_is_rescheduled_until_the_fetch_succeeds() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    // No epoch on the node: the user reads as `v0`
+    UserDetails::from_pubky(user.clone()).put_to_graph().await?;
+
+    let event_uri = social_v1_profile_uri(&user_id);
+    let index_key = IndexKey::for_uri(&event_uri);
+    let store = new_in_memory_store();
+    let now = Utc::now().timestamp_millis();
+    store.put(&ready_put_entry(&event_uri, MAX_RETRIES)).await?;
+
+    // The homeserver is down: the fetch answers 503
+    let files = tempfile::TempDir::new()?;
+    let handler = default_handler(
+        MockHomeserverClient::default().with_resource_error(&event_uri, outage()),
+        &files,
+    );
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("a transient fetch error on the flip must not fail the batch");
+
+    let rescheduled = store
+        .get(&index_key)
+        .await?
+        .expect("the flip must be rescheduled past max_retries, not dead-lettered");
+    assert_eq!(
+        rescheduled.retry_count,
+        MAX_RETRIES + 1,
+        "the attempt still counts"
+    );
+    assert!(
+        rescheduled.next_retry_at > now,
+        "the flip is rescheduled with the transient backoff"
+    );
+    assert_eq!(
+        find_user_epoch(&user_id).await,
+        None,
+        "the user stays at v0 until the fetch succeeds"
+    );
+
+    // The homeserver is back: the same entry, due again, flips the user and leaves the queue
+    store
+        .put(&RetryEvent {
+            next_retry_at: now - 1000,
+            ..rescheduled
+        })
+        .await?;
+    let profile = PubkySocialUser::new("Retry:Flip:Outage".to_string(), None, None, None, None);
+    let handler = default_handler(
+        MockHomeserverClient::default().with_resource(&event_uri, serde_json::to_vec(&profile)?),
+        &files,
+    );
+    let (_, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("the flip must not fail the batch");
+
+    assert_eq!(find_user_epoch(&user_id).await.as_deref(), Some("v1"));
+    let cached = find_cached_user_details(&user_id).await?;
+    assert_eq!(cached.epoch, Epoch::V1);
+    assert_eq!(cached.name, "Retry:Flip:Outage");
+    assert!(
+        store.get(&index_key).await?.is_none(),
+        "the flipped entry must leave the queue"
+    );
+
+    handlers::user::del(user).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// A `social/v1` profile PUT whose fetch answers 404 is removed
+// The profile was deleted since: not worth retrying, so the entry is dropped at
+// once and the user stays at `v0`.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_social_v1_profile_put_with_404_is_removed() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    UserDetails::from_pubky(user).put_to_graph().await?;
+
+    let event_uri = social_v1_profile_uri(&user_id);
+    let store = new_in_memory_store();
+    store.put(&ready_put_entry(&event_uri, 0)).await?;
+
+    // The mock client answers 404 for any URI it does not serve
+    let files = tempfile::TempDir::new()?;
+    let handler = default_handler(MockHomeserverClient::default(), &files);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("a 404 must not fail the batch");
+
+    assert!(
+        store.get(&IndexKey::for_uri(&event_uri)).await?.is_none(),
+        "a profile that is gone must be removed from the queue"
+    );
+    assert_eq!(
+        find_user_epoch(&user_id).await,
+        None,
+        "the user stays at v0"
+    );
+
+    exec_single_row(queries::del::delete_user(&user_id)).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// A `v1` user's profile PUT keeps the limit
+// The rule covers only the flip: the same entry for a user already at `v1` is a
+// profile edit, dead-lettered at `max_retries` like any other event.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_v1_user_profile_put_at_max_retries_with_5xx_is_dead_lettered() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    UserDetails::from_pubky(user).put_to_graph().await?;
+    set_user_epoch(&user_id, "v1").await?;
+
+    let event_uri = social_v1_profile_uri(&user_id);
+    let store = new_in_memory_store();
+    store.put(&ready_put_entry(&event_uri, MAX_RETRIES)).await?;
+
+    let files = tempfile::TempDir::new()?;
+    let handler = default_handler(
+        MockHomeserverClient::default().with_resource_error(&event_uri, outage()),
+        &files,
+    );
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("a dead-lettered entry must not fail the batch");
+
+    assert!(
+        store.get(&IndexKey::for_uri(&event_uri)).await?.is_none(),
+        "a v1 user's profile edit must be dead-lettered at max_retries"
+    );
+
+    exec_single_row(queries::del::delete_user(&user_id)).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// A flip with a `Generic` error keeps the limit
+// Only a transient fetch error lifts the limit: an error that would likely repeat
+// on every attempt dead-letters the flip at `max_retries`.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_flip_at_max_retries_with_a_generic_error_is_dead_lettered() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    UserDetails::from_pubky(user).put_to_graph().await?;
+
+    let event_uri = social_v1_profile_uri(&user_id);
+    let store = new_in_memory_store();
+    store.put(&ready_put_entry(&event_uri, MAX_RETRIES)).await?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        create_mock_handler(
+            Err(EventProcessorError::Generic("would repeat".to_string())),
+            Some(&user_id),
+        ),
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("a dead-lettered entry must not fail the batch");
+
+    assert!(
+        store.get(&IndexKey::for_uri(&event_uri)).await?.is_none(),
+        "a flip with a Generic error must be dead-lettered at max_retries"
+    );
+
+    exec_single_row(queries::del::delete_user(&user_id)).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// A `pubky.app` post PUT keeps the limit
+// Unchanged: a transient fetch error on any other event still dead-letters it at
+// `max_retries`.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_pubky_app_post_put_at_max_retries_with_5xx_is_dead_lettered() -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    UserDetails::from_pubky(user).put_to_graph().await?;
+
+    let event_uri = post_uri_builder(user_id.clone(), "0032SSN7Q4EVG".to_string());
+    let store = new_in_memory_store();
+    store.put(&ready_put_entry(&event_uri, MAX_RETRIES)).await?;
+
+    let files = tempfile::TempDir::new()?;
+    let handler = default_handler(
+        MockHomeserverClient::default().with_resource_error(&event_uri, outage()),
+        &files,
+    );
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        handler,
+        shutdown_rx,
+    );
+
+    processor
+        .run_internal()
+        .await
+        .expect("a dead-lettered entry must not fail the batch");
+
+    assert!(
+        store.get(&IndexKey::for_uri(&event_uri)).await?.is_none(),
+        "a post PUT must still be dead-lettered at max_retries"
+    );
+
+    exec_single_row(queries::del::delete_user(&user_id)).await?;
+    let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+// ============================================================================
+// A graph error on the flip is unchanged
+// Rescheduled without counting, and the batch stops: the entry behind it is not
+// reached.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_graph_error_on_the_flip_is_rescheduled_without_counting_and_stops_the_batch(
+) -> Result<()> {
+    setup().await?;
+
+    let user = random_pubky_id();
+    let user_id = user.to_string();
+    UserDetails::from_pubky(user).put_to_graph().await?;
+
+    let profile_uri = social_v1_profile_uri(&user_id);
+    let post_uri = post_uri_builder(user_id.clone(), "0032SSN7Q4EVH".to_string());
+    let store = new_in_memory_store();
+    let now = Utc::now().timestamp_millis();
+    // The flip is due first, the post behind it
+    store
+        .put(&RetryEvent {
+            next_retry_at: now - 2000,
+            ..ready_put_entry(&profile_uri, MAX_RETRIES)
+        })
+        .await?;
+    store.put(&ready_put_entry(&post_uri, 0)).await?;
+
+    let handler = create_mock_handler(
+        Err(EventProcessorError::GraphQueryFailed(
+            true,
+            "Database connection failed".to_string(),
+        )),
+        Some(&user_id),
+    );
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let processor = build_processor(
+        store.clone(),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        handler.clone(),
+        shutdown_rx,
+    );
+
+    let result = processor.run_internal().await;
+    assert!(result.is_err(), "a graph error must stop the batch");
+    assert_eq!(
+        handler.get_handle_count(),
+        1,
+        "the post behind the flip must not be reached"
+    );
+
+    let rescheduled = store
+        .get(&IndexKey::for_uri(&profile_uri))
+        .await?
+        .expect("the flip must be rescheduled, not removed");
+    assert_eq!(
+        rescheduled.retry_count, MAX_RETRIES,
+        "a graph error does not count"
+    );
+    assert!(rescheduled.next_retry_at > now, "rescheduled with backoff");
+    assert!(
+        store.get(&IndexKey::for_uri(&post_uri)).await?.is_some(),
+        "the post entry stays queued"
+    );
+
+    exec_single_row(queries::del::delete_user(&user_id)).await?;
     let _ = shutdown_tx.send(true);
     Ok(())
 }
