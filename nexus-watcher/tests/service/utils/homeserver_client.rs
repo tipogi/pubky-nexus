@@ -40,6 +40,10 @@ pub struct MockHomeserverClient {
     /// Failures `get_resource` answers instead, by URI. Checked before `resources`.
     resource_errors: HashMap<String, HsErrorKind>,
 
+    /// Blob URIs `get_blob` was asked for, in fetch order. Every blob fetch is a 404, so a test
+    /// that asserts no download happened reads this.
+    blob_fetches: Mutex<Vec<String>>,
+
     /// The homeserver every user resolves to. None by default.
     homeserver_of: Option<PubkyId>,
 }
@@ -110,6 +114,11 @@ impl MockHomeserverClient {
 
     pub async fn call_details(&self) -> Vec<(String, String, u64, u16)> {
         self.calls.lock().await.clone()
+    }
+
+    /// The blob URIs `get_blob` was asked for, in fetch order.
+    pub async fn blob_fetches(&self) -> Vec<String> {
+        self.blob_fetches.lock().await.clone()
     }
 }
 
@@ -187,6 +196,7 @@ impl HomeserverClient for MockHomeserverClient {
     }
 
     async fn get_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        self.blob_fetches.lock().await.push(resource.to_pubky_url());
         Err(not_found(resource, HsOp::GetBlob))
     }
 }
