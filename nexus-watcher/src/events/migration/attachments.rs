@@ -12,14 +12,11 @@
 //! module carries its own copy.
 
 use super::files::FileMap;
-use pubky_social_specs::legacy_v0::{ParsedUri, Resource};
+use pubky_social_specs::legacy_v0::{ParsedUri, Resource, APP_PATH, PUBLIC_PATH};
 use pubky_social_specs::{
     canonicalize_external_uri, canonicalize_pubky_uri, canonicalize_web_uri, file_uri_builder,
     follow_uri_builder, frozen_trim, post_uri_builder, user_uri_builder, PubkyId, PROTOCOL,
 };
-
-/// The legacy namespace under the public root, where every v0 object lived.
-const LEGACY_PREFIX: &str = "pub/pubky.app/";
 
 /// The address `uri` takes in `owner`'s migrated post, given `owner`'s file map.
 pub fn rewrite(owner: &PubkyId, files: &FileMap, uri: &str) -> String {
@@ -41,7 +38,9 @@ pub fn rewrite(owner: &PubkyId, files: &FileMap, uri: &str) -> String {
     let Some((host, path)) = rest.split_once('/') else {
         return canonical;
     };
-    if !path.starts_with(LEGACY_PREFIX) {
+    // The legacy app folder under the public root, where every v0 object lived
+    let legacy = format!("{}{APP_PATH}", PUBLIC_PATH.trim_start_matches('/'));
+    if !path.starts_with(&legacy) {
         return canonical;
     }
     let Ok(parsed) = ParsedUri::try_from(canonical.as_str()) else {
