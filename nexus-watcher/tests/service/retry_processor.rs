@@ -1691,7 +1691,7 @@ async fn test_flip_at_max_retries_with_5xx_is_rescheduled_until_the_fetch_succee
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let processor = build_processor(
         store.clone(),
-        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 3600),
+        create_test_config(MAX_RETRIES, 50, 60, 3600, 60, 120),
         handler,
         shutdown_rx,
     );
@@ -1711,7 +1711,7 @@ async fn test_flip_at_max_retries_with_5xx_is_rescheduled_until_the_fetch_succee
         "the attempt still counts"
     );
     assert!(
-        rescheduled.next_retry_at > now,
+        rescheduled.next_retry_at >= now + 3_600_000,
         "the flip is rescheduled with the transient backoff"
     );
     assert_eq!(

@@ -38,7 +38,7 @@ pub mod handlers;
 mod moderation;
 pub mod retry;
 
-pub(crate) use gate::is_profile_put;
+pub(crate) use gate::is_flip;
 use gate::Gate;
 use handlers::utils::bounded;
 use inputs::{ReferenceTarget, ResourceKey, TagInput};

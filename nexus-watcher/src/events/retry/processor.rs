@@ -14,7 +14,7 @@ use super::IndexKey;
 use super::RetryEvent;
 use super::RetryScheduler;
 use crate::events::gate::{self, Gate};
-use crate::events::EventHandler;
+use crate::events::{is_flip, EventHandler};
 use crate::service::indexer::{RunOutcome, TEventProcessor};
 
 /// Maximum number of retry events to fetch per batch to avoid memory spikes
@@ -171,9 +171,11 @@ impl RetryProcessor {
 
         match error {
             e if !RetryScheduler::should_enqueue_related_event(&e) => {
-                // Not worth retrying (ParseFailed, etc.) - dead-letter immediately. A dropped
-                // `social/v1` profile PUT may be a lost flip, so it is named and logged at `error`.
-                if gate::is_profile_put(&event) {
+                // Not worth retrying (ParseFailed, etc.) - dead-letter immediately. The level
+                // follows the user's epoch, not the path: a dropped `social/v1` profile PUT of
+                // a user at `v0` is a lost flip, named and logged at `error`; a `v1` user's
+                // own edit stays at `warn`.
+                if is_flip(&event).await {
                     error!("social/v1 profile PUT {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
                 } else {
                     warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
@@ -190,9 +192,10 @@ impl RetryProcessor {
             }
             e if limit_reached => {
                 // A flip has no limit for a transient fetch error (`limit_reached`), so a
-                // `social/v1` profile PUT reaching it is usually a `v1` user's edit; it is named
-                // and logged at `error` all the same: a lost profile must never be a `warn`.
-                if gate::is_profile_put(&event) {
+                // `social/v1` profile PUT reaching it is usually a `v1` user's edit. The level
+                // follows the user's epoch, not the path: a flip lost to a non-transient error
+                // is named and logged at `error`; a `v1` user's own edit stays at `warn`.
+                if is_flip(&event).await {
                     error!("social/v1 profile PUT {ev_uri} exceeded max retries ({ev_retry_count}), dead-lettering: {e}");
                 } else {
                     warn!("Event {ev_uri} exceeded max retries ({ev_retry_count}), dead-lettering: {e}");

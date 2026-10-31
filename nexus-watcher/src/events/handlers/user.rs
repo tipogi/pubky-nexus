@@ -58,6 +58,9 @@ pub async fn flip(user_id: &PubkyId) -> Result<(), EventProcessorError> {
     // Step 2: Set the epoch in the graph
     Epoch::set_v1_in_graph(user_id).await?;
 
+    // One line per flip, so flips can be counted and found by user.
+    info!("User flipped to v1");
+
     // Step 3: Refresh the details cache from the graph, so the API shows `v1`
     let user_id: &str = user_id.as_ref();
     let user_details = UserDetails::get_from_graph(&[user_id]).await?;
@@ -65,8 +68,6 @@ pub async fn flip(user_id: &PubkyId) -> Result<(), EventProcessorError> {
         .instrument(tracing::info_span!("index.write"))
         .await?;
 
-    // One line per flip, so flips can be counted and found by user.
-    info!("User flipped to v1");
     Ok(())
 }
 
