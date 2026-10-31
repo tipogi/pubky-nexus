@@ -7,10 +7,10 @@
 //! and the step and returned as the transient graph or Redis error it is, so the flip goes
 //! through the normal retry, which runs it whole again while the user is still `v0`.
 
-#[cfg(test)]
-mod agreement;
 pub mod attachments;
 pub mod files;
+#[cfg(test)]
+mod migrator_tests;
 pub mod posts;
 pub mod tags;
 
