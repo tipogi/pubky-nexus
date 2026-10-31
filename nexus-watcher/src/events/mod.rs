@@ -4,6 +4,7 @@ mod epoch_metrics;
 pub mod event;
 mod gate;
 pub mod inputs;
+pub mod migration;
 mod route;
 pub mod target;
 mod translation;

@@ -2,6 +2,7 @@ mod bookmarks;
 mod files;
 mod follows;
 mod mentions;
+mod migration;
 mod network;
 mod posts;
 mod tags;
