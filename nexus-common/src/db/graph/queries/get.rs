@@ -55,13 +55,18 @@ pub fn get_post_by_id(author_id: &str, post_id: &str) -> Query {
 
 /// The details of `author_id`'s posts `post_ids`, shaped as [`get_post_by_id`] shapes them,
 /// one row per post the graph holds, in `post_ids` order. No reply key.
+///
+/// The `WITH` barrier is load-bearing, as in [`get_post_by_id`]: it pins the seek on
+/// `Post(id)` per id, where the planner may otherwise expand every post of the author for
+/// each id.
 pub fn get_posts_details_by_ids(author_id: &str, post_ids: &[String]) -> Query {
     Query::new(
         "get_posts_details_by_ids",
         "
         MATCH (u:User {id: $author_id})
         UNWIND $post_ids AS post_id
-        MATCH (u)-[:AUTHORED]->(p:Post {id: post_id})
+        MATCH (p:Post {id: post_id})
+        WITH u, p WHERE (u)-[:AUTHORED]->(p)
         RETURN {
             uri: p.uri,
             content: p.content,

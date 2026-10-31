@@ -7,11 +7,16 @@ use crate::db::graph::Query;
 
 /// Every `File` node `owner_id` owns, attached or not, as `(id, src, content_type)` rows
 /// ordered by id: what the internal migration builds its file map from.
+///
+/// The `id IS NOT NULL` predicate is load-bearing: the unique constraint on `(owner_id, id)`
+/// is a composite index, which seeks only with a predicate on every property; on `owner_id`
+/// alone the planner scans every `File` in the graph.
 pub fn get_user_files_sources(owner_id: &str) -> Query {
     Query::new(
         "get_user_files_sources",
         "
-        MATCH (f:File {owner_id: $owner_id})
+        MATCH (f:File)
+        WHERE f.owner_id = $owner_id AND f.id IS NOT NULL
         RETURN f.id AS id, f.src AS src, f.content_type AS content_type
         ORDER BY f.id ASC
         ",
@@ -107,6 +112,9 @@ pub fn get_tagger_edges_under(tagger_id: &str, prefix: &str, limit: usize) -> Qu
 /// `(post_id, uri, attachments)` rows, in one batch. A post stored with no attachments
 /// (`None`) keeps none, whatever the row carries, so a rewrite never turns a missing list
 /// into an empty one. A post that is not theirs is left alone.
+///
+/// The `WITH` barrier is load-bearing, as in `get_post_by_id`: it pins the seek on `Post(id)`
+/// per row, where the planner may otherwise expand every post of the author for each row.
 pub fn set_post_addresses(
     author_id: &str,
     posts: &[(String, String, Option<Vec<String>>)],
@@ -125,7 +133,8 @@ pub fn set_post_addresses(
         MATCH (u:User {id: $author_id})
         UNWIND range(0, size($posts) - 1) AS i
         WITH u, $posts[i] AS post, $attachments[i] AS attachments
-        MATCH (u)-[:AUTHORED]->(p:Post {id: post[0]})
+        MATCH (p:Post {id: post[0]})
+        WITH u, p, post, attachments WHERE (u)-[:AUTHORED]->(p)
         SET p.uri = post[1],
             p.attachments = CASE WHEN p.attachments IS NULL THEN null ELSE attachments END
         ",
