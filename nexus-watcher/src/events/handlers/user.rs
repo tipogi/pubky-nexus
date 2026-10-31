@@ -9,6 +9,7 @@ use nexus_common::models::{
     user::{Epoch, UserDetails, UserSearch, UsersByTagSearch},
 };
 use pubky_social_specs::PubkyId;
+use std::path::Path;
 use tracing::{debug, info, Instrument};
 
 use crate::events::inputs::UserInput;
@@ -46,14 +47,14 @@ pub async fn sync_put(user: UserInput, user_id: PubkyId) -> Result<(), EventProc
 
 /// Moves a user to `v1`, once [`sync_put`] has indexed their `social/v1` profile: the flip.
 ///
-/// What Nexus holds for the user at `pubky.app` is migrated first ([`crate::events::migration`]). A
-/// failure before the epoch write leaves the user at `v0`, so the retry runs the whole flip
-/// again, migration included; one after it is retried as a profile edit, which caches the
-/// stored `v1`.
+/// What Nexus holds for the user at `pubky.app` is migrated first ([`crate::events::migration`]),
+/// their files copied to their `social/v1` folders under `files_path` included. A failure before
+/// the epoch write leaves the user at `v0`, so the retry runs the whole flip again, migration
+/// included; one after it is retried as a profile edit, which caches the stored `v1`.
 #[tracing::instrument(name = "user.flip", skip_all, fields(user_id = %user_id))]
-pub async fn flip(user_id: &PubkyId) -> Result<(), EventProcessorError> {
+pub async fn flip(user_id: &PubkyId, files_path: &Path) -> Result<(), EventProcessorError> {
     // Step 1: Migrate the user's indexed data to its `social/v1` form, while they are still `v0`
-    crate::events::migration::run(user_id).await?;
+    crate::events::migration::run(user_id, files_path).await?;
 
     // Step 2: Set the epoch in the graph
     Epoch::set_v1_in_graph(user_id).await?;

@@ -106,6 +106,18 @@ pub enum EventProcessorError {
     #[error("StaticSaveFailed: {0}")]
     StaticSaveFailed(String),
 
+    /// The flip's copy of a user's files could not read a legacy `main`, other than by its
+    /// absence, or could not write a `social/v1` one: a full disk, permissions. Owned by the
+    /// migration and uncounted: listed in [`Self::should_not_retry_now`] next to the graph and
+    /// Redis failures, so the retry processor reschedules the flip's profile PUT without
+    /// consuming a retry and ends its batch, as it does for a graph error. So a full disk can
+    /// never dead-letter a flip: the retry runs the whole flip again, and the copy skips what
+    /// already exists. A file PUT's own failed write stays the counted
+    /// [`Self::StaticSaveFailed`]: there the cost of giving up is one file, here it is a user
+    /// stuck at `v0`.
+    #[error("MigrationDiskFailed: {0}")]
+    MigrationDiskFailed(String),
+
     /// Catch-all for miscellaneous errors in the processor layer
     #[error("Generic error: {0}")]
     Generic(String),
@@ -202,6 +214,10 @@ impl EventProcessorError {
         Self::StaticSaveFailed(source.to_string())
     }
 
+    pub fn migration_disk_failed(source: impl Display) -> Self {
+        Self::MigrationDiskFailed(source.to_string())
+    }
+
     pub fn generic(source: impl Display) -> Self {
         Self::Generic(source.to_string())
     }
@@ -235,6 +251,11 @@ impl EventProcessorError {
                 // on any other fetch (a file a user can point at any host) stays a
                 // per-event error, or one such file would stall the whole run.
                 | Self::HsEventsStreamServerError(_)
+
+                // The flip's copy could not read or write the disk. Nothing else in the
+                // batch can write either, and a user must not end up at `v1` with missing
+                // files, so the flip is rescheduled uncounted and the batch ends.
+                | Self::MigrationDiskFailed(_)
 
                 // For a key-based runner, this indicates the external HS either
                 // has a temporary glitch or is malicious. Including it here to
@@ -461,6 +482,24 @@ mod tests {
         ] {
             assert!(!err.is_transient_fetch(), "{err:?}");
         }
+    }
+
+    /// The flip's disk error is retried uncounted, like a graph error: the retry queue takes
+    /// it, and it ends the batch. A file PUT's own failed write stays a counted retry.
+    #[test]
+    fn migration_disk_failure_is_retried_uncounted_like_a_graph_error() {
+        let err = EventProcessorError::migration_disk_failed("No space left on device");
+
+        assert!(
+            matches!(err, EventProcessorError::MigrationDiskFailed(ref m) if m == "No space left on device")
+        );
+        assert!(err.should_not_retry_now(), "{err}");
+        assert!(RetryScheduler::should_enqueue_related_event(&err), "{err}");
+        assert!(!err.is_transient_fetch(), "{err}");
+
+        let file_write = EventProcessorError::static_save_failed("No space left on device");
+        assert!(!file_write.should_not_retry_now(), "{file_write}");
+        assert!(RetryScheduler::should_enqueue_related_event(&file_write));
     }
 
     #[test]

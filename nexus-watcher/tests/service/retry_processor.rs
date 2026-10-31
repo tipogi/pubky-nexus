@@ -281,6 +281,79 @@ async fn test_infrastructure_error_at_max_retries_does_not_dead_letter() -> Resu
 }
 
 // ============================================================================
+// The flip's disk error does NOT dead-letter, also at max_retries
+// A profile PUT entry whose copy fails to write (disk full, permissions) is the
+// migration's own error, listed next to the Neo4j and Redis failures: it is
+// rescheduled with backoff, its retry_count unchanged, and ends the batch. So a
+// full disk can never dead-letter a flip; the retry runs the whole flip again.
+// ============================================================================
+
+#[tokio_shared_rt::test(shared)]
+async fn test_migration_disk_error_reschedules_a_profile_put_with_its_count_unchanged() -> Result<()>
+{
+    setup().await?;
+
+    let max_retries = 10;
+    let profile_uri = pubky_social_specs::user_uri_builder(TEST_USER_ID.to_string());
+    let index_key = IndexKey::for_uri(&profile_uri);
+
+    // A first failure, and one already at max_retries, where an application error would
+    // dead-letter.
+    for retry_count in [0, max_retries] {
+        let store = new_in_memory_store();
+        let now = Utc::now().timestamp_millis();
+        let retry_event = RetryEvent {
+            retry_count,
+            event_type: EventType::Put,
+            event_uri: profile_uri.clone(),
+            next_retry_at: now - 1000,
+            origin_homeserver_id: TEST_HOMESERVER_ID.to_string(),
+            nonce: 0,
+        };
+        store.put(&retry_event).await?;
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let processor = build_processor(
+            store.clone(),
+            create_test_config(max_retries, 50, 60, 3600, 60, 3600),
+            create_mock_handler(
+                Err(EventProcessorError::MigrationDiskFailed(
+                    "No space left on device".to_string(),
+                )),
+                Some(TEST_USER_ID),
+            ),
+            shutdown_rx,
+        );
+
+        let result = processor.run_internal().await;
+        assert!(
+            matches!(result, Err(EventProcessorError::MigrationDiskFailed(_))),
+            "the disk error must end the batch, got {result:?}"
+        );
+
+        let updated_event = store.get(&index_key).await?.unwrap_or_else(|| {
+            panic!("the flip must not be dead-lettered at retry_count {retry_count}")
+        });
+        assert_eq!(
+            updated_event.retry_count, retry_count,
+            "the disk error must not consume a retry"
+        );
+        // The normal backoff for the first retry, 60 s, and its cap of 3600 s at max_retries.
+        let expected_backoff_ms = i64::from(std::cmp::min(60u32 << retry_count, 3600)) * 1000;
+        let expected_next_retry = now + expected_backoff_ms;
+        assert!(
+            updated_event.next_retry_at >= expected_next_retry - 1000
+                && updated_event.next_retry_at <= expected_next_retry + 1000,
+            "retry_count {retry_count}: expected next_retry_at near {expected_next_retry}, got {}",
+            updated_event.next_retry_at
+        );
+
+        let _ = shutdown_tx.send(true);
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Backoff - capped at max
 // Large retry count returns max, never exceeds ceiling
 // ============================================================================

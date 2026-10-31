@@ -127,7 +127,9 @@ impl EventHandler for DefaultEventHandler {
             // summary line per failed flip, whichever step failed: the profile, the migration
             // (which logs its own step) or the epoch write. The retry runs the flip again.
             match handled {
-                Ok(()) => handlers::user::flip(event.target.user_id()).await,
+                Ok(()) => {
+                    handlers::user::flip(event.target.user_id(), self.files_path.as_path()).await
+                }
                 Err(e) => Err(e),
             }
             .inspect_err(|e| {
