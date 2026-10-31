@@ -260,9 +260,10 @@ mod tests {
     fn fold_scheme_folds_only_a_scheme_shaped_prefix() {
         assert_eq!(fold_scheme("PUBKY://x"), "pubky://x");
         assert_eq!(fold_scheme("Web+App.1-x:rest"), "web+app.1-x:rest");
-        assert_eq!(fold_scheme("1abc:rest"), "1abc:rest");
-        assert_eq!(fold_scheme("a b:rest"), "a b:rest");
-        assert_eq!(fold_scheme(":rest"), ":rest");
+        // An unshaped prefix is left alone, its case included, as the migrator leaves it
+        assert_eq!(fold_scheme("1ABC:rest"), "1ABC:rest");
+        assert_eq!(fold_scheme("A B:rest"), "A B:rest");
+        assert_eq!(fold_scheme(":Rest"), ":Rest");
         assert_eq!(fold_scheme("nocolon"), "nocolon");
     }
 }
