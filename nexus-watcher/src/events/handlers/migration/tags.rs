@@ -206,9 +206,10 @@ fn new_id(owner: &PubkyId, files: &FileMap, tag: &StoredTag) -> NewId {
             }
         }
         Target::Resource(uri) => match own_file_hash(owner, files, uri) {
-            Some(hash) => {
-                NewId::Computed(tag_id(&attachments::media(owner, files, hash), &tag.label))
-            }
+            Some(hash) => NewId::Computed(tag_id(
+                &attachments::migrated_file_uri(owner, files, hash),
+                &tag.label,
+            )),
             None => NewId::Kept,
         },
         Target::Other => NewId::Unmatched("the target is neither a post, a user nor a resource"),

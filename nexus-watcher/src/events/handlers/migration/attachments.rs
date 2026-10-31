@@ -51,10 +51,10 @@ pub fn rewrite(owner: &PubkyId, files: &FileMap, uri: &str) -> String {
     match parsed.resource {
         // Another user's media migrates under their file map, which this run cannot see
         Resource::File(tsid) => match own.then(|| files.hash_of(&tsid)).flatten() {
-            Some(hash) => media(owner, files, hash),
+            Some(hash) => migrated_file_uri(owner, files, hash),
             None => canonical,
         },
-        Resource::Blob(hash) if own => media(owner, files, &hash),
+        Resource::Blob(hash) if own => migrated_file_uri(owner, files, &hash),
         Resource::User => user_uri_builder(host.to_string()),
         Resource::Post(id) => post_uri_builder(host.to_string(), id),
         Resource::Follow(pk) => follow_uri_builder(host.to_string(), pk.to_string()),
@@ -71,7 +71,7 @@ pub fn rewrite(owner: &PubkyId, files: &FileMap, uri: &str) -> String {
 
 /// The owner's blob `hash` at its migrated address, `social/v1/files/{hash}.{ext}`: the
 /// address a tag on that file hashes too.
-pub(super) fn media(owner: &PubkyId, files: &FileMap, hash: &str) -> String {
+pub(super) fn migrated_file_uri(owner: &PubkyId, files: &FileMap, hash: &str) -> String {
     let filename = format!("{hash}.{}", files.ext_of(hash));
     file_uri_builder(owner.to_string(), filename)
 }

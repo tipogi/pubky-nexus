@@ -39,6 +39,9 @@ pub async fn migrate(
 ) -> Result<(), EventProcessorError> {
     debug!(%user_id, "Migrating posts");
     let author_id: &str = user_id.as_ref();
+    // The page queries return at most `MAX_QUERY_LIMIT` rows, and the scan stops on a page
+    // shorter than its batch size: a bigger batch would read a full page as the last one
+    let batch_size = batch_size.min(queries::get::MAX_QUERY_LIMIT);
     keyset_scan(batch_size, "migration.posts", |after_id| async move {
         let page = queries::get::get_author_posts_page(author_id, &after_id, batch_size);
         let posts = fetch_all_rows_from_graph(page)

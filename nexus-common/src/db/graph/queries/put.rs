@@ -3,7 +3,6 @@ use crate::db::graph::Query;
 use crate::models::ResourceKey;
 use crate::models::{file::FileDetails, post::PostDetails, user::UserDetails};
 use pubky_social_specs::PubkyId;
-use std::collections::HashMap;
 
 /// Creates or overwrites a `User` node.
 ///
@@ -78,21 +77,25 @@ pub fn set_post_addresses(
 }
 
 /// Writes the `id` and the `uri` of each of `tagger_id`'s `TAGGED` edges in `tags`, `(edge,
-/// id, uri)` rows keyed by the edge's element id, in one pass over the tagger's edges, and
-/// returns how many it wrote as `changed`. An edge that is gone, or not the tagger's, is left
-/// alone and not counted.
+/// id, uri)` rows keyed by the edge's element id, one element-id seek per row, and returns how
+/// many it wrote as `changed`. An edge that is gone, or not the tagger's, is left alone and not
+/// counted.
+///
+/// The anonymous pattern is load-bearing: anchored on the tagger, the planner expands every
+/// edge they wrote for each row; anchored on nothing, it seeks the edge by its element id
+/// (`DirectedRelationshipByElementIdSeek`) and checks the tagger on the start node.
 pub fn set_tag_addresses(tagger_id: &str, tags: &[(String, String, String)]) -> Query {
-    let tags: HashMap<String, Vec<String>> = tags
+    let tags: Vec<Vec<String>> = tags
         .iter()
-        .map(|(edge, id, uri)| (edge.clone(), vec![id.clone(), uri.clone()]))
+        .map(|(edge, id, uri)| vec![edge.clone(), id.clone(), uri.clone()])
         .collect();
     Query::new(
         "set_tag_addresses",
         "
-        MATCH (:User {id: $tagger_id})-[t:TAGGED]->()
-        WITH t, $tags[elementId(t)] AS tag
-        WHERE tag IS NOT NULL
-        SET t.id = tag[0], t.uri = tag[1]
+        UNWIND $tags AS tag
+        MATCH ()-[t:TAGGED]->()
+        WHERE elementId(t) = tag[0] AND startNode(t).id = $tagger_id
+        SET t.id = tag[1], t.uri = tag[2]
         RETURN count(t) AS changed
         ",
     )

@@ -679,6 +679,8 @@ async fn test_tags_migration_rerun_gives_the_same_result() -> Result<()> {
         .await?;
     let mut post_paths = Vec::new();
     let mut tags = Vec::new();
+    // The id each edge takes: the migrator's copy, on the v1 target
+    let mut expected_ids = Vec::new();
     for n in 0..3 {
         let (post_id, post_path) = test
             .create_post(
@@ -687,17 +689,28 @@ async fn test_tags_migration_rerun_gives_the_same_result() -> Result<()> {
             )
             .await?;
         post_paths.push(post_path);
+        let label = format!("migrerun{n}");
         tags.push(v0_tag(
-            &v0_post_uri_builder(author_id.clone(), post_id),
-            &format!("migrerun{n}"),
+            &v0_post_uri_builder(author_id.clone(), post_id.clone()),
+            &label,
+        ));
+        expected_ids.push((
+            label.clone(),
+            v1_tag(&v1_post_uri_builder(author_id.clone(), post_id), &label).create_id(),
         ));
     }
     tags.push(v0_tag(
         &v0_user_uri_builder(other_id.clone()),
         "migrerunuser",
     ));
+    expected_ids.push((
+        "migrerunuser".to_string(),
+        v1_tag(&v1_user_uri_builder(other_id.clone()), "migrerunuser").create_id(),
+    ));
     let url = format!("https://example.com/rerun/{author_id}");
     tags.push(v0_tag(&url, "migrerunurl"));
+    // A URL target is kept, so its id is
+    expected_ids.push(("migrerunurl".to_string(), tags[4].create_id()));
     for tag in &tags {
         test.put(&author_kp, &tag.hs_path(), tag).await?;
     }
@@ -708,6 +721,11 @@ async fn test_tags_migration_rerun_gives_the_same_result() -> Result<()> {
     let first = tag_edges_snapshot(&author_id).await?;
     assert_eq!(first.len(), tags.len());
     for (label, id, uri, _, _) in &first {
+        let (_, expected_id) = expected_ids
+            .iter()
+            .find(|(expected_label, _)| expected_label == label)
+            .expect("an expected id per label");
+        assert_eq!(id, expected_id, "{label}");
         assert_eq!(uri, &v1_tag_uri(&author_id, id), "{label}");
     }
 

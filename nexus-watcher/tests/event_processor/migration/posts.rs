@@ -49,6 +49,19 @@ async fn corrupt_post_indexed_at(author_id: &str, post_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drops a post's `attachments` list, as a post indexed before the list was stored has none.
+async fn unset_post_attachments(author_id: &str, post_id: &str) -> Result<()> {
+    let query = Query::new(
+        "unset_post_attachments",
+        "MATCH (:User {id: $author_id})-[:AUTHORED]->(p:Post {id: $post_id})
+        REMOVE p.attachments",
+    )
+    .param("author_id", author_id)
+    .param("post_id", post_id);
+    exec_single_row(query).await?;
+    Ok(())
+}
+
 /// Puts a post's `indexed_at` back.
 async fn restore_post_indexed_at(author_id: &str, post_id: &str, indexed_at: i64) -> Result<()> {
     let query = Query::new(
@@ -481,7 +494,8 @@ async fn test_failed_migration_leaves_v0_and_the_retry_finishes_it() -> Result<(
 }
 
 /// Over more than one batch, running the migration again, and running it from a partly migrated
-/// state, leaves the same graph and the same served posts and relationships.
+/// state, leaves the same graph and the same served posts and relationships. A post stored with
+/// no attachments list, as older data is, keeps none.
 #[tokio_shared_rt::test(shared)]
 async fn test_migration_rerun_gives_the_same_result() -> Result<()> {
     let mut test = WatcherTest::setup(None).await?;
@@ -527,6 +541,10 @@ async fn test_migration_rerun_gives_the_same_result() -> Result<()> {
         child_paths.push(child_path);
     }
 
+    // Older data: a post stored with no attachments list at all
+    let bare_id = &post_ids[4];
+    unset_post_attachments(&author_id, bare_id).await?;
+
     let author = pubky_id(&author_id)?;
     let files = migration::files::FileMap::load(&author).await?;
     migration::posts::migrate(&author, &files, 2).await?;
@@ -537,6 +555,21 @@ async fn test_migration_rerun_gives_the_same_result() -> Result<()> {
             Some(v1_post_uri_builder(author_id.clone(), post_id.clone()))
         );
     }
+    // The missing list stays missing, in the graph and as served; a stored list stays a list
+    assert_eq!(
+        find_post_details(&author_id, bare_id).await?.attachments,
+        None
+    );
+    let served = PostView::get_by_id(&author_id, bare_id, None, None, None)
+        .await?
+        .expect("the post is served");
+    assert_eq!(served.details.attachments, None);
+    assert_eq!(
+        find_post_details(&author_id, &post_ids[0])
+            .await?
+            .attachments,
+        Some(Vec::new())
+    );
     for (child_author_id, child_id) in &children {
         let served = PostRelationships::get_by_id(child_author_id, child_id)
             .await?
@@ -553,6 +586,7 @@ async fn test_migration_rerun_gives_the_same_result() -> Result<()> {
         let v0_uri = v0_post_uri_builder(author_id.clone(), post_id.clone());
         set_post_uri(&author_id, post_id, Some(&v0_uri)).await?;
     }
+    assert_ne!(snapshot(&author_id, &post_ids, &children).await?, first);
     migration::posts::migrate(&author, &files, 2).await?;
     assert_eq!(snapshot(&author_id, &post_ids, &children).await?, first);
 

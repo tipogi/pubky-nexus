@@ -43,9 +43,9 @@ pub async fn run(user_id: &PubkyId) -> Result<(), EventProcessorError> {
 async fn step<T>(
     user_id: &PubkyId,
     name: &'static str,
-    run: impl Future<Output = Result<T, EventProcessorError>>,
+    task: impl Future<Output = Result<T, EventProcessorError>>,
 ) -> Result<T, EventProcessorError> {
-    run.await
+    task.await
         .inspect_err(|e| error!(%user_id, step = %name, error = %e, "Internal migration failed"))
 }
 
