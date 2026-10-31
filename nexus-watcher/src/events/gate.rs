@@ -33,10 +33,18 @@ fn decide(event: &Event, user_epoch: Epoch) -> Gate {
     }
 }
 
-/// Whether `event` is a PUT of a `social/v1` profile.
-fn is_profile_put(event: &Event) -> bool {
+/// Whether `event` is a PUT of a `social/v1` profile: the flip, for a user at `v0`.
+pub(super) fn is_profile_put(event: &Event) -> bool {
     event.event_type == EventType::Put
         && matches!(&event.target, EventTarget::Social(parsed) if parsed.resource == Resource::User)
+}
+
+/// Whether `event` is a flip: a `social/v1` profile PUT of a user still at `v0` in the graph.
+/// Losing one strands that user, so a dropped or dead-lettered flip is logged at `error`; a
+/// `v1` user's own dropped edit keeps the level other events have. A failed graph read counts
+/// as a flip: on a failing graph, over-reporting a lost flip is the safe side.
+pub(crate) async fn is_flip(event: &Event) -> bool {
+    is_profile_put(event) && matches!(check(event).await, Ok(Gate::Flip) | Err(_))
 }
 
 /// The gate's decision for `event`, by its user's epoch in the graph: never the cached

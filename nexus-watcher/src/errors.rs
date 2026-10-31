@@ -6,6 +6,7 @@ use nexus_common::db::{GraphError, PubkyClientError};
 use nexus_common::models::error::ModelError;
 use thiserror::Error;
 
+use crate::events::retry::RetryScheduler;
 use crate::homeserver::{HsError, HsErrorKind, HsOp};
 
 #[derive(Error, Debug, Clone)]
@@ -253,12 +254,26 @@ impl EventProcessorError {
     pub fn is_missing_dependency(&self) -> bool {
         matches!(self, Self::MissingDependency { .. })
     }
+
+    /// Whether this is a fetch failure the retry queue takes: a `PubkyClientError` the
+    /// scheduler enqueues. Today that is a 5xx, a 429, a failed request, a PKARR failure or a
+    /// client not yet initialised. Each is retried with the transient backoff; a flip's profile
+    /// PUT with one is retried without limit. A `Generic` or `InternalError` is not one: it
+    /// would likely repeat on every attempt.
+    ///
+    /// A failed request includes a rejected status (400, 401, 403) on purpose: the retry queue
+    /// already treats it as transient, and a flip must not be lost to a homeserver
+    /// misconfiguration that is fixed later.
+    pub fn is_transient_fetch(&self) -> bool {
+        matches!(self, Self::PubkyClientError(_))
+            && RetryScheduler::should_enqueue_related_event(self)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::retry::RetryScheduler;
+    use pubky::errors::PkarrError;
 
     #[test]
     fn event_stream_5xx_is_not_retry_now() {
@@ -409,6 +424,43 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("HTTP 502: bad gateway"), "{message}");
+    }
+
+    /// A transient fetch error is one the retry queue takes, with the transient class; a 404,
+    /// a graph failure or a `Generic` is not one.
+    #[test]
+    fn transient_fetch_errors_are_the_retried_client_errors() {
+        for err in [
+            hs_error(HsOp::GetResource, HsErrorKind::ServerError(500, "".into())),
+            hs_error(HsOp::GetResource, HsErrorKind::RateLimited("".into())),
+            hs_error(HsOp::GetResource, HsErrorKind::Rejected(403, "".into())),
+            hs_error(HsOp::GetResource, HsErrorKind::Timeout),
+            hs_error(
+                HsOp::GetResource,
+                HsErrorKind::Sdk("could not resolve".into()),
+            ),
+            EventProcessorError::from(PubkyClientError::NotInitialized),
+            EventProcessorError::from(PubkyClientError::PkarrFailed(PkarrError::InvalidRecord(
+                "`_pubky` target `example.com`".into(),
+            ))),
+        ] {
+            assert!(err.is_transient_fetch(), "{err:?}");
+            assert!(
+                RetryScheduler::should_enqueue_related_event(&err),
+                "{err:?}"
+            );
+            assert!(!err.should_not_retry_now(), "{err:?}");
+        }
+
+        for err in [
+            hs_error(HsOp::GetResource, HsErrorKind::NotFound("".into())),
+            EventProcessorError::GraphQueryFailed(true, "".into()),
+            EventProcessorError::Generic("".into()),
+            EventProcessorError::InternalError("".into()),
+            EventProcessorError::MissingDependency { dependency: vec![] },
+        ] {
+            assert!(!err.is_transient_fetch(), "{err:?}");
+        }
     }
 
     #[test]
