@@ -3,9 +3,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use tracing::warn;
 
-use crate::errors::EventProcessorError;
+use crate::errors::{EventProcessorError, HsRequestError};
 use crate::events::Event;
-use nexus_common::db::PubkyClientError;
 use nexus_common::WatcherConfig;
 use pubky_social_specs::PubkyId;
 
@@ -52,19 +51,14 @@ impl RetryScheduler {
     /// When in doubt we enqueue (bounded by `max_retries`) rather than drop data.
     pub fn should_enqueue_related_event(error: &EventProcessorError) -> bool {
         match error {
-            EventProcessorError::PubkyClientError(err) => match err.as_ref() {
-                PubkyClientError::NotInitialized
-                | PubkyClientError::TooManyRequests429 { .. }
-                | PubkyClientError::ServerError5xx { .. }
-                | PubkyClientError::RequestFailed { .. }
-                | PubkyClientError::PkarrFailed(..) => true,
+            EventProcessorError::HsRequest(err) => match err {
+                HsRequestError::TooManyRequests429 { .. }
+                | HsRequestError::ServerError5xx { .. }
+                | HsRequestError::RequestFailed { .. } => true,
 
-                PubkyClientError::NotFound404 { .. }
-                | PubkyClientError::RequestRejected { .. }
-                | PubkyClientError::AuthenticationFailed(..)
-                | PubkyClientError::CredentialRefreshFailed(..)
-                | PubkyClientError::BuildFailed(..)
-                | PubkyClientError::ParseFailed(..) => false,
+                HsRequestError::NotFound404 { .. } | HsRequestError::RequestRejected { .. } => {
+                    false
+                }
             },
 
             EventProcessorError::InvalidEventLine(_)

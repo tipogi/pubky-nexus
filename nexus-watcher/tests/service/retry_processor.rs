@@ -506,7 +506,7 @@ async fn test_retry_entry_whose_origin_homeserver_is_no_key_is_removed_unhandled
 
 // ============================================================================
 // Retry 404 removes from queue
-// Handler returns PubkyClientError with 404 message, event is removed (content gone, no point retrying)
+// Handler returns a homeserver 404, event is removed (content gone, no point retrying)
 // ============================================================================
 
 #[tokio_shared_rt::test(shared)]
@@ -535,7 +535,7 @@ async fn test_retry_404_removes_from_queue() -> Result<()> {
         store.clone(),
         create_test_config(10, 50, 60, 3600, 60, 3600),
         create_mock_handler(
-            Err(nexus_common::db::PubkyClientError::NotFound404 { message: event_uri }.into()),
+            Err(EventProcessorError::client_error_404(event_uri)),
             Some(post_id),
         ),
         shutdown_rx,

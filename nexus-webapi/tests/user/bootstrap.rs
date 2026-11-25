@@ -137,19 +137,6 @@ async fn test_bootstrap_user_not_indexed() -> Result<()> {
     Ok(())
 }
 
-/// The started API holds a Pubky client, which the ingest-user route looks users'
-/// homeservers up with.
-#[tokio_shared_rt::test(shared)]
-async fn test_api_start_initialises_the_pubky_client() -> Result<()> {
-    let server = crate::utils::server::TestServiceServer::get_test_server().await;
-
-    assert!(
-        server.nexus_api.pubky_client().is_some(),
-        "the ingest-user route needs the Pubky client"
-    );
-    Ok(())
-}
-
 /// A viewer whose node does not deserialize is still a known user: the
 /// bootstrap counts them as indexed, as it asks whether the node exists.
 #[tokio_shared_rt::test(shared)]

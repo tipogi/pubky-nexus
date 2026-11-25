@@ -1,5 +1,5 @@
 use crate::service::NexusWatcher;
-use nexus_common::db::{build_pubky, DatabaseConfig};
+use nexus_common::db::{build_pubky_client, DatabaseConfig};
 use nexus_common::types::DynError;
 use nexus_common::utils::create_shutdown_rx;
 use nexus_common::WatcherConfig;
@@ -48,17 +48,9 @@ impl NexusWatcherBuilder {
         self
     }
 
-    /// Builds the watcher's Pubky client from the `[stack.net]` settings, reading blobs up to
-    /// [`WatcherConfig::max_file_size`]. Fails when the SDK client cannot be built.
-    pub fn build_client(&self) -> Result<Arc<WatcherClient>, DynError> {
-        let pubky = build_pubky(&self.0.stack.net)?;
-        Ok(Arc::new(
-            WatcherClient::from_shared(pubky).with_max_file_size(self.0.max_file_size),
-        ))
-    }
-
-    /// Starts the NexusWatcher event loop, with a Pubky client of its own
-    /// ([`Self::build_client`]). The watcher fails to start when it cannot be built.
+    /// Starts the NexusWatcher event loop, with a Pubky client of its own, built from the
+    /// `[stack.net]` settings ([`build_pubky_client`]). The watcher fails to start when it
+    /// cannot be built.
     ///
     /// Calls [`StackManager::setup`] to initialize the shared infrastructure (logging, metrics, databases).
     /// If the stack was already initialized (e.g. by another builder), verifies the config matches.
@@ -68,18 +60,19 @@ impl NexusWatcherBuilder {
     /// - `shutdown_rx`: optional shutdown signal. If none is provided, a default one will be created, listening for Ctrl-C.
     pub async fn start(self, shutdown_rx: Option<Receiver<bool>>) -> Result<(), DynError> {
         self.setup().await?;
-        let client = self.build_client()?;
+        let client = build_pubky_client(&self.0.stack.net)?;
         self.run(shutdown_rx, client).await
     }
 
-    /// Starts the NexusWatcher event loop over `client`, which it shares for every homeserver
-    /// call and PKDNS lookup.
+    /// Starts the NexusWatcher event loop over `client`, a Pubky client shared with the rest
+    /// of the process, which it uses for every homeserver call and PKDNS lookup. The watcher
+    /// sets its blob cap on its own copy, which shares the SDK client underneath.
     ///
     /// See [`Self::start`] for the stack setup and `shutdown_rx`.
     pub async fn start_with_client(
         self,
         shutdown_rx: Option<Receiver<bool>>,
-        client: Arc<WatcherClient>,
+        client: WatcherClient,
     ) -> Result<(), DynError> {
         self.setup().await?;
         self.run(shutdown_rx, client).await
@@ -95,12 +88,14 @@ impl NexusWatcherBuilder {
         Ok(())
     }
 
+    /// Runs the event loop over `client`, reading blobs up to [`WatcherConfig::max_file_size`].
     async fn run(
         self,
         shutdown_rx: Option<Receiver<bool>>,
-        client: Arc<WatcherClient>,
+        client: WatcherClient,
     ) -> Result<(), DynError> {
         let shutdown_rx = shutdown_rx.unwrap_or_else(create_shutdown_rx);
+        let client = Arc::new(client.with_max_file_size(self.0.max_file_size));
         NexusWatcher::start(shutdown_rx, self.0, client).await
     }
 }

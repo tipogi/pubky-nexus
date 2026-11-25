@@ -8,6 +8,7 @@ use super::fetch::{format_error_body, MAX_ERROR_BODY};
 
 /// Why a [`WatcherClient`](super::WatcherClient) could not be built: the Pubky SDK could
 /// not build its HTTP or PKARR client. See
+/// [`WatcherClientBuilder::build`](super::WatcherClientBuilder::build),
 /// [`WatcherClient::mainnet`](super::WatcherClient::mainnet) and
 /// [`WatcherClient::testnet`](super::WatcherClient::testnet).
 ///

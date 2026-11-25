@@ -9,8 +9,7 @@ use pubky::pkarr::{SignedPacket, Timestamp};
 use pubky::{Keypair, PublicKey};
 use pubky_social_specs::PubkyId;
 
-use crate::db::PubkyClientResult;
-use crate::models::user::{PkdnsHomeserverResolver, PkdnsRecord, UserIngestor};
+use crate::models::user::{PkdnsHomeserverResolver, PkdnsLookupError, PkdnsRecord, UserIngestor};
 
 /// Generates a random public key.
 pub fn random_pk() -> PublicKey {
@@ -46,7 +45,7 @@ struct NoRecordResolver;
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for NoRecordResolver {
-    async fn resolve_record(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+    async fn resolve_record(&self, _user_pk: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
         Ok(PkdnsRecord::Missing)
     }
 }

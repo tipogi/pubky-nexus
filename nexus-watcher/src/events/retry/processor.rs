@@ -170,10 +170,10 @@ impl RetryProcessor {
         let (e, outcome) = retry_outcome(error, limit);
         match outcome {
             RetryOutcome::Drop => {
-                // Not worth retrying (ParseFailed, etc.) - dead-letter immediately. No flip is
-                // dead-lettered here: its step runs before the fetch and every failure of it is
-                // queued, so a `social/v1` profile PUT that is 404 or invalid is a `v1` user's
-                // own edit.
+                // Not worth retrying (a rejected request, etc.) - dead-letter immediately. No flip
+                // is dead-lettered here: its step runs before the fetch and every failure of it
+                // is queued, so a `social/v1` profile PUT that is 404 or invalid is a `v1`
+                // user's own edit.
                 warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
                 self.remove_if_current(index_key, retry_event.nonce, ev_uri)
                     .await?;

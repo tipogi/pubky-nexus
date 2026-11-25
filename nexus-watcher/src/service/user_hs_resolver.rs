@@ -748,14 +748,15 @@ impl HsResolverMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nexus_common::db::exec_single_row;
     use nexus_common::db::graph::Query;
-    use nexus_common::db::{exec_single_row, PubkyClientError, PubkyClientResult};
-    use nexus_common::models::user::{set_user_homeserver, StoredRecord};
+    use nexus_common::models::user::{set_user_homeserver, PkdnsLookupError, StoredRecord};
     use nexus_common::types::DynError;
     use nexus_common::utils::test_utils::{random_pk, random_pubky_id, signed_packet_naming};
     use nexus_common::{StackConfig, StackManager};
     use pubky::Keypair;
     use pubky_social_specs::PubkyId;
+    use pubky_watcher::ResolveError;
 
     async fn setup() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await
@@ -787,7 +788,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for MockResolver {
-        async fn resolve_record(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        async fn resolve_record(
+            &self,
+            _user_pk: &PublicKey,
+        ) -> Result<PkdnsRecord, PkdnsLookupError> {
             Ok(self.record.clone())
         }
     }
@@ -797,10 +801,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for FailingResolver {
-        async fn resolve_record(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-            Err(PubkyClientError::RequestFailed {
-                message: "dht unreachable".into(),
-            })
+        async fn resolve_record(
+            &self,
+            _user_pk: &PublicKey,
+        ) -> Result<PkdnsRecord, PkdnsLookupError> {
+            Err(ResolveError::new("dht unreachable").into())
         }
     }
 
@@ -1165,7 +1170,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for CountingResolver {
-        async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        async fn resolve_record(
+            &self,
+            user_pk: &PublicKey,
+        ) -> Result<PkdnsRecord, PkdnsLookupError> {
             let user_id = user_pk.z32();
             *self
                 .calls
@@ -1176,9 +1184,7 @@ mod tests {
             if user_id == self.target {
                 Ok(PkdnsRecord::Missing)
             } else {
-                Err(PubkyClientError::RequestFailed {
-                    message: "not the user under test".into(),
-                })
+                Err(ResolveError::new("not the user under test").into())
             }
         }
     }

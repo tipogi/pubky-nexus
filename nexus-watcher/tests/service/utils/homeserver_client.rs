@@ -2,13 +2,12 @@ use std::collections::{HashMap, VecDeque};
 
 use tokio::sync::Mutex;
 
-use nexus_common::db::{PubkyClientError, PubkyClientResult};
-use nexus_common::models::user::{PkdnsHomeserverResolver, PkdnsRecord};
+use nexus_common::models::user::{PkdnsHomeserverResolver, PkdnsLookupError, PkdnsRecord};
 use nexus_common::utils::test_utils::signed_packet_naming;
 use pubky::{Keypair, PubkyResource, PublicKey};
 use pubky_social_specs::PubkyId;
 use pubky_watcher::{
-    HomeserverEventSource, HsError, HsErrorKind, HsOp, HsStreamEvent, KeyEventSource,
+    HomeserverEventSource, HsError, HsErrorKind, HsOp, HsStreamEvent, KeyEventSource, ResolveError,
     ResourceReader,
 };
 
@@ -155,11 +154,9 @@ fn not_found(resource: &PubkyResource, op: HsOp) -> HsError {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for MockHomeserverClient {
-    async fn resolve_record(&self, _user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+    async fn resolve_record(&self, _user_pk: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
         if self.homeserver_lookup_fails {
-            return Err(PubkyClientError::RequestFailed {
-                message: "homeserver lookup failed".into(),
-            });
+            return Err(ResolveError::new("homeserver lookup failed").into());
         }
         Ok(match &self.homeserver_of {
             Some((user, homeserver)) => {

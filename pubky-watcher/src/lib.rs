@@ -32,7 +32,7 @@ mod watcher;
 pub use client::{
     published_homeserver, ClientError, EventMethod, HomeserverEventSource, HomeserverResolver,
     HsError, HsErrorKind, HsOp, HsStreamEvent, KeyEventSource, ResolveError, ResourceReader,
-    WatcherClient, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
+    WatcherClient, WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };
 pub use events::{EventBatch, HomeserverEvent, CURSOR_PREFIX};
 pub use processor::{

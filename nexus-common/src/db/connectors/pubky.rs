@@ -1,69 +1,19 @@
-use pubky::errors::{AuthError, BuildError};
-use pubky::{CredentialRefreshError, Pubky, PubkyHttpClient};
-use std::{sync::Arc, time::Duration};
-use thiserror::Error;
-
-use crate::config::NetConfig;
+use pubky_watcher::{ClientError, WatcherClient};
 use tracing::debug;
 
-pub type PubkyClientResult<T> = std::result::Result<T, PubkyClientError>;
+use crate::config::NetConfig;
 
-#[derive(Debug, Error)]
-pub enum PubkyClientError {
-    #[error("PubkyClient not initialized")]
-    NotInitialized,
-
-    #[error("404: {message}")]
-    NotFound404 { message: String },
-
-    #[error("429: {message}")]
-    TooManyRequests429 { message: String },
-
-    #[error("Server error (5xx): {message}")]
-    ServerError5xx { message: String },
-
-    /// A 4xx other than 404, 408 and 429: the server refused this request, so a retry
-    /// gets the same answer.
-    #[error("Request rejected ({status}): {message}")]
-    RequestRejected { status: u16, message: String },
-
-    #[error("Request failed: {message}")]
-    RequestFailed { message: String },
-
-    /// A PKDNS lookup failed: no DHT node or relay gave a usable answer.
-    #[error("Pkarr failed: {0}")]
-    PkarrFailed(#[from] pubky_watcher::ResolveError),
-
-    #[error("Authentication failed: {0}")]
-    AuthenticationFailed(#[from] AuthError),
-
-    /// The SDK failed to refresh a grant credential. Only a signed-in client has one,
-    /// and Nexus signs in only in tests, so a retry would not help.
-    #[error("Credential refresh failed: {0}")]
-    CredentialRefreshFailed(#[from] CredentialRefreshError),
-
-    #[error("Build failed: {0}")]
-    BuildFailed(#[from] BuildError),
-
-    #[error("Parse failed: {0}")]
-    ParseFailed(#[from] url::ParseError),
-}
-
-/// Builds the Pubky SDK client the `[stack.net]` settings describe: for the testnet relay on
+/// Builds the Pubky client the `[stack.net]` settings describe: for the testnet relay on
 /// [`NetConfig::testnet_host`] when [`NetConfig::testnet`] is set, otherwise for mainnet, with
 /// every HTTP request, its response body included, bounded by
 /// [`NetConfig::pubky_http_request_timeout_secs`].
-pub fn build_pubky(net: &NetConfig) -> PubkyClientResult<Arc<Pubky>> {
-    build_pubky_with(
-        net.pubky_client_testnet_host(),
-        net.pubky_client_http_request_timeout(),
-    )
-}
+///
+/// `pubky-watcher` builds the client and makes every call on it; no Nexus crate drives the
+/// Pubky SDK client itself. Cloning the client shares the SDK client underneath.
+pub fn build_pubky_client(net: &NetConfig) -> Result<WatcherClient, ClientError> {
+    let testnet_host = net.pubky_client_testnet_host();
+    let http_request_timeout = net.pubky_client_http_request_timeout();
 
-fn build_pubky_with(
-    testnet_host: Option<&str>,
-    http_request_timeout: Duration,
-) -> PubkyClientResult<Arc<Pubky>> {
     let mode = testnet_host
         .map(|host| format!("testnet with host '{host}'"))
         .unwrap_or_else(|| "mainnet".to_string());
@@ -72,27 +22,9 @@ fn build_pubky_with(
         "Building the Pubky client in {mode} mode"
     );
 
-    // TODO: set pkarr's `minimum_ttl` / `maximum_ttl` and its DHT and relay request
-    // timeouts explicitly, as config values; `request_timeout` bounds only the HTTP
-    // client, not pkarr.
-    let mut client_builder = PubkyHttpClient::builder();
-    client_builder.request_timeout(http_request_timeout);
-
+    let mut builder = WatcherClient::builder().request_timeout(http_request_timeout);
     if let Some(host) = testnet_host {
-        client_builder
-            .testnet_with_host(host)
-            // Force pkarr/mainline DHT to bind an ephemeral local port instead of default behavior
-            // We do this to prevent the client DHT from competing with `StaticTestnet` for port 6881
-            .pkarr(|p| {
-                p.dht(|c| {
-                    c.port = Some(0);
-                    c
-                })
-            });
+        builder = builder.testnet(host);
     }
-
-    let client = client_builder
-        .build()
-        .map_err(PubkyClientError::BuildFailed)?;
-    Ok(Arc::new(Pubky::with_client(client)))
+    builder.build()
 }

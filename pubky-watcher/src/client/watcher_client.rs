@@ -19,9 +19,9 @@ use super::{
 /// the homeserver's own limit.
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * (1 << 20);
 
-/// How long a request of a client built by [`WatcherClient::mainnet`] or
-/// [`WatcherClient::testnet`] may take, reading the response body included, so that it can
-/// download a blob of [`DEFAULT_MAX_FILE_SIZE`].
+/// How long a request of a client that sets no timeout
+/// ([`WatcherClientBuilder::request_timeout`]) may take, reading the response body included,
+/// so that it can download a blob of [`DEFAULT_MAX_FILE_SIZE`].
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Waits between the retries of a rate-limited `/events-stream` request.
@@ -135,6 +135,89 @@ pub struct WatcherClient {
     max_file_size: u64,
 }
 
+/// Builds a [`WatcherClient`] from plain values, so that an application passes its own
+/// settings without building the SDK client itself. Start it with
+/// [`WatcherClient::builder`].
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use pubky_watcher::WatcherClient;
+///
+/// let client = WatcherClient::builder()
+///     .testnet("localhost")
+///     .request_timeout(Duration::from_secs(30))
+///     .max_file_size(10 * (1 << 20))
+///     .build()?;
+/// # Ok::<_, pubky_watcher::ClientError>(())
+/// ```
+#[derive(Debug, Clone)]
+#[must_use = "a builder does nothing until `build` is called"]
+pub struct WatcherClientBuilder {
+    testnet_host: Option<String>,
+    request_timeout: Duration,
+    max_file_size: u64,
+}
+
+/// A client for the public Pubky network, with [`DEFAULT_REQUEST_TIMEOUT`] and
+/// [`DEFAULT_MAX_FILE_SIZE`].
+impl Default for WatcherClientBuilder {
+    fn default() -> Self {
+        Self {
+            testnet_host: None,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
+        }
+    }
+}
+
+impl WatcherClientBuilder {
+    /// Builds for the Pubky testnet whose relay and homeservers run on `host` (e.g.
+    /// `"localhost"`), instead of the public network. [`WatcherClient::testnet`] is this
+    /// with every other setting left at its default.
+    pub fn testnet(mut self, host: impl Into<String>) -> Self {
+        self.testnet_host = Some(host.into());
+        self
+    }
+
+    /// How long a request may take, reading the response body included
+    /// ([`DEFAULT_REQUEST_TIMEOUT`] by default). A call that runs out of it fails with
+    /// [`HsErrorKind::Timeout`].
+    pub fn request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
+    }
+
+    /// Reads blobs of at most `max_file_size` bytes ([`DEFAULT_MAX_FILE_SIZE`] by default),
+    /// as [`WatcherClient::with_max_file_size`] does on a built client.
+    pub fn max_file_size(mut self, max_file_size: u64) -> Self {
+        self.max_file_size = max_file_size;
+        self
+    }
+
+    /// Builds the SDK client and the [`WatcherClient`] over it.
+    /// Fails with a [`ClientError`] when the SDK cannot build its HTTP or PKARR client.
+    pub fn build(self) -> Result<WatcherClient, ClientError> {
+        // TODO: set pkarr's `minimum_ttl` / `maximum_ttl` and its DHT and relay request
+        // timeouts explicitly; `request_timeout` bounds only the HTTP client, not pkarr.
+        let mut builder = PubkyHttpClient::builder();
+        builder.request_timeout(self.request_timeout);
+        if let Some(host) = &self.testnet_host {
+            builder
+                .testnet_with_host(host)
+                // An ephemeral DHT port, so the client does not compete with a local testnet
+                // for its port
+                .pkarr(|p| {
+                    p.dht(|c| {
+                        c.port = Some(0);
+                        c
+                    })
+                });
+        }
+        let pubky = Pubky::with_client(builder.build().map_err(ClientError::build)?);
+        Ok(WatcherClient::from_pubky(pubky).with_max_file_size(self.max_file_size))
+    }
+}
+
 /// Names the blob cap; the SDK client underneath is not printed.
 impl std::fmt::Debug for WatcherClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -145,20 +228,27 @@ impl std::fmt::Debug for WatcherClient {
 }
 
 impl WatcherClient {
-    /// A client for the public Pubky network.
+    /// A [`WatcherClientBuilder`], to choose the network, the request timeout and the blob
+    /// cap. It builds a client for the public Pubky network unless told otherwise.
+    pub fn builder() -> WatcherClientBuilder {
+        WatcherClientBuilder::default()
+    }
+
+    /// A client for the public Pubky network, with the builder's defaults
+    /// ([`Self::builder`]).
     /// Fails with a [`ClientError`].
     pub fn mainnet() -> Result<Self, ClientError> {
-        Self::build(None)
+        Self::builder().build()
     }
 
     /// A client for the Pubky testnet whose relay and homeservers run on `host` (e.g.
-    /// `"localhost"`).
+    /// `"localhost"`), with the builder's defaults ([`Self::builder`]).
     /// Fails with a [`ClientError`].
     pub fn testnet(host: &str) -> Result<Self, ClientError> {
-        Self::build(Some(host))
+        Self::builder().testnet(host).build()
     }
 
-    /// A client over an SDK client you built, e.g. with your own timeouts.
+    /// A client over an SDK client you built, for a setting [`Self::builder`] does not offer.
     /// The same as [`Self::from_shared`] over a new [`Arc`].
     pub fn from_pubky(pubky: Pubky) -> Self {
         Self::from_shared(Arc::new(pubky))
@@ -181,31 +271,9 @@ impl WatcherClient {
 
     /// The SDK client underneath, for the calls this client does not cover.
     /// It is the one given to [`Self::from_pubky`] or [`Self::from_shared`], or the one
-    /// [`Self::mainnet`] or [`Self::testnet`] built.
+    /// [`WatcherClientBuilder::build`] built.
     pub fn sdk(&self) -> &Arc<Pubky> {
         &self.pubky
-    }
-
-    /// Builds an SDK client whose requests, response bodies included, time out after
-    /// [`DEFAULT_REQUEST_TIMEOUT`], for mainnet or for the testnet on `testnet_host`.
-    fn build(testnet_host: Option<&str>) -> Result<Self, ClientError> {
-        let mut builder = PubkyHttpClient::builder();
-        builder.request_timeout(DEFAULT_REQUEST_TIMEOUT);
-        if let Some(host) = testnet_host {
-            builder
-                .testnet_with_host(host)
-                // An ephemeral DHT port, so the client does not compete with a local testnet
-                // for its port
-                .pkarr(|p| {
-                    p.dht(|c| {
-                        c.port = Some(0);
-                        c
-                    })
-                });
-        }
-        Ok(Self::from_pubky(Pubky::with_client(
-            builder.build().map_err(ClientError::build)?,
-        )))
     }
 
     /// GETs `resource`, returning the response for the caller to read under its cap.
@@ -505,6 +573,61 @@ mod tests {
             .body(body.into())
             .expect("valid response");
         reqwest::Response::from(response)
+    }
+
+    // --- WatcherClientBuilder ---
+
+    #[tokio::test]
+    async fn builder_carries_the_blob_cap_to_the_client() {
+        let client = WatcherClient::builder()
+            .testnet("localhost")
+            .max_file_size(7)
+            .build()
+            .expect("a testnet client builds");
+
+        assert_eq!(client.max_file_size, 7);
+    }
+
+    #[tokio::test]
+    async fn shortcut_client_keeps_the_default_blob_cap() {
+        let client = WatcherClient::testnet("localhost").expect("a testnet client builds");
+
+        assert_eq!(client.max_file_size, DEFAULT_MAX_FILE_SIZE);
+    }
+
+    /// A server that accepts the connection and never answers: the request ends at the
+    /// builder's timeout, far below [`DEFAULT_REQUEST_TIMEOUT`].
+    #[tokio::test]
+    async fn builder_request_timeout_bounds_a_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free local port");
+        let url = format!("http://{}/", listener.local_addr().expect("bound"));
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = WatcherClient::builder()
+            .testnet("localhost")
+            .request_timeout(Duration::from_millis(200))
+            .build()
+            .expect("a testnet client builds");
+
+        let request = client
+            .sdk()
+            .client()
+            .request(reqwest::Method::GET, &url)
+            .send();
+        let error = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .expect("the request ends at the builder's timeout")
+            .expect_err("the server never answers");
+        server.abort();
+
+        let kind = HsErrorKind::from_reqwest(&error);
+        assert!(matches!(kind, HsErrorKind::Timeout), "{kind:?}");
     }
 
     // --- events_url ---

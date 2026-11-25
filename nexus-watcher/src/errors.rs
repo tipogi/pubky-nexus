@@ -1,14 +1,38 @@
 use std::fmt::Display;
-use std::sync::Arc;
 
 use nexus_common::db::kv::RedisError;
-use nexus_common::db::{GraphError, PubkyClientError};
+use nexus_common::db::GraphError;
 use nexus_common::models::error::ModelError;
 use thiserror::Error;
 
 use crate::events::retry::RetryScheduler;
 use pubky_watcher::RetryableError;
 use pubky_watcher::{HsError, HsErrorKind, HsOp};
+
+/// A homeserver request that failed, by the class its answer falls in. A failure of the
+/// `/events-stream` request that stops the whole run has a variant of its own in
+/// [`EventProcessorError`]; these stay with one event or one user.
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum HsRequestError {
+    #[error("404: {message}")]
+    NotFound404 { message: String },
+
+    #[error("429: {message}")]
+    TooManyRequests429 { message: String },
+
+    #[error("Server error (5xx): {message}")]
+    ServerError5xx { message: String },
+
+    /// A 4xx other than 404, 408 and 429: the server refused this request, so a retry
+    /// gets the same answer.
+    #[error("Request rejected ({status}): {message}")]
+    RequestRejected { status: u16, message: String },
+
+    /// The request got no usable answer (a timeout, a transport failure, a 408, a redirect), or
+    /// the SDK refused to make it.
+    #[error("Request failed: {message}")]
+    RequestFailed { message: String },
+}
 
 #[derive(Error, Debug, Clone)]
 pub enum EventProcessorError {
@@ -97,9 +121,10 @@ pub enum EventProcessorError {
     #[error("FetchSizeExceeded: {0} bytes (limit: {1} bytes)")]
     FetchSizeExceeded(u64, u64),
 
-    /// The Pubky client could not resolve the pubky
+    /// A homeserver request failed, off the paths that stop a run. The text keeps the name
+    /// this error had while it was the Pubky connector's, as the logs know it.
     #[error("PubkyClientError: {0}")]
-    PubkyClientError(Arc<PubkyClientError>),
+    HsRequest(#[from] HsRequestError),
 
     /// A homeserver's /events-stream keeps returning 429 Too Many Requests
     /// even after all internal backoff retries were exhausted.
@@ -161,12 +186,6 @@ impl From<ModelError> for EventProcessorError {
     }
 }
 
-impl From<PubkyClientError> for EventProcessorError {
-    fn from(e: PubkyClientError) -> Self {
-        EventProcessorError::PubkyClientError(Arc::new(e))
-    }
-}
-
 /// Maps a homeserver call's failure onto the variants the processors classify.
 ///
 /// The `/events-stream` request is the homeserver itself, so a 5xx, a transport
@@ -183,17 +202,17 @@ impl From<HsError> for EventProcessorError {
             HsErrorKind::Transport(_) | HsErrorKind::Timeout if on_stream => {
                 Self::HsEventsStreamTransportFailed(message)
             }
-            HsErrorKind::NotFound(_) => PubkyClientError::NotFound404 { message }.into(),
-            HsErrorKind::RateLimited(_) => PubkyClientError::TooManyRequests429 { message }.into(),
-            HsErrorKind::ServerError(..) => PubkyClientError::ServerError5xx { message }.into(),
+            HsErrorKind::NotFound(_) => HsRequestError::NotFound404 { message }.into(),
+            HsErrorKind::RateLimited(_) => HsRequestError::TooManyRequests429 { message }.into(),
+            HsErrorKind::ServerError(..) => HsRequestError::ServerError5xx { message }.into(),
             // 408 is a timeout, retried like one.
             HsErrorKind::Rejected(status, _) if (400..500).contains(&status) && status != 408 => {
-                PubkyClientError::RequestRejected { status, message }.into()
+                HsRequestError::RequestRejected { status, message }.into()
             }
             HsErrorKind::Rejected(..)
             | HsErrorKind::Transport(_)
             | HsErrorKind::Timeout
-            | HsErrorKind::Sdk(_) => PubkyClientError::RequestFailed { message }.into(),
+            | HsErrorKind::Sdk(_) => HsRequestError::RequestFailed { message }.into(),
             HsErrorKind::Malformed(_) => Self::Homeserver(error),
         }
     }
@@ -228,7 +247,7 @@ impl EventProcessorError {
     }
 
     pub fn client_error_404(message: String) -> Self {
-        PubkyClientError::NotFound404 { message }.into()
+        HsRequestError::NotFound404 { message }.into()
     }
 
     pub fn static_save_failed(source: impl Display) -> Self {
@@ -280,12 +299,9 @@ impl EventProcessorError {
         )
     }
 
-    /// Returns whether this error is a 404 from the Pubky client.
+    /// Returns whether this error is a homeserver's 404.
     pub fn is_not_found(&self) -> bool {
-        matches!(
-            self,
-            Self::PubkyClientError(e) if matches!(e.as_ref(), PubkyClientError::NotFound404 { .. })
-        )
+        matches!(self, Self::HsRequest(HsRequestError::NotFound404 { .. }))
     }
 
     pub fn is_missing_dependency(&self) -> bool {
@@ -320,7 +336,6 @@ impl RetryableError for EventProcessorError {
 mod tests {
     use super::*;
     use crate::events::retry::RetryScheduler;
-    use pubky::CredentialRefreshError;
 
     #[test]
     fn event_stream_5xx_is_not_retry_now() {
@@ -333,27 +348,13 @@ mod tests {
 
     #[test]
     fn client_5xx_stays_per_event() {
-        let err = EventProcessorError::from(PubkyClientError::ServerError5xx {
+        let err = EventProcessorError::from(HsRequestError::ServerError5xx {
             message: "File request failed with status 500".to_string(),
         });
         assert!(
             !err.should_not_retry_now(),
             "a 5xx outside the event stream is per-event and must not abort the run"
         );
-    }
-
-    /// A failed grant credential refresh comes only from a signed-in client, which Nexus
-    /// is not in production: never retried, and the run goes on.
-    #[test]
-    fn credential_refresh_failure_is_not_retried() {
-        let err = EventProcessorError::from(PubkyClientError::CredentialRefreshFailed(
-            CredentialRefreshError::Request { status: None },
-        ));
-        assert!(
-            !RetryScheduler::should_enqueue_related_event(&err),
-            "{err:?}"
-        );
-        assert!(!err.should_not_retry_now(), "{err:?}");
     }
 
     fn hs_error(op: HsOp, kind: HsErrorKind) -> EventProcessorError {
@@ -445,12 +446,18 @@ mod tests {
 
         let server_error = hs_error(HsOp::GetResource, HsErrorKind::ServerError(500, "".into()));
         assert!(
-            matches!(&server_error, EventProcessorError::PubkyClientError(e) if matches!(e.as_ref(), PubkyClientError::ServerError5xx { .. })),
+            matches!(
+                &server_error,
+                EventProcessorError::HsRequest(HsRequestError::ServerError5xx { .. })
+            ),
             "{server_error:?}"
         );
         let rate_limited = hs_error(HsOp::PollEvents, HsErrorKind::RateLimited("".into()));
         assert!(
-            matches!(&rate_limited, EventProcessorError::PubkyClientError(e) if matches!(e.as_ref(), PubkyClientError::TooManyRequests429 { .. })),
+            matches!(
+                &rate_limited,
+                EventProcessorError::HsRequest(HsRequestError::TooManyRequests429 { .. })
+            ),
             "{rate_limited:?}"
         );
         assert!(hs_error(HsOp::UserEvents, HsErrorKind::NotFound("".into())).is_not_found());
@@ -478,7 +485,10 @@ mod tests {
         ] {
             let err = hs_error(op, kind);
             assert!(
-                matches!(&err, EventProcessorError::PubkyClientError(e) if matches!(e.as_ref(), PubkyClientError::RequestFailed { .. })),
+                matches!(
+                    &err,
+                    EventProcessorError::HsRequest(HsRequestError::RequestFailed { .. })
+                ),
                 "{err:?}"
             );
             assert!(
@@ -497,7 +507,11 @@ mod tests {
             for status in [400, 401, 403, 410] {
                 let err = hs_error(op, HsErrorKind::Rejected(status, "".into()));
                 assert!(
-                    matches!(&err, EventProcessorError::PubkyClientError(e) if matches!(e.as_ref(), PubkyClientError::RequestRejected { status: s, .. } if *s == status)),
+                    matches!(
+                        &err,
+                        EventProcessorError::HsRequest(HsRequestError::RequestRejected { status: s, .. })
+                            if *s == status
+                    ),
                     "{err:?}"
                 );
                 assert!(
@@ -534,10 +548,10 @@ mod tests {
         assert!(message.contains("HTTP 502: bad gateway"), "{message}");
     }
 
-    /// A fetch error the retry queue takes (a 5xx, a 429, a 408, a timeout, a PKARR
-    /// failure or a client not yet initialised) is retried with the transient class and never
-    /// stops the batch; a 404 is dropped. After the flip step a fetch error on a `social/v1`
-    /// profile PUT is a `v1` user's, so none of these lifts the retry limit.
+    /// A fetch error the retry queue takes (a 5xx, a 429, a 408, a timeout or an SDK failure)
+    /// is retried with the transient class and never stops the batch; a 404 is dropped. After
+    /// the flip step a fetch error on a `social/v1` profile PUT is a `v1` user's, so none of
+    /// these lifts the retry limit.
     #[test]
     fn retried_fetch_errors_take_the_transient_class_and_keep_the_limit() {
         for err in [
@@ -549,10 +563,6 @@ mod tests {
                 HsOp::GetResource,
                 HsErrorKind::Sdk("could not resolve".into()),
             ),
-            EventProcessorError::from(PubkyClientError::NotInitialized),
-            EventProcessorError::from(PubkyClientError::PkarrFailed(
-                pubky_watcher::ResolveError::new("no queried DHT nodes responded"),
-            )),
         ] {
             assert!(
                 RetryScheduler::should_enqueue_related_event(&err),
@@ -594,7 +604,7 @@ mod tests {
 
     #[test]
     fn hs_not_found_404_stays_retryable_per_user() {
-        let err = EventProcessorError::from(PubkyClientError::NotFound404 {
+        let err = EventProcessorError::from(HsRequestError::NotFound404 {
             message: "Not found".to_string(),
         });
         assert!(

@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use nexus_common::db::{exec_single_row, queries, PubkyClientError};
+use nexus_common::db::{exec_single_row, queries};
 use nexus_common::models::event::EventLine;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::user::{Epoch, UserDetails};
 use nexus_common::utils::test_utils::{default_ingestor_tests, random_pk, random_pubky_id};
 use nexus_common::WatcherConfig;
-use nexus_watcher::errors::EventProcessorError;
+use nexus_watcher::errors::{EventProcessorError, HsRequestError};
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};
 use nexus_watcher::events::{DefaultEventHandler, Event, EventHandler, ParseResult};
 use nexus_watcher::service::{HsEventProcessor, RunError, TEventProcessor};
@@ -1196,8 +1196,9 @@ async fn test_failed_poll_keeps_the_cursor() -> Result<()> {
     assert!(
         matches!(
             &err,
-            RunError::Internal(EventProcessorError::PubkyClientError(e))
-                if matches!(e.as_ref(), PubkyClientError::ServerError5xx { .. })
+            RunError::Internal(EventProcessorError::HsRequest(
+                HsRequestError::ServerError5xx { .. }
+            ))
         ),
         "{err:?}"
     );

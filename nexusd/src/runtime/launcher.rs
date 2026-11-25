@@ -1,6 +1,6 @@
 use std::{fmt::Debug, path::PathBuf};
 
-use nexus_common::{types::DynError, utils::create_shutdown_rx};
+use nexus_common::{db::build_pubky_client, types::DynError, utils::create_shutdown_rx};
 use nexus_watcher::NexusWatcherBuilder;
 use nexus_webapi::{api_context::ApiContextBuilder, NexusApiBuilder};
 use serde::{Deserialize, Serialize};
@@ -36,10 +36,10 @@ impl DaemonLauncher {
         let config = DaemonConfig::read_or_create_config_file(config_dir.clone()).await?;
         let jobs = JobRegistry::catalog(&config.trust_rank).scheduled_jobs(&config)?;
 
-        // One Pubky client for the process, shared by the API and the watcher. The watcher
-        // cannot run without it, so the daemon does not start when it cannot be built.
+        // One Pubky client for the process, shared by the API and the watcher. Neither runs
+        // without it, so the daemon does not start when it cannot be built.
+        let pubky_client = build_pubky_client(&config.stack.net)?;
         let nexus_watcher_builder = NexusWatcherBuilder(config.watcher_config());
-        let pubky_client = nexus_watcher_builder.build_client()?;
 
         let api_context = ApiContextBuilder::new(config.api_config(), config_dir)
             .pubky_client(pubky_client.clone())

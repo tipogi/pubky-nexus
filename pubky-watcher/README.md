@@ -64,10 +64,20 @@ homeserver broke, with the cursors and users involved), `Handler(E)`, or `Panick
 
 ## The client
 
-`WatcherClient` makes every homeserver call. Build it with `WatcherClient::mainnet()`,
-`WatcherClient::testnet(host)`, or over an SDK client you already have with `from_pubky` or
-`from_shared`. `sdk()` returns that SDK client for calls the watcher does not cover.
-`mainnet()` and `testnet()` fail with a `ClientError`, whose `source()` is the SDK's error.
+`WatcherClient` makes every homeserver call. Build it with `WatcherClient::mainnet()` or
+`WatcherClient::testnet(host)`, or set the request timeout and the blob cap yourself:
+
+```rust
+let client = WatcherClient::builder()
+    .testnet("localhost") // leave out for the public network
+    .request_timeout(Duration::from_secs(30))
+    .max_file_size(10 * (1 << 20))
+    .build()?;
+```
+
+All three fail with a `ClientError`, whose `source()` is the SDK's error. A client can also
+wrap an SDK client you already have, with `from_pubky` or `from_shared`. `sdk()` returns the
+SDK client for calls the watcher does not cover.
 
 Its capabilities are split into narrow traits, so that your tests fake only the one they
 exercise:

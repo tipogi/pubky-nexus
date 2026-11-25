@@ -12,10 +12,9 @@ pub use classify::SkipReason;
 pub use event::{Event, EventType, ParseResult};
 pub use target::EventTarget;
 
-use crate::errors::EventProcessorError;
+use crate::errors::{EventProcessorError, HsRequestError};
 use crate::nexus_client::NexusHomeserverClient;
 use crate::METER_NAME;
-use nexus_common::db::PubkyClientError;
 use nexus_common::models::takedown::is_taken_down;
 use nexus_common::WatcherConfig;
 use opentelemetry::{global, metrics::Counter};
@@ -38,7 +37,7 @@ pub(crate) fn parse_resource(uri: &str) -> Result<PubkyResource, EventProcessorE
             pubky::Error::Request(pubky::errors::RequestError::Validation { message }) => message,
             other => other.to_string(),
         };
-        PubkyClientError::RequestFailed { message }.into()
+        HsRequestError::RequestFailed { message }.into()
     })
 }
 
@@ -326,9 +325,8 @@ pub async fn handle_del_event(
 #[cfg(test)]
 mod tests {
     use super::parse_resource;
-    use crate::errors::EventProcessorError;
+    use crate::errors::{EventProcessorError, HsRequestError};
     use crate::events::retry::RetryScheduler;
-    use nexus_common::db::PubkyClientError;
 
     /// A resource URI the SDK cannot parse fails as a request that is retried, carrying the
     /// SDK's reason, as it did when Nexus converted every SDK error itself.
@@ -339,9 +337,8 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                EventProcessorError::PubkyClientError(e)
-                    if matches!(e.as_ref(), PubkyClientError::RequestFailed { message }
-                        if message == "missing `<user>/<path>`")
+                EventProcessorError::HsRequest(HsRequestError::RequestFailed { message })
+                    if message == "missing `<user>/<path>`"
             ),
             "{error:?}"
         );

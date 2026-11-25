@@ -4,18 +4,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use nexus_common::db::{
-    exec_single_row, graph::Query, PubkyClientError, PubkyClientResult, RedisOps,
-};
+use nexus_common::db::{exec_single_row, graph::Query, RedisOps};
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::user::{
     set_user_homeserver, set_user_homeserver_stale, user_hs_cursor_key, Epoch,
-    PkdnsHomeserverResolver, PkdnsRecord, UserDetails, UserHsCursor,
+    PkdnsHomeserverResolver, PkdnsLookupError, PkdnsRecord, UserDetails, UserHsCursor,
 };
 use nexus_common::types::DynError;
 use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_common::WatcherConfig;
-use nexus_watcher::errors::EventProcessorError;
+use nexus_watcher::errors::{EventProcessorError, HsRequestError};
 use nexus_watcher::events::retry::{InitialBackoff, RetryScheduler};
 use nexus_watcher::events::Event;
 use nexus_watcher::events::EventHandler;
@@ -1069,7 +1067,7 @@ struct MappingChangesDuringFetch {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for MappingChangesDuringFetch {
-    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+    async fn resolve_record(&self, user_pk: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
         self.inner.resolve_record(user_pk).await
     }
 }
@@ -1263,7 +1261,7 @@ fn event_stream_5xx() -> HsErrorKind {
 
 /// A 5xx on a request other than the event stream, e.g. a file fetch
 fn server_error_5xx() -> EventProcessorError {
-    PubkyClientError::ServerError5xx {
+    HsRequestError::ServerError5xx {
         message: "File request failed with status 500".into(),
     }
     .into()
@@ -1271,7 +1269,7 @@ fn server_error_5xx() -> EventProcessorError {
 
 /// Non-transport error type, that happens to have a transport-error-like error message
 fn retryable_client_error() -> EventProcessorError {
-    PubkyClientError::RequestFailed {
+    HsRequestError::RequestFailed {
         message: "connection refused".into(),
     }
     .into()
