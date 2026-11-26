@@ -16,7 +16,8 @@
 //! - **The two Consumers.** [`Watcher::feed`] builds a [`FeedConsumer`], which reads a
 //!   Homeserver's Events feed, and [`Watcher::stream`] a [`StreamConsumer`], which reads the
 //!   Event streams of chosen User pubkeys. Each is given an [`EventHandler`]; each call makes
-//!   one Run and returns a Checkpoint, the Cursor an Indexer may store.
+//!   one Run and returns its Checkpoint, or one per User pubkey: the Cursor an Indexer may
+//!   store.
 //! - **[`Run`].** One pass over one Homeserver, for an Indexer that writes its own: its own
 //!   Cursor store, its own Event type ([`FromEventLine`]), a Budget.
 //! - **[`Cycle`].** One round over the Homeservers an Indexer follows, one Turn each, reported

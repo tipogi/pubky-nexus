@@ -46,9 +46,25 @@ let outcome = consumer.run(EventCursor::new(stored_cursor)).await?;
 ```
 
 `Watcher::feed` builds a Feed consumer, which reads a Homeserver's Events feed (`/events/`):
-the Events of every user it hosts, under one Cursor. `Watcher::stream(client, hs_pubkey, users)`
+the Events of every user it hosts, under one Cursor. `Watcher::stream(client, hs_pubkey)`
 builds a Stream consumer instead: it reads the Event streams (`/events-stream`) of chosen User
-pubkeys, with one Cursor per User pubkey and an optional path prefix (`/pub/` by default).
+pubkeys, with one Cursor per User pubkey and an optional path prefix (`/pub/` by default). It
+is built once, and each Run is given its users, as pairs of User pubkey and Cursor:
+
+```rust,ignore
+let consumer = Watcher::stream(WatcherClient::mainnet()?, hs_pubkey)
+    .handler(Print) // an `EventHandler<StreamEvent, PrintError>` here
+    .build(shutdown_rx)?;
+
+// `users` is a `Vec<(PublicKey, EventCursor)>`, from your Cursor store.
+let outcome = consumer.run(users).await?;
+// Store `outcome.checkpoints`: one pair per user given, in the order given. They are the
+// next Run's users as they are.
+let outcome = consumer.run(outcome.checkpoints).await?;
+```
+
+A user listed twice fails the Run before any Read, with `WatcherError::DuplicateUser`. A Run
+with no users is a normal one: it returns `Ok`, with nothing read and nothing handled.
 
 Each call of a Consumer makes one Run. What a Run guarantees:
 
@@ -64,12 +80,13 @@ Each call of a Consumer makes one Run. What a Run guarantees:
   those of the User pubkey asked for, with Cursors that only move forward. A Batch that breaks
   this is a Protocol violation: it fails the Run before any of its Events reaches your
   Handler.
-- **Misconfiguration fails at build time:** an events limit of zero, an empty list of User
-  pubkeys or one listed twice, or a path that does not start with `/`.
+- **Misconfiguration fails at build time:** an events limit of zero, or a path that does not
+  start with `/`.
 
 `build` fails with a `ConfigError`. A Run fails with a `WatcherError<E>`, where `E` is your
 Handler's error: `Homeserver` (an `HsError`), `Protocol` (a `ProtocolViolation`: which rule the
-Homeserver broke, with the Cursors and User pubkeys involved), `Handler(E)`, or `Panicked`.
+Homeserver broke, with the Cursors and User pubkeys involved), `Handler(E)`, `DuplicateUser`
+(a Stream consumer's Run was given a User pubkey twice), or `Panicked`.
 
 ## The Client
 
@@ -155,6 +172,12 @@ as it was first extracted:
   error type, and the Consumers are `FeedConsumer<E>` and `StreamConsumer<E>`.
 - `build()` fails with the new `ConfigError`, and a Homeserver that breaks the rules of its
   Events feed or Event stream fails a Run with the new `ProtocolViolation`.
+- A Stream consumer is given its users on each Run, not when it is built.
+  `Watcher::stream(client, hs_pubkey)` takes no users, and `StreamConsumer::run(users)` takes
+  them as pairs of User pubkey and Cursor, the shape and order of the `checkpoints` it
+  returns. A user listed twice fails the Run with the new `WatcherError::DuplicateUser`, and a
+  Run with no users returns `Ok`. `ConfigError::NoUsers` and `ConfigError::DuplicateUser` are
+  removed.
 - `BuildError` is removed: `Cycle` has an associated `type Error`, returned by `build_run`,
   `homeservers` and `run`.
 - `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public.

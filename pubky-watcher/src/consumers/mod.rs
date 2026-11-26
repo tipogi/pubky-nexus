@@ -3,8 +3,9 @@
 //!
 //! [`Watcher::feed`] builds a Feed consumer, which reads a Homeserver's Events feed: every
 //! user it hosts, under one Cursor. [`Watcher::stream`] builds a Stream consumer, which reads
-//! the Event streams of chosen User pubkeys on one Homeserver, with one Cursor each. Each
-//! call makes one Run and returns a Checkpoint; where it is stored is the Indexer's choice.
+//! the Event streams of chosen User pubkeys on one Homeserver, with one Cursor each. Each is
+//! given a Handler, and each call makes one Run and returns its Checkpoint, or one per User
+//! pubkey; where it is stored is the Indexer's choice.
 
 #![allow(
     clippy::result_large_err,
@@ -43,15 +44,6 @@ pub enum ConfigError {
     /// [`StreamConsumerBuilder::events_limit`]) is zero, so a Run could never read an Event.
     #[error("the events limit must be greater than zero")]
     ZeroEventsLimit,
-    /// [`Watcher::stream`] was given no User pubkeys to read.
-    #[error("a key stream needs at least one user")]
-    NoUsers,
-    /// [`Watcher::stream`] was given `user_pubkey` more than once, each with its own Cursor.
-    #[error("a key stream cannot list a user twice")]
-    DuplicateUser {
-        /// The User pubkey listed twice.
-        user_pubkey: PublicKey,
-    },
     /// The Event stream's path ([`StreamConsumerBuilder::path`]) does not start with `/`.
     #[error("the event-stream path must start with '/'")]
     InvalidPath {
@@ -169,6 +161,14 @@ pub enum WatcherError<Err> {
     /// reach the Handler's error and its causes.
     #[error("{0}")]
     Handler(Err),
+    /// A Run of a [`StreamConsumer`] was given `user_pubkey` more than once, each with its
+    /// own Cursor. [`StreamConsumer::run`] checks its users before any Read, so nothing was
+    /// read and nothing was handled.
+    #[error("the run lists the user {} twice", .user_pubkey.z32())]
+    DuplicateUser {
+        /// The User pubkey listed twice.
+        user_pubkey: PublicKey,
+    },
     /// The Run's task panicked; the panic is logged, not returned. An Indexer's own
     /// [`Run`](crate::Run) reports the same with
     /// [`RunError::Panicked`](crate::RunError::Panicked).
@@ -240,18 +240,23 @@ impl Watcher {
         FeedConsumerBuilder::new(client, hs_pubkey)
     }
 
-    /// A Stream consumer of the Homeserver `hs_pubkey`: it reads the Event stream of each
-    /// User pubkey in `users`, from the Cursor given with it. The Handler gets each
-    /// [`StreamEvent`](crate::StreamEvent).
-    pub fn stream<C>(
-        client: C,
-        hs_pubkey: PublicKey,
-        users: Vec<(PublicKey, EventCursor)>,
-    ) -> StreamConsumerBuilder<Missing>
+    /// A Stream consumer of the Homeserver `hs_pubkey`: it reads the Event streams of chosen
+    /// User pubkeys on it. The users are not given here: each [`StreamConsumer::run`] takes
+    /// them, each with the Cursor to read it from, and returns one Checkpoint per User pubkey.
+    /// The Handler gets each [`StreamEvent`](crate::StreamEvent).
+    ///
+    /// ```ignore
+    /// let consumer = Watcher::stream(WatcherClient::mainnet()?, hs_pubkey)
+    ///     .handler(MyHandler)
+    ///     .build(shutdown_rx)?;
+    /// let outcome = consumer.run(users).await?;
+    /// // store outcome.checkpoints: they are the next Run's users as they are
+    /// ```
+    pub fn stream<C>(client: C, hs_pubkey: PublicKey) -> StreamConsumerBuilder<Missing>
     where
         C: StreamReader,
     {
-        StreamConsumerBuilder::new(client, hs_pubkey, users)
+        StreamConsumerBuilder::new(client, hs_pubkey)
     }
 }
 
