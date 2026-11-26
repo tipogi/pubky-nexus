@@ -59,7 +59,8 @@ let consumer = Watcher::stream(WatcherClient::mainnet()?, hs_pubkey)
 // `users` is a `Vec<(PublicKey, EventCursor)>`, from your Cursor store.
 let outcome = consumer.run(users).await?;
 // Store `outcome.checkpoints`: one pair per user given, in the order given. They are the
-// next Run's users as they are.
+// next Run's users as they are. `outcome.failures` lists the users whose Batch ended early,
+// and `outcome.stopped` says why the Run stopped before reading every user, if it did.
 let outcome = consumer.run(outcome.checkpoints).await?;
 ```
 
@@ -69,24 +70,59 @@ with no users is a normal one: it returns `Ok`, with nothing read and nothing ha
 Each call of a Consumer makes one Run. What a Run guarantees:
 
 - **It returns a Checkpoint.** Every Event before it was handled, so it is the Cursor to
-  store.
-- **Shutdown loses nothing.** A Run stopped by its shutdown signal returns `Ok` with
-  `completed = false` and a Checkpoint that may still be stored.
+  store. A Stream consumer returns one per User pubkey.
+- **Shutdown loses nothing.** A Run stopped by its shutdown signal returns `Ok` and a
+  Checkpoint that may still be stored: a Feed consumer's with `completed = false`, a Stream
+  consumer's with `stopped` set to `StopReason::Shutdown`.
 - **An idle Homeserver is cheap.** It answers no Events, and the Checkpoint is the Cursor the
   Run started from.
 - **A hostile or broken Homeserver cannot move you backwards.** The Batch of an Events feed
   must be a success, within the size cap, and carry a numeric Cursor that moves forward when
   it has Events. The Batch of an Event stream must hold no more Events than asked for, only
   those of the User pubkey asked for, with Cursors that only move forward. A Batch that breaks
-  this is a Protocol violation: it fails the Run before any of its Events reaches your
-  Handler.
+  this is a Protocol violation: none of its Events reaches your Handler, and the Run reads
+  nothing more from that Homeserver.
 - **Misconfiguration fails at build time:** an events limit of zero, or a path that does not
-  start with `/`.
+  start with `/`. `build` fails with a `ConfigError`.
 
-`build` fails with a `ConfigError`. A Run fails with a `WatcherError<E>`, where `E` is your
-Handler's error: `Homeserver` (an `HsError`), `Protocol` (a `ProtocolViolation`: which rule the
-Homeserver broke, with the Cursors and User pubkeys involved), `Handler(E)`, `DuplicateUser`
-(a Stream consumer's Run was given a User pubkey twice), or `Panicked`.
+A Feed consumer's Run fails as a whole, and the next Run reads its Batch again. It fails with
+a `WatcherError<E>`, where `E` is your Handler's error: `Homeserver` (an `HsError`), `Protocol`
+(a `ProtocolViolation`: which rule the Homeserver broke, with the Cursors involved),
+`Handler(E)` or `Panicked`.
+
+### A Stream consumer's Run
+
+A Stream consumer reads its users one after the other, so its Run reports what happened to
+each of them:
+
+- **It always returns every Checkpoint.** Whatever went wrong with a user or with the
+  Homeserver, the Run returns `Ok` with a `StreamOutcome<E>`, whose `checkpoints` hold one
+  pair of User pubkey and Cursor for every user given, in the order given. A plain `?` on a
+  Run keeps them. A Checkpoint moves after each Event your Handler handled, and never past
+  one it did not handle.
+- **A failure that belongs to one user ends that user's Batch only.** The next user is still
+  read. `failures` lists each such user with the error, a `WatcherError<E>`: `Handler(E)`,
+  your Handler's own error, or `Homeserver`, the `HsError` of the Read the Homeserver refused.
+- **A failure that belongs to the Homeserver stops the Run.** The users after it are not
+  read. `stopped` says why, as a `StopReason`: `Homeserver` (an `HsError`), `Protocol` (a
+  `ProtocolViolation`, which names the User pubkey whose Event stream broke the rules) or
+  `Shutdown`, your own signal. It is `None` when every user was read. What stops a Run is not
+  also listed in `failures`.
+- **A Run's own error means the Run could not be made.** It fails with a `WatcherError<E>`
+  only as `DuplicateUser` (a User pubkey given twice) or `Panicked` (its task panicked).
+
+Which failure belongs to whom:
+
+| Situation | Belongs to | What the Run does | Where that user's Checkpoint is |
+|---|---|---|---|
+| The Homeserver refuses the user's Read: `HsErrorKind` `NotFound`, `Rejected` (every status, `408` included), `TooLarge`, `Malformed`, `Sdk` | the user | Ends that user's Batch, reads the next user | The Cursor they were given |
+| Your Handler fails on one of the user's Events | the user | Ends that user's Batch, reads the next user | The last Event handled |
+| The Homeserver cannot be read: `HsErrorKind` `Timeout`, `Transport`, `ServerError`, `RateLimited` (the Client has already retried a rate-limited Read) | the Homeserver | Stops | The Cursor they were given |
+| A Protocol violation, of any kind | the Homeserver | Stops; none of that answer's Events is handled | The Cursor they were given |
+| The shutdown signal | the Indexer | Stops | The last Event handled |
+
+A user the Run stopped before keeps the Cursor they were given. `handled_events` counts every
+Event your Handler handled, those of a user whose Batch ended early included.
 
 ## The Client
 
@@ -171,13 +207,21 @@ as it was first extracted:
   `Protocol`, `Handler(E)` and `Panicked`, instead of a boxed error. A Handler returns its own
   error type, and the Consumers are `FeedConsumer<E>` and `StreamConsumer<E>`.
 - `build()` fails with the new `ConfigError`, and a Homeserver that breaks the rules of its
-  Events feed or Event stream fails a Run with the new `ProtocolViolation`.
+  Events feed or Event stream is reported with the new `ProtocolViolation`.
 - A Stream consumer is given its users on each Run, not when it is built.
   `Watcher::stream(client, hs_pubkey)` takes no users, and `StreamConsumer::run(users)` takes
   them as pairs of User pubkey and Cursor, the shape and order of the `checkpoints` it
   returns. A user listed twice fails the Run with the new `WatcherError::DuplicateUser`, and a
   Run with no users returns `Ok`. `ConfigError::NoUsers` and `ConfigError::DuplicateUser` are
   removed.
+- A Stream consumer's Run reports its failures per user and always returns every Checkpoint.
+  `StreamConsumer::run` returns `Ok` where it failed with `WatcherError::Homeserver`,
+  `Protocol` or `Handler`: a refused Read or a Handler error ends that user's Batch and the
+  next user is read, and a Homeserver that cannot be read or a Protocol violation stops the
+  Run. It fails only with `DuplicateUser` or `Panicked`. `StreamOutcome` is
+  `StreamOutcome<E>`, generic over the Handler's error: it gains `failures` and `stopped`,
+  loses `completed`, and no longer implements `Clone`, `PartialEq` and `Eq`. The new
+  `StopReason` says why a Run stopped.
 - `BuildError` is removed: `Cycle` has an associated `type Error`, returned by `build_run`,
   `homeservers` and `run`.
 - `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public.

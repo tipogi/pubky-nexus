@@ -10,7 +10,7 @@
 #![allow(
     clippy::result_large_err,
     clippy::large_enum_variant,
-    reason = "the errors carry the keys involved (a `PublicKey` is about 200 bytes); a run fails at most once"
+    reason = "the errors carry the keys involved (a `PublicKey` is about 200 bytes); a run holds at most one per user"
 )]
 
 mod feed_consumer;
@@ -27,7 +27,7 @@ use crate::{FeedReader, HsError, StreamReader};
 
 pub use feed_consumer::{FeedConsumer, FeedConsumerBuilder};
 pub use stream_consumer::{
-    StreamConsumer, StreamConsumerBuilder, StreamOutcome, DEFAULT_STREAM_PATH,
+    StopReason, StreamConsumer, StreamConsumerBuilder, StreamOutcome, DEFAULT_STREAM_PATH,
 };
 
 /// The Events a Run asks for when the builder sets no limit.
@@ -53,9 +53,10 @@ pub enum ConfigError {
 }
 
 /// A Protocol violation: an answer from a Homeserver that breaks the rules of its Events
-/// feed or Event stream. The Run fails before any Event in that answer is handled, so the
-/// Cursor it started from is still its Checkpoint.
-/// A failed Run carries it as [`WatcherError::Protocol`].
+/// feed or Event stream. None of its Events is handled, and the Run reads nothing more from
+/// that Homeserver, so the Cursor the answer was read from is still the Checkpoint.
+/// A [`FeedConsumer`]'s Run returns it as [`WatcherError::Protocol`]; a [`StreamConsumer`]'s
+/// Run stops and gives it as [`StopReason::Protocol`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ProtocolViolation {
@@ -141,19 +142,34 @@ fn cursor_not_advanced(user_pubkey: Option<&PublicKey>, requested: u64, got: u64
     }
 }
 
-/// Why a Run of a [`FeedConsumer`] or a [`StreamConsumer`] failed. `Err` is the
-/// Handler's own error, given back as it was returned.
+/// An error of a Consumer's Run. `Err` is the Handler's own error, given back as it was
+/// returned.
+///
+/// [`FeedConsumer::run`] fails with `Homeserver`, `Protocol`, `Handler` or `Panicked`.
+///
+/// [`StreamConsumer::run`] fails only with `DuplicateUser` or `Panicked`: the Run could not
+/// be made. Whatever else went wrong, it returns `Ok` with every Checkpoint. A `Homeserver`
+/// or `Handler` error that ended one user's Batch is listed in
+/// [`StreamOutcome::failures`], and what stopped the Run is a [`StopReason`] in
+/// [`StreamOutcome::stopped`].
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum WatcherError<Err> {
-    /// A Read of the Homeserver failed, with an [`HsError`].
+    /// A Read of the Homeserver failed, with an [`HsError`]. In
+    /// [`StreamOutcome::failures`], the Homeserver refused the Read of that user's Event
+    /// stream; a Homeserver that cannot be read stops the Run instead, as
+    /// [`StopReason::Homeserver`].
     #[error(transparent)]
     Homeserver(#[from] HsError),
     /// The Homeserver's answer is a Protocol violation, as a [`ProtocolViolation`] says.
+    /// Only a [`FeedConsumer`]'s Run returns it: a [`StreamConsumer`]'s Run stops, with
+    /// [`StopReason::Protocol`].
     #[error(transparent)]
     Protocol(#[from] ProtocolViolation),
     /// The Handler failed on an Event; the Events before it were handled.
-    /// `Err` is what the [`EventHandler`](crate::EventHandler) returned.
+    /// `Err` is what the [`EventHandler`](crate::EventHandler) returned. A
+    /// [`FeedConsumer`]'s Run fails with it; a [`StreamConsumer`]'s Run ends that user's
+    /// Batch and lists it in [`StreamOutcome::failures`].
     ///
     /// The error is displayed but is not this variant's `source()`: `Err` need not implement
     /// [`std::error::Error`], so a `Box<dyn Error>` or a `String` can be one. A reporter that
@@ -251,6 +267,7 @@ impl Watcher {
     ///     .build(shutdown_rx)?;
     /// let outcome = consumer.run(users).await?;
     /// // store outcome.checkpoints: they are the next Run's users as they are
+    /// // outcome.failures: the users whose Batch ended early; outcome.stopped: why it stopped
     /// ```
     pub fn stream<C>(client: C, hs_pubkey: PublicKey) -> StreamConsumerBuilder<Missing>
     where

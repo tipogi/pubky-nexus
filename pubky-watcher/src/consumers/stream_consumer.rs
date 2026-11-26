@@ -4,15 +4,15 @@ use std::sync::Arc;
 
 use pubky::{EventCursor, PublicKey};
 use tokio::sync::watch::Receiver;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{
-    run_consumer, validate_limit, ConfigError, FeedOutcome, Missing, ProtocolViolation,
-    WatcherError, DEFAULT_EVENTS_LIMIT,
+    run_consumer, validate_limit, ConfigError, Missing, ProtocolViolation, WatcherError,
+    DEFAULT_EVENTS_LIMIT,
 };
 use crate::hooks::EventHandler;
 use crate::run::{Run, RunOutcome};
-use crate::{StreamEvent, StreamReader};
+use crate::{HsError, HsErrorKind, StreamEvent, StreamReader};
 
 /// The path an Event stream is read under when the builder sets none: everything its User
 /// pubkey publishes.
@@ -61,8 +61,9 @@ impl<H> StreamConsumerBuilder<H> {
         self
     }
 
-    /// The Handler each Event goes to: an [`EventHandler`] of [`StreamEvent`]s, whose
-    /// error a failed Run gives back as [`WatcherError::Handler`].
+    /// The Handler each Event goes to: an [`EventHandler`] of [`StreamEvent`]s. Its error
+    /// ends that User pubkey's Batch, and the Run gives it back as [`WatcherError::Handler`]
+    /// in [`StreamOutcome::failures`].
     pub fn handler<NewH>(self, handler: NewH) -> StreamConsumerBuilder<NewH> {
         StreamConsumerBuilder {
             hs_pubkey: self.hs_pubkey,
@@ -112,21 +113,62 @@ struct Config<Err> {
     shutdown_rx: Receiver<bool>,
 }
 
-/// How a Run of a [`StreamConsumer`] ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamOutcome {
+/// How a Run of a [`StreamConsumer`] ended. [`StreamConsumer::run`] returns it whatever went
+/// wrong with a user or with the Homeserver, so the Checkpoints are never lost: what went
+/// wrong is in [`Self::failures`] and [`Self::stopped`]. `Err` is the Handler's error.
+#[derive(Debug)]
+pub struct StreamOutcome<Err> {
     /// One Checkpoint per User pubkey the Run was given, in the order given: the Cursor with
     /// every Event of that User pubkey before it handled. They are the ones an Indexer may
     /// store. They have the shape of the Run's input: pass them to the next
     /// [`StreamConsumer::run`] as they are.
+    ///
+    /// A Checkpoint moves after each Event the Handler handled, and never past an Event it
+    /// did not handle. A user listed in [`Self::failures`] for a Handler error stays at the
+    /// last Event handled. A user whose Read failed, whose answer was a Protocol violation,
+    /// or who was not read because the Run stopped before them ([`Self::stopped`]), keeps the
+    /// Cursor they were given.
     pub checkpoints: Vec<(PublicKey, EventCursor)>,
-    /// The Events handed to the Handler.
-    /// Each went to the Handler's [`EventHandler::handle`].
+    /// Each User pubkey whose Batch ended early while the Run went on to the next user, with
+    /// the error that ended it, in the order read. Only two variants of [`WatcherError`]
+    /// appear here:
+    ///
+    /// - [`WatcherError::Homeserver`]: the Homeserver refused the Read of that user's Event
+    ///   stream, with an [`HsErrorKind`] of `NotFound`, `Rejected` (every status, `408`
+    ///   included), `TooLarge`, `Malformed` or `Sdk`.
+    /// - [`WatcherError::Handler`]: the Handler failed on one of that user's Events, with the
+    ///   Handler's own error.
+    ///
+    /// The failure that stops a Run is in [`Self::stopped`] only, never here.
+    pub failures: Vec<(PublicKey, WatcherError<Err>)>,
+    /// The Events the Handler handled, each through [`EventHandler::handle`]. It counts those
+    /// of a user listed in [`Self::failures`] too: the ones handled before their Batch ended.
     pub handled_events: usize,
-    /// Whether the Run read every User pubkey's Event stream; `true` for a Run given no
-    /// users. A Run stopped by the shutdown signal given to [`StreamConsumerBuilder::build`]
-    /// returns `false`; each Checkpoint may still be stored.
-    pub completed: bool,
+    /// Why the Run stopped before reading every User pubkey's Event stream, as a
+    /// [`StopReason`]; `None` when it read them all, and for a Run given no users. The users
+    /// after the one it stopped at were not read, and every Checkpoint in
+    /// [`Self::checkpoints`] may still be stored.
+    pub stopped: Option<StopReason>,
+}
+
+/// Why a Run of a [`StreamConsumer`] stopped before reading every User pubkey's Event stream:
+/// see [`StreamOutcome::stopped`]. A stopped Run has not failed: it returned `Ok`, with
+/// every Checkpoint in [`StreamOutcome::checkpoints`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum StopReason {
+    /// The shutdown signal given to [`StreamConsumerBuilder::build`] turned `true`. It is the
+    /// Indexer's own stop, and says nothing about the Homeserver.
+    Shutdown,
+    /// The Homeserver could not be read, with the [`HsError`] of the Read that failed. Its
+    /// [`HsErrorKind`] is `Timeout`, `Transport`, `ServerError` or `RateLimited`; the Client
+    /// has already retried a rate-limited Read before it returns that kind. Any other kind
+    /// ends one user's Batch and is listed in [`StreamOutcome::failures`].
+    Homeserver(HsError),
+    /// The Homeserver's answer was a Protocol violation, as the [`ProtocolViolation`] says:
+    /// none of its Events is handled, and the Run reads nothing more from that Homeserver.
+    /// It names the User pubkey whose Event stream broke the rules.
+    Protocol(ProtocolViolation),
 }
 
 /// A Stream consumer: a Consumer that reads the Event streams of chosen User pubkeys on one
@@ -147,18 +189,30 @@ where
     /// have the shape and the order of `users`, so they are the next Run's `users` as they
     /// are; an Indexer whose list of users changed gives the new list.
     ///
-    /// A User pubkey listed twice fails the Run before any Read, with
-    /// [`WatcherError::DuplicateUser`]. A Run with no users is a normal Run: it returns `Ok`
-    /// with nothing read, nothing handled and [`StreamOutcome::completed`] set.
+    /// The Run returns `Ok` whenever it has Checkpoints to give, so a plain `?` keeps them.
+    /// What went wrong is in the [`StreamOutcome`]:
     ///
-    /// An Event stream's Batch is checked before any of its Events is handled: no more Events
-    /// than asked for, every Event its own User pubkey's, and Cursors that only move forward
-    /// ([`ProtocolViolation`] otherwise). A Batch that breaks this, a failed Read or a Handler
-    /// error fails the Run.
+    /// - **A failure that belongs to one user ends that user's Batch only**, and the next
+    ///   user is read: a Read the Homeserver refused, or a Handler error. Each such user is
+    ///   listed in [`StreamOutcome::failures`].
+    /// - **A failure that belongs to the Homeserver stops the Run**, and the users after it
+    ///   are not read: a Homeserver that cannot be read, or a Protocol violation.
+    ///   [`StreamOutcome::stopped`] says why, as a [`StopReason`], as it does for the
+    ///   shutdown signal given to [`StreamConsumerBuilder::build`].
+    ///
+    /// An Event stream's Batch is checked whole before any of its Events is handled: no more
+    /// Events than asked for, every Event its own User pubkey's, and Cursors that only move
+    /// forward. A Batch that breaks this is a Protocol violation ([`ProtocolViolation`]):
+    /// none of its Events is handled, and the Run reads nothing more from that Homeserver.
+    ///
+    /// The Run's own error means only that the Run could not be made: a User pubkey listed
+    /// twice, rejected before any Read with [`WatcherError::DuplicateUser`], or a task that
+    /// panicked ([`WatcherError::Panicked`]). A Run with no users is a normal Run: it returns
+    /// `Ok` with nothing read, nothing handled and no [`StreamOutcome::stopped`].
     pub async fn run(
         &self,
         users: Vec<(PublicKey, EventCursor)>,
-    ) -> Result<StreamOutcome, WatcherError<Err>> {
+    ) -> Result<StreamOutcome<Err>, WatcherError<Err>> {
         let run = Arc::new(StreamRun {
             config: self.config.clone(),
             users,
@@ -210,44 +264,63 @@ impl<Err> StreamRun<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
-    async fn read(&self) -> Result<StreamOutcome, WatcherError<Err>> {
+    async fn read(&self) -> Result<StreamOutcome<Err>, WatcherError<Err>> {
         if let Some(user_pubkey) = listed_twice(&self.users).cloned() {
             return Err(WatcherError::DuplicateUser { user_pubkey });
         }
 
+        let hs_pubkey = &self.config.hs_pubkey_z32;
         let mut checkpoints = self.users.clone();
+        let mut failures = Vec::new();
         let mut handled_events = 0;
+        let mut stopped = None;
 
         for (user_pubkey, checkpoint) in checkpoints.iter_mut() {
-            let read = self.read_user(user_pubkey, *checkpoint).await?;
-            *checkpoint = read.checkpoint;
-            handled_events += read.handled_events;
-            if !read.completed {
-                return Ok(StreamOutcome {
-                    checkpoints,
-                    handled_events,
-                    completed: false,
-                });
+            match self
+                .read_user(user_pubkey, checkpoint, &mut handled_events)
+                .await
+            {
+                Ok(()) => {}
+                Err(BatchEnd::Failed(error)) => {
+                    warn!(
+                        homeserver = %hs_pubkey,
+                        user = %user_pubkey.z32(),
+                        %error,
+                        "The user's batch ended early; reading the next user"
+                    );
+                    failures.push((user_pubkey.clone(), error));
+                }
+                Err(BatchEnd::Stopped(reason)) => {
+                    log_stop(hs_pubkey, user_pubkey, &reason);
+                    stopped = Some(reason);
+                    break;
+                }
             }
         }
 
         Ok(StreamOutcome {
             checkpoints,
+            failures,
             handled_events,
-            completed: true,
+            stopped,
         })
     }
 
+    /// Reads one Batch of `user_pubkey`'s Event stream after `checkpoint`, checks it whole,
+    /// and hands its Events to the Handler, moving `checkpoint` and counting in
+    /// `handled_events` after each Event handled, and only then.
     async fn read_user(
         &self,
         user_pubkey: &PublicKey,
-        cursor: EventCursor,
-    ) -> Result<FeedOutcome, WatcherError<Err>> {
+        checkpoint: &mut EventCursor,
+        handled_events: &mut usize,
+    ) -> Result<(), BatchEnd<Err>> {
         let config = &self.config;
         if *config.shutdown_rx.borrow() {
-            return Ok(FeedOutcome::interrupted(cursor, 0));
+            return Err(BatchEnd::Stopped(StopReason::Shutdown));
         }
 
+        let cursor = *checkpoint;
         debug!(user = %user_pubkey.z32(), cursor = cursor.id(), "Reading the user's events");
         let events = config
             .reader
@@ -258,23 +331,73 @@ where
                 config.events_limit,
                 &config.path,
             )
-            .await?;
-        validate_events(user_pubkey, cursor, config.events_limit, &events)?;
+            .await
+            .map_err(sort_failed_read)?;
+        validate_events(user_pubkey, cursor, config.events_limit, &events)
+            .map_err(|violation| BatchEnd::Stopped(StopReason::Protocol(violation)))?;
 
-        let mut checkpoint = cursor;
-        let mut handled_events = 0;
         for event in &events {
             if *config.shutdown_rx.borrow() {
-                debug!(user = %user_pubkey.z32(), processed_events = handled_events, "Shutdown detected");
-                return Ok(FeedOutcome::interrupted(checkpoint, handled_events));
+                return Err(BatchEnd::Stopped(StopReason::Shutdown));
             }
 
-            self.handle_event(event).await?;
-            checkpoint = EventCursor::new(event.cursor);
-            handled_events += 1;
+            self.handle_event(event).await.map_err(BatchEnd::Failed)?;
+            *checkpoint = EventCursor::new(event.cursor);
+            *handled_events += 1;
         }
 
-        Ok(FeedOutcome::completed(checkpoint, handled_events))
+        Ok(())
+    }
+}
+
+/// Why not every Event of one User pubkey's Batch was handled.
+enum BatchEnd<Err> {
+    /// The Batch ended early, and the Run goes on with the next User pubkey.
+    Failed(WatcherError<Err>),
+    /// The Run stops: no further User pubkey is read.
+    Stopped(StopReason),
+}
+
+/// Sorts a failed Read of a User pubkey's Event stream by its [`HsErrorKind`]: a Read the
+/// Homeserver refused is that user's failure and ends their Batch, and a Homeserver that
+/// cannot be read stops the Run. This is the one place the kinds are sorted, and it has no
+/// catch-all arm: a kind added later does not compile until it is sorted here.
+fn sort_failed_read<Err>(error: HsError) -> BatchEnd<Err> {
+    match &error.kind {
+        HsErrorKind::NotFound(_)
+        | HsErrorKind::Rejected(..)
+        | HsErrorKind::TooLarge { .. }
+        | HsErrorKind::Malformed(_)
+        | HsErrorKind::Sdk(_) => BatchEnd::Failed(WatcherError::Homeserver(error)),
+        // The Client has already retried a rate-limited Read before it returns that kind.
+        HsErrorKind::Timeout
+        | HsErrorKind::Transport(_)
+        | HsErrorKind::ServerError(..)
+        | HsErrorKind::RateLimited(_) => BatchEnd::Stopped(StopReason::Homeserver(error)),
+    }
+}
+
+/// Logs that the Run on the Homeserver `hs_pubkey` stopped at `user_pubkey`, for `reason`.
+fn log_stop(hs_pubkey: &str, user_pubkey: &PublicKey, reason: &StopReason) {
+    let user = user_pubkey.z32();
+    match reason {
+        StopReason::Shutdown => debug!(
+            homeserver = %hs_pubkey,
+            %user,
+            "Shutdown detected; the run stops"
+        ),
+        StopReason::Homeserver(error) => warn!(
+            homeserver = %hs_pubkey,
+            %user,
+            %error,
+            "The homeserver could not be read; the run stops"
+        ),
+        StopReason::Protocol(violation) => warn!(
+            homeserver = %hs_pubkey,
+            %user,
+            error = %violation,
+            "Protocol violation; the run stops"
+        ),
     }
 }
 
@@ -335,7 +458,7 @@ mod tests {
 
     use crate::{
         ConfigError, EventHandler, EventType, HsError, HsErrorKind, HsOp, ProtocolViolation,
-        StreamEvent, StreamReader, Watcher, WatcherError,
+        StopReason, StreamEvent, StreamOutcome, StreamReader, Watcher, WatcherError,
     };
 
     fn key() -> PublicKey {
@@ -349,11 +472,15 @@ mod tests {
         StreamEvent::new(EventType::Put, &resource, cursor)
     }
 
+    /// What a scripted Read of a User pubkey's Event stream answers: a Batch, or why the
+    /// Read failed.
+    type Answer = Result<Vec<StreamEvent>, HsErrorKind>;
+
     /// Answers each Read of a User pubkey's Event stream with that user's next scripted
-    /// Batch, and with no Events once they are used up, recording the requests.
+    /// answer, and with no Events once they are used up, recording the requests.
     #[derive(Default)]
     struct Streams {
-        batches: Mutex<HashMap<PublicKey, VecDeque<Vec<StreamEvent>>>>,
+        answers: Mutex<HashMap<PublicKey, VecDeque<Answer>>>,
         requests: Mutex<Vec<(PublicKey, u64, u16, String)>>,
     }
 
@@ -370,11 +497,22 @@ mod tests {
 
         /// Each User pubkey's Batches, one per Read, in order.
         fn in_turn(batches: Vec<(&PublicKey, Vec<Vec<StreamEvent>>)>) -> &'static Self {
+            Self::answering(
+                batches
+                    .into_iter()
+                    .map(|(user, batches)| (user, batches.into_iter().map(Ok).collect()))
+                    .collect(),
+            )
+        }
+
+        /// Each User pubkey's answers, one per Read, in order: a Batch, or the kind of
+        /// failure the Read ends with.
+        fn answering(answers: Vec<(&PublicKey, Vec<Answer>)>) -> &'static Self {
             Box::leak(Box::new(Self {
-                batches: Mutex::new(
-                    batches
+                answers: Mutex::new(
+                    answers
                         .into_iter()
-                        .map(|(user, batches)| (user.clone(), batches.into()))
+                        .map(|(user, answers)| (user.clone(), answers.into()))
                         .collect(),
                 ),
                 requests: Mutex::default(),
@@ -396,7 +534,7 @@ mod tests {
     impl StreamReader for &'static Streams {
         async fn read_stream(
             &self,
-            _hs_pubkey: &PublicKey,
+            hs_pubkey: &PublicKey,
             user_pubkey: &PublicKey,
             cursor: u64,
             limit: u16,
@@ -408,11 +546,12 @@ mod tests {
                 limit,
                 path.to_string(),
             ));
-            let mut batches = self.batches.lock().unwrap();
-            Ok(batches
+            let mut answers = self.answers.lock().unwrap();
+            answers
                 .get_mut(user_pubkey)
                 .and_then(VecDeque::pop_front)
-                .unwrap_or_default())
+                .unwrap_or_else(|| Ok(Vec::new()))
+                .map_err(|kind| HsError::new(hs_pubkey, HsOp::ReadStream, kind))
         }
     }
 
@@ -466,7 +605,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(outcome.completed);
+        assert!(outcome.stopped.is_none());
         assert_eq!(outcome.handled_events, 3);
         assert_eq!(
             outcome.checkpoints,
@@ -509,7 +648,7 @@ mod tests {
         let first = consumer.run(users).await.unwrap();
         let second = consumer.run(first.checkpoints).await.unwrap();
 
-        assert!(second.completed);
+        assert!(second.stopped.is_none());
         assert_eq!(second.handled_events, 2);
         assert_eq!(
             second.checkpoints,
@@ -535,9 +674,10 @@ mod tests {
 
     /// A later Run checks each Batch against the Cursor that Run was given: a Homeserver
     /// that goes back and sends Events at or before a user's last Checkpoint breaks the
-    /// protocol, and none of that Batch reaches the Handler a second time.
+    /// protocol. The Run stops, none of that Batch reaches the Handler a second time, and
+    /// the user keeps their Checkpoint.
     #[tokio::test]
-    async fn a_later_run_rejects_a_stream_that_goes_back_before_its_checkpoint() {
+    async fn a_later_run_stops_on_a_stream_that_goes_back_before_its_checkpoint() {
         let alice = key();
         let reader = Streams::in_turn(vec![(
             &alice,
@@ -557,17 +697,20 @@ mod tests {
             .run(vec![(alice.clone(), EventCursor::new(10))])
             .await
             .unwrap();
-        let second = consumer.run(first.checkpoints).await;
+        let second = consumer.run(first.checkpoints).await.unwrap();
 
         let expected = ProtocolViolation::CursorNotAdvanced {
-            user_pubkey: Some(alice),
+            user_pubkey: Some(alice.clone()),
             requested: 12,
             got: 12,
         };
         assert!(
-            matches!(&second, Err(WatcherError::Protocol(got)) if *got == expected),
-            "{second:?}"
+            matches!(&second.stopped, Some(StopReason::Protocol(got)) if *got == expected),
+            "{:?}",
+            second.stopped
         );
+        assert_eq!(second.checkpoints, vec![(alice, EventCursor::new(12))]);
+        assert_eq!(second.handled_events, 0);
         assert_eq!(*handler.cursors.lock().unwrap(), [11, 12]);
     }
 
@@ -587,7 +730,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(outcome.completed);
+        assert!(outcome.stopped.is_none());
         assert_eq!(outcome.handled_events, 0);
         assert!(outcome.checkpoints.is_empty());
         assert!(reader.reads().is_empty());
@@ -655,60 +798,83 @@ mod tests {
         }
     }
 
-    /// A Batch with more Events than asked for, an Event of another User pubkey, or a Cursor
-    /// that does not move forward fails the Run before any of its Events is handled.
+    /// A Protocol violation stops the Run: a Batch with more Events than asked for, an Event
+    /// of another User pubkey, or a Cursor that does not move forward hands none of that
+    /// answer's Events to the Handler. The stop reason names the User pubkey whose Event
+    /// stream broke the rules and is not also listed under `failures`, later users are not
+    /// read, and the earlier users keep the Checkpoints they reached.
     #[tokio::test]
-    async fn a_stream_that_breaks_the_protocol_fails_before_any_event() {
-        let (alice, mallory) = (key(), key());
+    async fn a_protocol_violation_stops_the_run_and_hands_none_of_its_events_to_the_handler() {
+        let (alice, bob, carol, mallory) = (key(), key(), key(), key());
         let not_advanced = |requested, got| ProtocolViolation::CursorNotAdvanced {
-            user_pubkey: Some(alice.clone()),
+            user_pubkey: Some(bob.clone()),
             requested,
             got,
         };
         for (events, expected) in [
             (
-                vec![event(&alice, 11), event(&alice, 12), event(&alice, 13)],
+                vec![event(&bob, 31), event(&bob, 32), event(&bob, 33)],
                 ProtocolViolation::TooManyEvents {
-                    user_pubkey: alice.clone(),
+                    user_pubkey: bob.clone(),
                     got: 3,
                     limit: 2,
                 },
             ),
             (
-                vec![event(&alice, 11), event(&mallory, 12)],
+                vec![event(&bob, 31), event(&mallory, 32)],
                 ProtocolViolation::ForeignEvent {
-                    user_pubkey: alice.clone(),
+                    user_pubkey: bob.clone(),
                     event_user_pubkey: mallory.clone(),
                 },
             ),
-            (vec![event(&alice, 10)], not_advanced(10, 10)),
-            (
-                vec![event(&alice, 12), event(&alice, 11)],
-                not_advanced(12, 11),
-            ),
+            (vec![event(&bob, 30)], not_advanced(30, 30)),
+            (vec![event(&bob, 32), event(&bob, 31)], not_advanced(32, 31)),
         ] {
-            let reader = Streams::new(vec![(&alice, events)]);
+            let reader = Streams::new(vec![
+                (&alice, vec![event(&alice, 11), event(&alice, 12)]),
+                (&bob, events),
+                (&carol, vec![event(&carol, 51)]),
+            ]);
             let handler = recorder();
+            let users = vec![
+                (alice.clone(), EventCursor::new(10)),
+                (bob.clone(), EventCursor::new(30)),
+                (carol.clone(), EventCursor::new(50)),
+            ];
             let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-            let result = Watcher::stream(reader, key())
+            let outcome = Watcher::stream(reader, key())
                 .handler(handler)
                 .events_limit(2)
                 .build(shutdown_rx)
                 .unwrap()
-                .run(vec![(alice.clone(), EventCursor::new(10))])
-                .await;
+                .run(users)
+                .await
+                .unwrap();
 
             assert!(
-                matches!(&result, Err(WatcherError::Protocol(got)) if *got == expected),
-                "{result:?}"
+                matches!(&outcome.stopped, Some(StopReason::Protocol(got)) if *got == expected),
+                "{:?}",
+                outcome.stopped
             );
-            assert!(handler.cursors.lock().unwrap().is_empty());
+            assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+            assert_eq!(
+                outcome.checkpoints,
+                vec![
+                    (alice.clone(), EventCursor::new(12)),
+                    (bob.clone(), EventCursor::new(30)),
+                    (carol.clone(), EventCursor::new(50)),
+                ]
+            );
+            assert_eq!(outcome.handled_events, 2);
+            assert_eq!(reader.reads(), [(alice.clone(), 10), (bob.clone(), 30)]);
+            assert_eq!(*handler.cursors.lock().unwrap(), [11, 12]);
         }
     }
 
     /// A Run stopped by shutdown is not an error: the Checkpoint of the User pubkey in
-    /// progress is the Cursor of the last Event handled, and the ones after it keep theirs.
+    /// progress is the Cursor of the last Event handled, the ones after it are not read and
+    /// keep theirs, and the stop reason is the shutdown, not a Homeserver's failure.
     #[tokio::test]
     async fn a_run_stopped_by_shutdown_keeps_its_checkpoints() {
         let (alice, bob) = (key(), key());
@@ -734,19 +900,33 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!outcome.completed);
+        assert!(
+            matches!(outcome.stopped, Some(StopReason::Shutdown)),
+            "{:?}",
+            outcome.stopped
+        );
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
         assert_eq!(outcome.handled_events, 1);
         assert_eq!(
             outcome.checkpoints,
-            vec![(alice, EventCursor::new(11)), (bob, EventCursor::new(30))]
+            vec![
+                (alice.clone(), EventCursor::new(11)),
+                (bob, EventCursor::new(30))
+            ]
         );
+        assert_eq!(reader.reads(), [(alice, 10)]);
+        assert_eq!(*handler.cursors.lock().unwrap(), [11]);
     }
 
-    /// Fails every Read of an Event stream, as a Homeserver that is down.
-    struct Down;
+    /// Fails every Read of an Event stream, as a Homeserver that is down, counting the Reads
+    /// it was asked for.
+    #[derive(Default)]
+    struct Down {
+        reads: Mutex<usize>,
+    }
 
     #[async_trait::async_trait]
-    impl StreamReader for Down {
+    impl StreamReader for &'static Down {
         async fn read_stream(
             &self,
             hs_pubkey: &PublicKey,
@@ -755,6 +935,7 @@ mod tests {
             _limit: u16,
             _path: &str,
         ) -> Result<Vec<StreamEvent>, HsError> {
+            *self.reads.lock().unwrap() += 1;
             Err(HsError::new(
                 hs_pubkey,
                 HsOp::ReadStream,
@@ -790,55 +971,413 @@ mod tests {
         }
     }
 
-    /// A Handler error fails the Run with the Handler's own error, typed; the Events before
-    /// it were handled.
-    #[tokio::test]
-    async fn a_handler_failure_fails_the_run_with_its_own_error() {
-        let alice = key();
-        let reader = Streams::new(vec![(
-            &alice,
-            vec![event(&alice, 11), event(&alice, 12), event(&alice, 13)],
-        )]);
-        let handler: &'static FailingAt = Box::leak(Box::new(FailingAt {
-            fail_at: 12,
+    fn failing_at(fail_at: u64) -> &'static FailingAt {
+        Box::leak(Box::new(FailingAt {
+            fail_at,
             cursors: Mutex::default(),
-        }));
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let error = Watcher::stream(reader, key())
-            .handler(handler)
-            .build(shutdown_rx)
-            .unwrap()
-            .run(vec![(alice, EventCursor::new(10))])
-            .await
-            .unwrap_err();
-
-        assert!(
-            matches!(error, WatcherError::Handler(FailedAt(12))),
-            "{error:?}"
-        );
-        assert_eq!(*handler.cursors.lock().unwrap(), [11]);
+        }))
     }
 
-    /// A failed Read of an Event stream fails the Run as the Homeserver's error, before any
-    /// Event.
+    /// A Handler error ends that user's Batch only: the Run lists the user with the Handler's
+    /// own error, typed, their Checkpoint is the last Event handled, and the next user is
+    /// read.
     #[tokio::test]
-    async fn a_failed_stream_request_fails_the_run() {
-        let handler = recorder();
+    async fn a_handler_error_ends_that_users_batch_and_the_next_user_is_read() {
+        let (alice, bob) = (key(), key());
+        let reader = Streams::new(vec![
+            (
+                &alice,
+                vec![event(&alice, 11), event(&alice, 12), event(&alice, 13)],
+            ),
+            (&bob, vec![event(&bob, 31)]),
+        ]);
+        let handler = failing_at(12);
+        let users = vec![
+            (alice.clone(), EventCursor::new(10)),
+            (bob.clone(), EventCursor::new(30)),
+        ];
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let error = Watcher::stream(Down, key())
+        let outcome = Watcher::stream(reader, key())
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
-            .run(vec![(key(), EventCursor::new(10))])
+            .run(users)
             .await
-            .unwrap_err();
+            .unwrap();
 
         assert!(
-            matches!(&error, WatcherError::Homeserver(e) if e.op == HsOp::ReadStream),
-            "{error:?}"
+            matches!(
+                outcome.failures.as_slice(),
+                [(user, WatcherError::Handler(FailedAt(12)))] if *user == alice
+            ),
+            "{:?}",
+            outcome.failures
         );
+        assert_eq!(
+            outcome.checkpoints,
+            vec![
+                (alice.clone(), EventCursor::new(11)),
+                (bob.clone(), EventCursor::new(31)),
+            ]
+        );
+        assert_eq!(reader.reads(), [(alice, 10), (bob, 30)]);
+        assert_eq!(*handler.cursors.lock().unwrap(), [11, 31]);
+    }
+
+    /// `handled_events` counts the Events of a user whose Batch ended early: the ones the
+    /// Handler handled before the Event it failed on.
+    #[tokio::test]
+    async fn handled_events_counts_the_events_of_a_user_whose_batch_ended_early() {
+        let (alice, bob) = (key(), key());
+        let reader = Streams::new(vec![
+            (
+                &alice,
+                vec![event(&alice, 11), event(&alice, 12), event(&alice, 13)],
+            ),
+            (&bob, vec![event(&bob, 31)]),
+        ]);
+        let handler = failing_at(13);
+        let users = vec![(alice, EventCursor::new(10)), (bob, EventCursor::new(30))];
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let outcome = Watcher::stream(reader, key())
+            .handler(handler)
+            .build(shutdown_rx)
+            .unwrap()
+            .run(users)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.handled_events, 3);
+        assert_eq!(*handler.cursors.lock().unwrap(), [11, 12, 31]);
+    }
+
+    /// A user stuck on a failing Event appears in `failures` on every Run and does not move:
+    /// each Run reads them from the same Checkpoint, and never past the Event.
+    #[tokio::test]
+    async fn a_user_stuck_on_a_failing_event_is_listed_on_every_run_and_does_not_move() {
+        let (alice, bob) = (key(), key());
+        let reader = Streams::in_turn(vec![
+            (
+                &alice,
+                vec![
+                    vec![event(&alice, 11), event(&alice, 12), event(&alice, 13)],
+                    vec![event(&alice, 12), event(&alice, 13)],
+                    vec![event(&alice, 12), event(&alice, 13)],
+                ],
+            ),
+            (&bob, vec![vec![event(&bob, 31)], vec![event(&bob, 32)]]),
+        ]);
+        let handler = failing_at(12);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let consumer = Watcher::stream(reader, key())
+            .handler(handler)
+            .build(shutdown_rx)
+            .unwrap();
+
+        let mut users = vec![
+            (alice.clone(), EventCursor::new(10)),
+            (bob.clone(), EventCursor::new(30)),
+        ];
+        for _ in 0..3 {
+            let outcome = consumer.run(users).await.unwrap();
+            assert!(
+                matches!(
+                    outcome.failures.as_slice(),
+                    [(user, WatcherError::Handler(FailedAt(12)))] if *user == alice
+                ),
+                "{:?}",
+                outcome.failures
+            );
+            assert_eq!(
+                outcome.checkpoints[0],
+                (alice.clone(), EventCursor::new(11))
+            );
+            users = outcome.checkpoints;
+        }
+
+        assert_eq!(users[1], (bob.clone(), EventCursor::new(32)));
+        assert_eq!(
+            reader.reads(),
+            [
+                (alice.clone(), 10),
+                (bob.clone(), 30),
+                (alice.clone(), 11),
+                (bob.clone(), 31),
+                (alice, 11),
+                (bob, 32),
+            ]
+        );
+        assert_eq!(*handler.cursors.lock().unwrap(), [11, 31, 32]);
+    }
+
+    /// A Homeserver that is down stops the Run at the first user: the Run still returns `Ok`
+    /// with every user's Checkpoint where it was, the stop reason is the Homeserver's error,
+    /// and the Homeserver is asked once, not once per user.
+    #[tokio::test]
+    async fn a_failed_stream_request_stops_the_run_with_every_checkpoint() {
+        let (alice, bob) = (key(), key());
+        let reader: &'static Down = Box::leak(Box::default());
+        let handler = recorder();
+        let users = vec![(alice, EventCursor::new(10)), (bob, EventCursor::new(30))];
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let outcome = Watcher::stream(reader, key())
+            .handler(handler)
+            .build(shutdown_rx)
+            .unwrap()
+            .run(users.clone())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                &outcome.stopped,
+                Some(StopReason::Homeserver(e))
+                    if e.op == HsOp::ReadStream && matches!(e.kind, HsErrorKind::ServerError(503, _))
+            ),
+            "{:?}",
+            outcome.stopped
+        );
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(outcome.checkpoints, users);
+        assert_eq!(outcome.handled_events, 0);
+        assert_eq!(*reader.reads.lock().unwrap(), 1);
+        assert!(handler.cursors.lock().unwrap().is_empty());
+    }
+
+    /// Makes one Run over Alice, Bob and Carol, in that order, where the Read of Bob's Event
+    /// stream fails with `kind` and the two others have Events.
+    async fn run_where_the_second_read_fails(kind: HsErrorKind) -> SecondReadFailed {
+        let (alice, bob, carol) = (key(), key(), key());
+        let reader = Streams::answering(vec![
+            (&alice, vec![Ok(vec![event(&alice, 11), event(&alice, 12)])]),
+            (&bob, vec![Err(kind)]),
+            (&carol, vec![Ok(vec![event(&carol, 51)])]),
+        ]);
+        let handler = recorder();
+        let users = vec![
+            (alice.clone(), EventCursor::new(10)),
+            (bob.clone(), EventCursor::new(30)),
+            (carol.clone(), EventCursor::new(50)),
+        ];
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let outcome = Watcher::stream(reader, key())
+            .handler(handler)
+            .build(shutdown_rx)
+            .unwrap()
+            .run(users)
+            .await
+            .unwrap();
+
+        SecondReadFailed {
+            alice,
+            bob,
+            carol,
+            outcome,
+            reads: reader.reads(),
+            handled: handler.cursors.lock().unwrap().clone(),
+        }
+    }
+
+    /// What [`run_where_the_second_read_fails`] saw from outside.
+    struct SecondReadFailed {
+        alice: PublicKey,
+        bob: PublicKey,
+        carol: PublicKey,
+        outcome: StreamOutcome<String>,
+        reads: Vec<(PublicKey, u64)>,
+        handled: Vec<u64>,
+    }
+
+    /// A refused Read ends that user's Batch only: the user is listed under `failures` with
+    /// the Homeserver's error and keeps the Cursor they were given, the next user is read,
+    /// and the Run did not stop.
+    async fn assert_a_refused_read_ends_that_users_batch(kind: HsErrorKind) {
+        let expected = kind.to_string();
+        let run = run_where_the_second_read_fails(kind).await;
+        let SecondReadFailed {
+            alice, bob, carol, ..
+        } = run;
+
+        assert!(
+            matches!(
+                run.outcome.failures.as_slice(),
+                [(user, WatcherError::Homeserver(error))]
+                    if *user == bob
+                        && error.op == HsOp::ReadStream
+                        && error.kind.to_string() == expected
+            ),
+            "{:?}",
+            run.outcome.failures
+        );
+        assert!(run.outcome.stopped.is_none(), "{:?}", run.outcome.stopped);
+        assert_eq!(
+            run.outcome.checkpoints,
+            vec![
+                (alice.clone(), EventCursor::new(12)),
+                (bob.clone(), EventCursor::new(30)),
+                (carol.clone(), EventCursor::new(51)),
+            ]
+        );
+        assert_eq!(run.outcome.handled_events, 3);
+        assert_eq!(run.reads, [(alice, 10), (bob, 30), (carol, 50)]);
+        assert_eq!(run.handled, [11, 12, 51]);
+    }
+
+    /// A Read refused as not found ends that user's Batch, and the next user is read.
+    #[tokio::test]
+    async fn a_read_refused_as_not_found_ends_that_users_batch_and_the_next_user_is_read() {
+        assert_a_refused_read_ends_that_users_batch(HsErrorKind::NotFound("gone".into())).await;
+    }
+
+    /// A Read rejected with any other status, `408` included, ends that user's Batch, and
+    /// the next user is read.
+    #[tokio::test]
+    async fn a_rejected_read_ends_that_users_batch_and_the_next_user_is_read() {
+        for status in [400, 403, 408] {
+            assert_a_refused_read_ends_that_users_batch(HsErrorKind::Rejected(status, "no".into()))
+                .await;
+        }
+    }
+
+    /// An answer one byte past its size cap ends that user's Batch, and the next user is
+    /// read.
+    #[tokio::test]
+    async fn a_read_over_the_size_cap_ends_that_users_batch_and_the_next_user_is_read() {
+        assert_a_refused_read_ends_that_users_batch(HsErrorKind::TooLarge {
+            got: 1_048_577,
+            max: 1_048_576,
+        })
+        .await;
+    }
+
+    /// A malformed Read ends that user's Batch, and the next user is read.
+    #[tokio::test]
+    async fn a_malformed_read_ends_that_users_batch_and_the_next_user_is_read() {
+        assert_a_refused_read_ends_that_users_batch(HsErrorKind::malformed("bad url")).await;
+    }
+
+    /// A Read the SDK refused ends that user's Batch, and the next user is read.
+    #[tokio::test]
+    async fn a_read_the_sdk_refused_ends_that_users_batch_and_the_next_user_is_read() {
+        assert_a_refused_read_ends_that_users_batch(HsErrorKind::Sdk("no record".into())).await;
+    }
+
+    /// A Homeserver failure stops the Run: the stop reason carries the Homeserver's error,
+    /// which is not also listed under `failures`, later users are not read, and the earlier
+    /// users keep the Checkpoints they reached.
+    async fn assert_a_homeserver_failure_stops_the_run(kind: HsErrorKind) {
+        let expected = kind.to_string();
+        let run = run_where_the_second_read_fails(kind).await;
+        let SecondReadFailed {
+            alice, bob, carol, ..
+        } = run;
+
+        assert!(
+            matches!(
+                &run.outcome.stopped,
+                Some(StopReason::Homeserver(error))
+                    if error.op == HsOp::ReadStream && error.kind.to_string() == expected
+            ),
+            "{:?}",
+            run.outcome.stopped
+        );
+        assert!(
+            run.outcome.failures.is_empty(),
+            "{:?}",
+            run.outcome.failures
+        );
+        assert_eq!(
+            run.outcome.checkpoints,
+            vec![
+                (alice.clone(), EventCursor::new(12)),
+                (bob.clone(), EventCursor::new(30)),
+                (carol, EventCursor::new(50)),
+            ]
+        );
+        assert_eq!(run.outcome.handled_events, 2);
+        assert_eq!(run.reads, [(alice, 10), (bob, 30)]);
+        assert_eq!(run.handled, [11, 12]);
+    }
+
+    /// A Read that timed out stops the Run, with later users unread and earlier Checkpoints
+    /// kept.
+    #[tokio::test]
+    async fn a_timed_out_read_stops_the_run_and_keeps_the_earlier_checkpoints() {
+        assert_a_homeserver_failure_stops_the_run(HsErrorKind::Timeout).await;
+    }
+
+    /// A transport failure stops the Run, with later users unread and earlier Checkpoints
+    /// kept.
+    #[tokio::test]
+    async fn a_transport_failure_stops_the_run_and_keeps_the_earlier_checkpoints() {
+        assert_a_homeserver_failure_stops_the_run(HsErrorKind::transport("connection reset")).await;
+    }
+
+    /// A `5xx` answer stops the Run, with later users unread and earlier Checkpoints kept.
+    #[tokio::test]
+    async fn a_server_error_stops_the_run_and_keeps_the_earlier_checkpoints() {
+        assert_a_homeserver_failure_stops_the_run(HsErrorKind::ServerError(503, "down".into()))
+            .await;
+    }
+
+    /// A Read still rate limited after the Client's retries stops the Run, with later users
+    /// unread and earlier Checkpoints kept.
+    #[tokio::test]
+    async fn a_rate_limited_read_stops_the_run_and_keeps_the_earlier_checkpoints() {
+        assert_a_homeserver_failure_stops_the_run(HsErrorKind::RateLimited("slow down".into()))
+            .await;
+    }
+
+    /// The failure that stops a Run is its stop reason only: a user whose Batch ended before
+    /// the stop is still listed under `failures`, and the user the Run stopped at is not.
+    #[tokio::test]
+    async fn the_failure_that_stops_a_run_is_not_listed_under_failures() {
+        let (alice, bob, carol) = (key(), key(), key());
+        let reader = Streams::answering(vec![
+            (&alice, vec![Err(HsErrorKind::NotFound("gone".into()))]),
+            (&bob, vec![Err(HsErrorKind::Timeout)]),
+            (&carol, vec![Ok(vec![event(&carol, 51)])]),
+        ]);
+        let handler = recorder();
+        let users = vec![
+            (alice.clone(), EventCursor::new(10)),
+            (bob.clone(), EventCursor::new(30)),
+            (carol, EventCursor::new(50)),
+        ];
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let outcome = Watcher::stream(reader, key())
+            .handler(handler)
+            .build(shutdown_rx)
+            .unwrap()
+            .run(users.clone())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                outcome.failures.as_slice(),
+                [(user, WatcherError::Homeserver(error))]
+                    if *user == alice && matches!(error.kind, HsErrorKind::NotFound(_))
+            ),
+            "{:?}",
+            outcome.failures
+        );
+        assert!(
+            matches!(
+                &outcome.stopped,
+                Some(StopReason::Homeserver(error)) if matches!(error.kind, HsErrorKind::Timeout)
+            ),
+            "{:?}",
+            outcome.stopped
+        );
+        assert_eq!(outcome.checkpoints, users);
+        assert_eq!(reader.reads(), [(alice, 10), (bob, 30)]);
         assert!(handler.cursors.lock().unwrap().is_empty());
     }
 

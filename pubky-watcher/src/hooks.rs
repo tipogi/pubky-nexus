@@ -44,12 +44,17 @@ pub trait FromEventLine: Sized {
 /// The Handler: the Indexer's code that gives an Event its meaning, e.g. indexing or storing
 /// it.
 ///
-/// A Consumer ([`Watcher`](crate::Watcher)) is given one. A failure fails the Run, so the
-/// Indexer starts the next one from the Checkpoint it last stored.
+/// A Consumer ([`Watcher`](crate::Watcher)) is given one. A failure fails a Feed consumer's
+/// Run, so the Indexer starts the next one from the Checkpoint it last stored. On a Stream
+/// consumer it ends that User pubkey's Batch only, at the Checkpoint of the last Event
+/// handled.
 #[async_trait::async_trait]
 pub trait EventHandler<E, Err>: Send + Sync {
-    /// Handles `event`. An error fails the Run as
-    /// [`WatcherError::Handler`](crate::WatcherError::Handler).
+    /// Handles `event`. An error is given back as
+    /// [`WatcherError::Handler`](crate::WatcherError::Handler): by a
+    /// [`FeedConsumer`](crate::FeedConsumer) as its Run's error, by a
+    /// [`StreamConsumer`](crate::StreamConsumer) in
+    /// [`StreamOutcome::failures`](crate::StreamOutcome::failures).
     async fn handle(&self, event: &E) -> Result<(), Err>;
 }
 

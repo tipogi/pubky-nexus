@@ -45,7 +45,7 @@ pub use client::{
 };
 pub use consumers::{
     ConfigError, FeedConsumer, FeedConsumerBuilder, FeedOutcome, Missing, ProtocolViolation,
-    StreamConsumer, StreamConsumerBuilder, StreamOutcome, Watcher, WatcherError,
+    StopReason, StreamConsumer, StreamConsumerBuilder, StreamOutcome, Watcher, WatcherError,
     DEFAULT_EVENTS_LIMIT, DEFAULT_STREAM_PATH,
 };
 pub use cycle::{turn_status_from_run, Cycle, CycleReport, CycleStats, Turn, TurnStatus};

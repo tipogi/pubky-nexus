@@ -20,7 +20,9 @@ cargo run -p pubky-watcher --example feed_consumer
 
 Per User pubkey: a Stream consumer, built once with `Watcher::stream`. It makes three Runs
 over the Event streams (`/events-stream`) of three User pubkeys on the Homeserver. Each Run
-returns one Checkpoint per User pubkey, and they are the next Run's users as they are.
+returns one Checkpoint per User pubkey, and they are the next Run's users as they are. It
+prints each user whose Batch ended early, and ends when a Run stopped before reading every
+user.
 
 ```bash
 cargo run -p pubky-watcher --example stream_consumer

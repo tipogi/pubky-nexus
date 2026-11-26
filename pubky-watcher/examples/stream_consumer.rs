@@ -3,7 +3,11 @@
 //!
 //! Each Run is given the users, each with the Cursor to read it from, and returns one
 //! Checkpoint per User pubkey, in the same shape and order: they are the next Run's users as
-//! they are. An Indexer would store them. From the workspace root:
+//! they are. An Indexer would store them.
+//!
+//! A Run returns `Ok` with every Checkpoint whatever went wrong with a user or with the
+//! Homeserver. Its outcome lists the users whose Batch ended early (`failures`) and says why
+//! the Run stopped before reading every user, if it did (`stopped`). From the workspace root:
 //!
 //! ```bash
 //! cargo run -p pubky-watcher --example stream_consumer
@@ -61,9 +65,24 @@ async fn main() -> Result<(), BoxError> {
 
     for n in 1..=RUNS {
         println!("Run {n}/{RUNS}");
+        // `?` loses no Checkpoint: a Run fails only when it could not be made.
         let outcome = consumer.run(users).await?;
+
+        // A user whose Batch ended early stays at the last Event handled; the others were
+        // still read.
+        for (user_pubkey, error) in &outcome.failures {
+            println!("{}: batch ended early: {error}", user_pubkey.z32());
+        }
+
         // The Checkpoints are the next Run's users as they are.
         users = outcome.checkpoints;
+
+        // A stopped Run did not read every user. An Indexer would back the Homeserver off,
+        // unless the reason is its own shutdown.
+        if let Some(reason) = outcome.stopped {
+            println!("the Run stopped before reading every user: {reason:?}");
+            break;
+        }
     }
 
     for (user_pubkey, checkpoint) in &users {
