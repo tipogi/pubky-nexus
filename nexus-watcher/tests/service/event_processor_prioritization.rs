@@ -66,7 +66,7 @@ async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(),
     let hs_ids = runner.homeservers().await?;
     assert!(
         !hs_ids.contains(&HS_IDS[3].to_string()),
-        "Primary homeserver should be excluded from pre_run"
+        "Primary homeserver should be excluded from homeservers()"
     );
 
     Ok(())
@@ -123,13 +123,13 @@ async fn test_event_processor_runner_blacklisted_homeserver_excluded() -> Result
     let hs_ids = runner.homeservers().await?;
     assert!(
         !hs_ids.contains(&blacklisted_hs.to_string()),
-        "Blacklisted HS should be excluded from pre_run"
+        "Blacklisted HS should be excluded from homeservers()"
     );
     // The non-blacklisted active HS must still be present, proving the blacklist
     // (not just inactivity) removed the other one.
     assert!(
         hs_ids.contains(&allowed_hs.to_string()),
-        "Non-blacklisted active HS should be included in pre_run"
+        "Non-blacklisted active HS should be included in homeservers()"
     );
 
     Ok(())

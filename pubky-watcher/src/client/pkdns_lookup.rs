@@ -2,8 +2,9 @@ use pubky::pkarr::dns::rdata::RData;
 use pubky::pkarr::SignedPacket;
 use pubky::PublicKey;
 
-/// Why a PKDNS lookup through a [`PkdnsLookup`] failed: no DHT node or relay gave a
-/// usable answer. The underlying error, e.g. pkarr's, is its [`source`](std::error::Error::source).
+/// Why a PKDNS lookup through a [`PkdnsLookup`] failed: no DHT node or relay gave a usable
+/// answer. The underlying error, e.g. pkarr's, is its
+/// [`source`](std::error::Error::source).
 #[derive(Debug, thiserror::Error)]
 #[error("Failed to resolve the DHT record: {source}")]
 pub struct PkdnsLookupError {
@@ -12,9 +13,8 @@ pub struct PkdnsLookupError {
 }
 
 impl PkdnsLookupError {
-    /// A lookup that failed because of `source`. An implementation of
-    /// [`PkdnsLookup`] other than [`WatcherClient`](super::WatcherClient) builds its
-    /// failures with it.
+    /// A PKDNS lookup that failed because of `source`. An implementation of [`PkdnsLookup`]
+    /// other than [`WatcherClient`](super::WatcherClient) builds its failures with it.
     pub fn new(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
         Self {
             source: source.into(),
@@ -22,24 +22,25 @@ impl PkdnsLookupError {
     }
 }
 
-/// Looks up the PKDNS record a user publishes.
+/// The PKDNS lookup: the Read that finds the Homeserver record a User pubkey publishes.
 ///
 /// The record is returned as the DHT or a relay answered it, so that the caller can keep it,
 /// check who signed it and when, and refuse an older answer that is replayed or lagging.
-/// [`published_homeserver`] reads the homeserver it names.
+/// [`published_homeserver`] reads the Homeserver pubkey it names.
 #[async_trait::async_trait]
 pub trait PkdnsLookup: Send + Sync {
-    /// The signed packet `user_pubkey` publishes, or `None` when no packet is found. A DHT or relay
-    /// failure is a [`PkdnsLookupError`], so `None` means no record, not an unknown.
+    /// The Homeserver record `user_pubkey` publishes, as its signed packet, or `None` when no
+    /// packet is found. A DHT or relay failure is a [`PkdnsLookupError`], so `None` means no
+    /// record, not an unknown.
     async fn lookup_homeserver_record(
         &self,
         user_pubkey: &PublicKey,
     ) -> Result<Option<SignedPacket>, PkdnsLookupError>;
 }
 
-/// The homeserver a PKDNS record names: the target of its `_pubky` SVCB/HTTPS record, if
-/// there is one and it is a public key. Mirrors `Pubky::get_homeserver_of`, whose parsing
-/// the SDK does not export.
+/// The Homeserver pubkey a Homeserver record names: the target of its `_pubky` SVCB/HTTPS
+/// record, if there is one and it is a public key. Mirrors `Pubky::get_homeserver_of`, whose
+/// parsing the SDK does not export.
 /// Takes the packet [`PkdnsLookup::lookup_homeserver_record`] returns.
 pub fn published_homeserver(packet: &SignedPacket) -> Option<PublicKey> {
     let target = packet

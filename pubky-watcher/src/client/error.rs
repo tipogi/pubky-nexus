@@ -30,24 +30,24 @@ impl ClientError {
     }
 }
 
-/// A failed homeserver call, made through [`WatcherClient`](super::WatcherClient) or another
-/// implementation of the capability traits.
+/// A failed Read of a Homeserver, made through [`WatcherClient`](super::WatcherClient) or
+/// another implementation of the Client's Read traits.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{op:?} {hs}: {kind}")]
 pub struct HsError {
-    /// ID (z-base-32 key) of the homeserver the call went to, or for a resource or blob,
-    /// its owner's key. Not a [`PublicKey`], which also holds the decoded key and would make
+    /// The Homeserver pubkey the Read went to, as z-base-32 text, or for a Resource or blob,
+    /// its User pubkey. Not a [`PublicKey`], which also holds the decoded key and would make
     /// every error several times larger.
     pub hs: String,
-    /// The [`HsOp`] the call made.
+    /// Which Read failed, as an [`HsOp`].
     pub op: HsOp,
-    /// Why the call failed, as an [`HsErrorKind`].
+    /// Why the Read failed, as an [`HsErrorKind`].
     pub kind: HsErrorKind,
 }
 
 impl HsError {
-    /// A failure of the [`HsOp`] `op` on `hs` (the homeserver, or the owner of the resource
-    /// or blob), for the reason `kind`.
+    /// A failure of the Read `op` on `hs` (the Homeserver pubkey, or the User pubkey of the
+    /// Resource or blob), for the reason `kind`.
     pub fn new(hs: &PublicKey, op: HsOp, kind: HsErrorKind) -> Self {
         Self {
             hs: hs.z32(),
@@ -57,24 +57,24 @@ impl HsError {
     }
 }
 
-/// The homeserver operation a call made.
+/// Which Read a Homeserver was asked for.
 /// It labels every [`HsError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsOp {
-    /// A read of the homeserver's `/events/` feed
+    /// A Read of a Homeserver's Events feed
     /// ([`FeedReader::read_feed`](super::FeedReader::read_feed)).
     ReadFeed,
-    /// A read of a user's `/events-stream`
+    /// A Read of a User pubkey's Event stream
     /// ([`StreamReader::read_stream`](super::StreamReader::read_stream)).
     ReadStream,
-    /// A read of a `PUT` event's resource
+    /// A Read of the Resource a `PUT` Event names
     /// ([`ResourceReader::read_resource`](super::ResourceReader::read_resource)).
     ReadResource,
-    /// A read of a file's blob ([`ResourceReader::read_blob`](super::ResourceReader::read_blob)).
+    /// A Read of a blob ([`ResourceReader::read_blob`](super::ResourceReader::read_blob)).
     ReadBlob,
 }
 
-/// Why a homeserver call failed.
+/// Why a Read of a Homeserver failed.
 ///
 /// Homeserver-supplied text (response bodies, transport messages) is capped at
 /// 4 KiB when a kind is built through its constructors, before
@@ -82,15 +82,15 @@ pub enum HsOp {
 /// It is the [`HsError::kind`] of a failure.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum HsErrorKind {
-    /// The homeserver answered `404 Not Found`, with the start of its body.
+    /// The Homeserver answered `404 Not Found`, with the start of its body.
     /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP 404: {0}")]
     NotFound(String),
-    /// The homeserver answered `429 Too Many Requests`, with the start of its body.
+    /// The Homeserver answered `429 Too Many Requests`, with the start of its body.
     /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP 429: {0}")]
     RateLimited(String),
-    /// The homeserver answered a `5xx` status, with the start of its body.
+    /// The Homeserver answered a `5xx` status, with the start of its body.
     /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP {0}: {1}")]
     ServerError(u16, String),
@@ -98,34 +98,34 @@ pub enum HsErrorKind {
     /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP {0}: {1}")]
     Rejected(u16, String),
-    /// The request, its response body included, took longer than the client's timeout
+    /// The request, its response body included, took longer than the Client's timeout
     /// ([`DEFAULT_REQUEST_TIMEOUT`](super::DEFAULT_REQUEST_TIMEOUT) by default).
     #[error("timed out")]
     Timeout,
-    /// The homeserver could not be reached, or its response could not be read
+    /// The Homeserver could not be reached, or its response could not be read
     /// ([`HsErrorKind::transport`]).
     #[error("transport failed: {0}")]
     Transport(String),
-    /// The response is larger than the cap for its kind of read: see
+    /// The response is larger than the cap for its kind of Read: see
     /// [`ResourceReader`](super::ResourceReader).
     #[error("{got} bytes, over the {max} byte limit")]
     TooLarge {
-        /// The size the homeserver announced, or the bytes read before stopping.
+        /// The size the Homeserver announced, or the bytes read before stopping.
         /// In bytes, as the cap ([`HsErrorKind::TooLarge`]).
         got: u64,
-        /// The cap the read was under.
-        /// For a blob, the client's cap
+        /// The cap the Read was under.
+        /// For a blob, the Client's cap
         /// ([`DEFAULT_MAX_FILE_SIZE`](super::DEFAULT_MAX_FILE_SIZE) by default).
         max: u64,
     },
-    /// The SDK refused the request, could not decode the answer, or could not resolve a
-    /// key: neither a status nor a transport failure. A failed fetch is retried; a failed
-    /// event-stream request skips its user for the run, cursor kept, and unlike a transport
-    /// failure never stops the run.
+    /// The SDK refused the request, could not decode the answer, or could not find a User
+    /// pubkey's Homeserver record: neither a status nor a transport failure. A failed Read of
+    /// a Resource is retried; a failed Read of an Event stream skips its user for the Run,
+    /// Cursor kept, and unlike a transport failure never stops the Run.
     /// Built by the [`WatcherClient`](super::WatcherClient) from the SDK's error.
     #[error("sdk: {0}")]
     Sdk(String),
-    /// A request that could not be built, e.g. from a malformed homeserver URL.
+    /// A request that could not be built, e.g. from a malformed Homeserver URL.
     /// Built with [`HsErrorKind::malformed`].
     #[error("malformed: {0}")]
     Malformed(String),
@@ -145,7 +145,7 @@ impl HsErrorKind {
         }
     }
 
-    /// A failure to reach the homeserver or to read its response.
+    /// A failure to reach the Homeserver or to read its response.
     /// Keeps at most 4 KiB of `error`'s message ([`HsErrorKind::Transport`]).
     pub fn transport(error: impl Display) -> Self {
         Self::Transport(capped(error))
@@ -171,7 +171,7 @@ impl HsErrorKind {
     /// decode or PKARR failure is an [`HsErrorKind::Sdk`] failure. An error building the
     /// request (`Parse`, `Build`, `Authentication`) is malformed, and permanent. So is a
     /// failed grant credential refresh (`CredentialRefresh`): only a signed-in client
-    /// refreshes one, and the watcher never signs in.
+    /// refreshes one, and the Client never signs in.
     pub(crate) fn from_sdk(error: pubky::Error) -> Self {
         match error {
             pubky::Error::Request(RequestError::Server { status, message }) => {
@@ -195,7 +195,7 @@ fn capped(error: impl Display) -> String {
     format_error_body(error.to_string().as_bytes(), MAX_ERROR_BODY)
 }
 
-/// A failing body read gives a non-timeout `reqwest::Error`, as an unreachable homeserver
+/// A failing body read gives a non-timeout `reqwest::Error`, as an unreachable Homeserver
 /// or a reset connection does.
 #[cfg(test)]
 pub(crate) async fn transport_error() -> reqwest::Error {
@@ -329,7 +329,7 @@ mod tests {
         assert!(matches!(kind, HsErrorKind::Timeout), "{kind:?}");
     }
 
-    /// A failure to reach the homeserver or read its answer is a transport failure.
+    /// A failure to reach the Homeserver or read its answer is a transport failure.
     #[tokio::test]
     async fn transport_failures_are_classified() {
         let error = pubky::Error::from(RequestError::Transport(transport_error().await));

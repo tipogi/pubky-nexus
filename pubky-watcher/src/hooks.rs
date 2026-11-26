@@ -1,36 +1,35 @@
-//! Traits an application implements to plug into the watcher.
+//! The traits an Indexer implements to plug into the crate.
 //!
-//! Implement [`EventHandler`] to hand events to a [`Watcher`](crate::Watcher) builder.
-//! Implement [`FromEventLine`] when a [`Run`](crate::Run) reads
-//! `/events/` lines into your own event type, and [`RetryableError`] with
-//! [`RetryQueue`] when it should queue failed events for a retry instead of
-//! failing the run.
+//! Implement [`EventHandler`] to give a Consumer ([`Watcher`](crate::Watcher)) its Handler.
+//! Implement [`FromEventLine`] when your own [`Run`](crate::Run) reads Event lines into your
+//! own Event type, and [`RetryableError`] with [`RetryQueue`] when it should hand a failed
+//! Event back for a Retry instead of failing the Run.
 
-/// How a single homeserver event line parsed.
+/// How one Event line parsed.
 /// Returned by [`FromEventLine::from_event_line`].
 #[derive(Debug)]
 pub enum EventLineOutcome<E> {
-    /// A line the application handles.
+    /// A line the Indexer handles.
     /// Handed to [`Run::handle_event`](crate::Run::handle_event).
     Parsed(E),
-    /// A well-formed line the application ignores.
+    /// A well-formed line the Indexer ignores.
     /// Dropped silently by
     /// [`Run::handle_event_line`](crate::Run::handle_event_line).
     Skipped,
-    /// A line naming a resource the application does not recognise.
+    /// A line naming a Resource the Indexer does not recognise.
     /// Logged and skipped by
     /// [`Run::handle_event_line`](crate::Run::handle_event_line).
     Unrecognized {
-        /// Why the resource was not recognised, for the log.
+        /// Why the Resource was not recognised, for the log.
         /// Logged by
         /// [`Run::handle_event_line`](crate::Run::handle_event_line).
         reason: String,
     },
 }
 
-/// Parses a homeserver event line (`PUT <uri>` / `DEL <uri>`) into the application's event
-/// type. A line that cannot be parsed at all is an error; the processor logs it and moves on,
-/// since event lines come from untrusted homeservers.
+/// Parses an Event line (`PUT <uri>` / `DEL <uri>`) into the Indexer's Event type. A line that
+/// cannot be parsed at all is an error; the Run logs it and moves on, since Event lines come
+/// from untrusted Homeservers.
 /// [`FeedEvent`](crate::FeedEvent) implements it.
 pub trait FromEventLine: Sized {
     /// Why a line could not be parsed at all. Logged by
@@ -38,56 +37,57 @@ pub trait FromEventLine: Sized {
     /// never returned to the caller.
     type Error: std::fmt::Display;
 
-    /// Parses `line`, one of a batch's [`FeedBatch::event_lines`](crate::FeedBatch).
+    /// Parses `line`, one of a Batch's [`FeedBatch::event_lines`](crate::FeedBatch).
     fn from_event_line(line: &str) -> Result<EventLineOutcome<Self>, Self::Error>;
 }
 
-/// Handles one parsed event: the application's meaning of it, e.g. indexing or storing it.
+/// The Handler: the Indexer's code that gives an Event its meaning, e.g. indexing or storing
+/// it.
 ///
-/// The handler [`Watcher`](crate::Watcher)'s builders take. A failure fails the run, so the
-/// application starts the next one from the cursor it last persisted.
+/// A Consumer ([`Watcher`](crate::Watcher)) is given one. A failure fails the Run, so the
+/// Indexer starts the next one from the Checkpoint it last stored.
 #[async_trait::async_trait]
 pub trait EventHandler<E, Err>: Send + Sync {
-    /// Handles `event`. An error fails the run as
+    /// Handles `event`. An error fails the Run as
     /// [`WatcherError::Handler`](crate::WatcherError::Handler).
     async fn handle(&self, event: &E) -> Result<(), Err>;
 }
 
-/// Classifies a failed event for [`dispatch_retryable_error`](super::dispatch_retryable_error).
+/// Sorts a Handler's failure for [`dispatch_retryable_error`](super::dispatch_retryable_error).
 ///
-/// Opt-in: [`Run`](super::Run) does not require it. A processor that
-/// wants to queue failures implements it for its error type and calls
-/// `dispatch_retryable_error` from an overridden
-/// [`handle_error`](super::Run::handle_error).
+/// Opt-in: [`Run`](super::Run) does not require it. A Run that hands failed Events back for
+/// a Retry implements it for its error type and calls `dispatch_retryable_error` from an
+/// overridden [`handle_error`](super::Run::handle_error).
 pub trait RetryableError: std::fmt::Display + Send + Sync {
-    /// Whether processing should stop, and the error be returned to the caller, instead of
-    /// being handled as one event's failure.
+    /// Whether the Run should stop, and the error be returned to the caller, instead of
+    /// being handled as one Event's failure.
     /// [`dispatch_retryable_error`](crate::dispatch_retryable_error) checks it first.
     fn should_not_retry_now(&self) -> bool;
 
-    /// Whether the event failed because something it depends on is not indexed yet. Such an
-    /// event goes to [`RetryQueue::queue_missing_dependency`], any other to
-    /// [`RetryQueue::queue_transient_failure`].
+    /// Whether the failure is a Missing dependency: something the Event refers to has not
+    /// been handled yet. Such an Event goes to [`RetryQueue::queue_missing_dependency`], any
+    /// other to [`RetryQueue::queue_transient_failure`].
     fn is_missing_dependency(&self) -> bool;
 
-    /// Whether the event is worth retrying later. One that is not is dropped instead of
-    /// reaching the [`RetryQueue`].
+    /// Whether the Event is worth a Retry. One that is not is dropped instead of reaching
+    /// the [`RetryQueue`].
     fn should_enqueue_for_retry(&self) -> bool;
 }
 
-/// Queues a failed event for a later retry. The implementation knows where the event came
-/// from, so it can correlate the retry with its source.
+/// The Indexer's queue of Events to Retry. The implementation knows where an Event came
+/// from, so it can tie the Retry to that Homeserver.
 ///
-/// Used by [`dispatch_retryable_error`](super::dispatch_retryable_error) once an error is
-/// classified as worth retrying. The two methods let an implementation schedule a missing
-/// dependency and another transient failure differently.
+/// Used by [`dispatch_retryable_error`](super::dispatch_retryable_error) once a failure is
+/// sorted as worth a Retry. The two methods let an implementation schedule a Missing
+/// dependency and a Transient failure differently. The queue, its timing and its limits are
+/// the Indexer's.
 #[async_trait::async_trait]
 pub trait RetryQueue<E, Err>: Send + Sync {
-    /// Queues an event that failed because of a missing dependency
+    /// Queues an Event whose failure is a Missing dependency
     /// ([`RetryableError::is_missing_dependency`]).
     async fn queue_missing_dependency(&self, event: &E) -> Result<(), Err>;
 
-    /// Queues an event that failed with another error worth retrying
+    /// Queues an Event whose failure is a Transient failure: any other one worth a Retry
     /// ([`RetryableError::should_enqueue_for_retry`]).
     async fn queue_transient_failure(&self, event: &E) -> Result<(), Err>;
 }

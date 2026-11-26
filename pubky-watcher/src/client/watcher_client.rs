@@ -13,35 +13,35 @@ use super::fetch::{
 };
 use super::{ClientError, EventType, HsError, HsErrorKind, HsOp, PkdnsLookup, PkdnsLookupError};
 
-/// The blob cap of a client that sets none ([`WatcherClient::with_max_file_size`]): 100 MiB,
-/// the homeserver's own limit.
+/// The blob cap of a Client that sets none ([`WatcherClient::with_max_file_size`]): 100 MiB,
+/// the Homeserver's own limit.
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * (1 << 20);
 
-/// How long a request of a client that sets no timeout
+/// How long a request of a Client that sets no timeout
 /// ([`WatcherClientBuilder::request_timeout`]) may take, reading the response body included,
 /// so that it can download a blob of [`DEFAULT_MAX_FILE_SIZE`].
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Waits between the retries of a rate-limited `/events-stream` request.
+/// Waits between the retries of a rate-limited Read of an Event stream.
 const READ_STREAM_429_BACKOFF_SECS: [u64; 3] = [1, 2, 3];
 
-/// One event from a homeserver's per-user `/events-stream`: all the key-based
-/// processor needs from it.
+/// A Stream event: an Event read from an Event stream. Besides what every Event names, it
+/// carries its User pubkey and its own Cursor.
 /// Returned by [`StreamReader::read_stream`].
 #[derive(Debug, Clone)]
 pub struct StreamEvent {
-    /// Whether the event wrote or deleted the resource ([`EventType`]).
+    /// Whether the Event wrote or deleted the Resource ([`EventType`]).
     pub event_type: EventType,
-    /// The event's position in the user's stream; the next read starts after it.
-    /// Persist it as an [`EventCursor`](pubky::EventCursor).
+    /// The Event's own Cursor: its position in the Event stream, after which the next Read
+    /// resumes. Store it as an [`EventCursor`](pubky::EventCursor).
     pub cursor: u64,
     user_pubkey: PublicKey,
     uri: String,
 }
 
 impl StreamEvent {
-    /// The event `event_type` on `resource` at `cursor`; [`Self::user_pubkey`] is the resource's
-    /// owner.
+    /// The Event `event_type` on `resource` at `cursor`; [`Self::user_pubkey`] is the User
+    /// pubkey that owns the Resource.
     pub fn new(event_type: EventType, resource: &PubkyResource, cursor: u64) -> Self {
         Self {
             event_type,
@@ -51,13 +51,13 @@ impl StreamEvent {
         }
     }
 
-    /// Owner of [`Self::uri`], checked against the user whose stream the event is on.
-    /// Both come from one resource, so they cannot disagree.
+    /// The User pubkey that owns [`Self::uri`], checked against the one whose Event stream
+    /// the Event is on. Both come from one Resource, so they cannot disagree.
     pub fn user_pubkey(&self) -> &PublicKey {
         &self.user_pubkey
     }
 
-    /// The resource's `pubky://` URI, whose owner is [`Self::user_pubkey`].
+    /// The Resource's `pubky://` URI, which [`Self::user_pubkey`] owns.
     pub fn uri(&self) -> &str {
         &self.uri
     }
@@ -69,16 +69,17 @@ impl From<pubky::Event> for StreamEvent {
     }
 }
 
-/// A homeserver's `/events/` feed, which covers every user it hosts under one cursor.
+/// The Read of a Homeserver's Events feed (`/events/`), which covers every user it hosts
+/// under one Cursor.
 ///
-/// A failure is labelled with `hs_pubkey`, the homeserver polled.
-/// [`WatcherClient`] implements it, and [`Watcher::feed`](crate::Watcher::feed)
-/// reads through it.
+/// A failure is labelled with `hs_pubkey`, the Homeserver read.
+/// [`WatcherClient`] implements it, and a Feed consumer
+/// ([`Watcher::feed`](crate::Watcher::feed)) reads through it.
 #[async_trait::async_trait]
 pub trait FeedReader: Send + Sync + 'static {
-    /// Primary-style `GET /events/?cursor=&limit=`. Returns the raw lines, the
-    /// cursor line included; an empty body has none. A body over the events cap fails
-    /// with [`HsErrorKind::TooLarge`].
+    /// `GET /events/?cursor=&limit=`: the Batch after `cursor`, of at most `limit` Events.
+    /// Returns its lines as the Homeserver sent them, the cursor line included; an empty body
+    /// has none. A body over the cap for a Batch fails with [`HsErrorKind::TooLarge`].
     async fn read_feed(
         &self,
         hs_pubkey: &PublicKey,
@@ -87,16 +88,17 @@ pub trait FeedReader: Send + Sync + 'static {
     ) -> Result<Vec<String>, HsError>;
 }
 
-/// A user's `/events-stream` on a homeserver, with a cursor per user.
+/// The Read of a User pubkey's Event stream (`/events-stream`) on a Homeserver, with one
+/// Cursor per User pubkey.
 ///
-/// A failure is labelled with `hs_pubkey`, the homeserver asked.
-/// [`WatcherClient`] implements it, and [`Watcher::stream`](crate::Watcher::stream)
-/// reads through it.
+/// A failure is labelled with `hs_pubkey`, the Homeserver read.
+/// [`WatcherClient`] implements it, and a Stream consumer
+/// ([`Watcher::stream`](crate::Watcher::stream)) reads through it.
 #[async_trait::async_trait]
 pub trait StreamReader: Send + Sync + 'static {
-    /// Per-user `GET /events-stream?user=<pk>:<cursor>&limit=&path=<path>`, not live: the
-    /// user's events after `cursor` whose resource path starts with `path` (e.g. `/pub/`).
-    /// At most `limit` events are returned, each a [`StreamEvent`]. A rate-limited request
+    /// `GET /events-stream?user=<pk>:<cursor>&limit=&path=<path>`, not live: the Events of
+    /// `user_pubkey` after `cursor` whose Resource path starts with `path` (e.g. `/pub/`).
+    /// The Batch holds at most `limit` Events, each a [`StreamEvent`]. A rate-limited request
     /// is retried.
     async fn read_stream(
         &self,
@@ -108,34 +110,34 @@ pub trait StreamReader: Send + Sync + 'static {
     ) -> Result<Vec<StreamEvent>, HsError>;
 }
 
-/// The resources and blobs a `PUT` event names, read under a size cap so that one large
-/// resource cannot exhaust memory.
+/// The Read of the Resource, or the blob, a `PUT` Event names, under a size cap so that one
+/// large Resource cannot exhaust memory.
 ///
-/// A failure is labelled with the resource owner's key.
+/// A failure is labelled with the User pubkey that owns the Resource.
 /// [`WatcherClient`] implements it.
 #[async_trait::async_trait]
 pub trait ResourceReader: Send + Sync + 'static {
-    /// The JSON resource at `resource`, capped at 2 MiB, from the homeserver
-    /// its owner publishes. A larger one fails with [`HsErrorKind::TooLarge`].
+    /// The JSON Resource at `resource`, capped at 2 MiB, from the Homeserver its User
+    /// pubkey's Homeserver record names. A larger one fails with [`HsErrorKind::TooLarge`].
     async fn read_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError>;
 
-    /// The blob at `resource`, capped at the client's `max_file_size`
+    /// The blob at `resource`, capped at the Client's `max_file_size`
     /// ([`WatcherClient::with_max_file_size`], [`DEFAULT_MAX_FILE_SIZE`] by default), from the
-    /// homeserver its owner publishes.
+    /// Homeserver its User pubkey's Homeserver record names.
     async fn read_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError>;
 }
 
-/// Every homeserver call over the Pubky SDK: [`FeedReader`], [`StreamReader`],
-/// [`ResourceReader`] and [`PkdnsLookup`]. Cloning it shares the SDK client.
+/// The Client: the four Reads over the Pubky SDK, [`FeedReader`], [`StreamReader`],
+/// [`ResourceReader`] and [`PkdnsLookup`]. It never writes. Cloning it shares the SDK
+/// underneath.
 #[derive(Clone)]
 pub struct WatcherClient {
     pubky: Arc<Pubky>,
     max_file_size: u64,
 }
 
-/// Builds a [`WatcherClient`] from plain values, so that an application passes its own
-/// settings without building the SDK client itself. Start it with
-/// [`WatcherClient::builder`].
+/// Builds a [`WatcherClient`] from plain values, so that an Indexer passes its own settings
+/// without setting up the SDK itself. Start it with [`WatcherClient::builder`].
 ///
 /// ```no_run
 /// use std::time::Duration;
@@ -156,7 +158,7 @@ pub struct WatcherClientBuilder {
     max_file_size: u64,
 }
 
-/// A client for the public Pubky network, with [`DEFAULT_REQUEST_TIMEOUT`] and
+/// A Client for the public Pubky network, with [`DEFAULT_REQUEST_TIMEOUT`] and
 /// [`DEFAULT_MAX_FILE_SIZE`].
 impl Default for WatcherClientBuilder {
     fn default() -> Self {
@@ -169,7 +171,7 @@ impl Default for WatcherClientBuilder {
 }
 
 impl WatcherClientBuilder {
-    /// Builds for the Pubky testnet whose relay and homeservers run on `host` (e.g.
+    /// Builds for the Pubky testnet whose relay and Homeservers run on `host` (e.g.
     /// `"localhost"`), instead of the public network. [`WatcherClient::testnet`] is this
     /// with every other setting left at its default.
     pub fn testnet(mut self, host: impl Into<String>) -> Self {
@@ -178,7 +180,7 @@ impl WatcherClientBuilder {
     }
 
     /// How long a request may take, reading the response body included
-    /// ([`DEFAULT_REQUEST_TIMEOUT`] by default). A call that runs out of it fails with
+    /// ([`DEFAULT_REQUEST_TIMEOUT`] by default). A Read that runs out of it fails with
     /// [`HsErrorKind::Timeout`].
     pub fn request_timeout(mut self, request_timeout: Duration) -> Self {
         self.request_timeout = request_timeout;
@@ -186,13 +188,13 @@ impl WatcherClientBuilder {
     }
 
     /// Reads blobs of at most `max_file_size` bytes ([`DEFAULT_MAX_FILE_SIZE`] by default),
-    /// as [`WatcherClient::with_max_file_size`] does on a built client.
+    /// as [`WatcherClient::with_max_file_size`] does on a built Client.
     pub fn max_file_size(mut self, max_file_size: u64) -> Self {
         self.max_file_size = max_file_size;
         self
     }
 
-    /// Builds the SDK client and the [`WatcherClient`] over it.
+    /// Sets up the SDK and builds the [`WatcherClient`] over it.
     /// Fails with a [`ClientError`] when the SDK cannot build its HTTP or PKARR client.
     pub fn build(self) -> Result<WatcherClient, ClientError> {
         // TODO: set pkarr's `minimum_ttl` / `maximum_ttl` and its DHT and relay request
@@ -202,7 +204,7 @@ impl WatcherClientBuilder {
         if let Some(host) = &self.testnet_host {
             builder
                 .testnet_with_host(host)
-                // An ephemeral DHT port, so the client does not compete with a local testnet
+                // An ephemeral DHT port, so the Client does not compete with a local testnet
                 // for its port
                 .pkarr(|p| {
                     p.dht(|c| {
@@ -216,7 +218,7 @@ impl WatcherClientBuilder {
     }
 }
 
-/// Names the blob cap; the SDK client underneath is not printed.
+/// Names the blob cap; the SDK underneath is not printed.
 impl std::fmt::Debug for WatcherClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WatcherClient")
@@ -227,32 +229,32 @@ impl std::fmt::Debug for WatcherClient {
 
 impl WatcherClient {
     /// A [`WatcherClientBuilder`], to choose the network, the request timeout and the blob
-    /// cap. It builds a client for the public Pubky network unless told otherwise.
+    /// cap. It builds a Client for the public Pubky network unless told otherwise.
     pub fn builder() -> WatcherClientBuilder {
         WatcherClientBuilder::default()
     }
 
-    /// A client for the public Pubky network, with the builder's defaults
+    /// A Client for the public Pubky network, with the builder's defaults
     /// ([`Self::builder`]).
     /// Fails with a [`ClientError`].
     pub fn mainnet() -> Result<Self, ClientError> {
         Self::builder().build()
     }
 
-    /// A client for the Pubky testnet whose relay and homeservers run on `host` (e.g.
+    /// A Client for the Pubky testnet whose relay and Homeservers run on `host` (e.g.
     /// `"localhost"`), with the builder's defaults ([`Self::builder`]).
     /// Fails with a [`ClientError`].
     pub fn testnet(host: &str) -> Result<Self, ClientError> {
         Self::builder().testnet(host).build()
     }
 
-    /// A client over an SDK client you built, for a setting [`Self::builder`] does not offer.
+    /// A Client over an SDK you set up, for a setting [`Self::builder`] does not offer.
     /// The same as [`Self::from_shared`] over a new [`Arc`].
     pub fn from_pubky(pubky: Pubky) -> Self {
         Self::from_shared(Arc::new(pubky))
     }
 
-    /// A client over an SDK client you share with the rest of your application.
+    /// A Client over an SDK you share with the rest of your Indexer.
     /// Blobs are capped at [`DEFAULT_MAX_FILE_SIZE`] until [`Self::with_max_file_size`].
     pub fn from_shared(pubky: Arc<Pubky>) -> Self {
         Self {
@@ -267,7 +269,7 @@ impl WatcherClient {
         self
     }
 
-    /// The SDK client underneath, for the calls this client does not cover.
+    /// The SDK underneath, for what this Client does not read.
     /// It is the one given to [`Self::from_pubky`] or [`Self::from_shared`], or the one
     /// [`WatcherClientBuilder::build`] built.
     pub fn sdk(&self) -> &Arc<Pubky> {
@@ -279,9 +281,9 @@ impl WatcherClient {
     /// The SDK reads at most 4 KiB of a non-2xx body (its default `max_error_body_bytes`),
     /// the same amount [`HsErrorKind::from_sdk`] keeps.
     async fn get(&self, resource: &PubkyResource) -> Result<reqwest::Response, HsErrorKind> {
-        // TODO: fetch from the homeserver that delivered the event, through `request_async`
-        // with a homeserver-addressed storage URL, instead of the one the owner's PKARR
-        // record names.
+        // TODO: read from the Homeserver that delivered the Event, through `request_async`
+        // with a Homeserver-addressed storage URL, instead of the one the User pubkey's
+        // Homeserver record names.
         self.pubky
             .public_storage()
             .get(resource)
@@ -289,7 +291,7 @@ impl WatcherClient {
             .map_err(HsErrorKind::from_sdk)
     }
 
-    /// One `/events-stream` request, without retries.
+    /// One Read of an Event stream, without retries.
     async fn fetch_stream_events(
         &self,
         hs_pubkey: &PublicKey,
@@ -316,11 +318,11 @@ impl WatcherClient {
     }
 }
 
-/// Reads at most `limit` events of an `/events-stream` response. A homeserver that holds
+/// Reads at most `limit` Events of an Event stream's response. A Homeserver that holds
 /// the connection open once it has sent them is not waited for; one that has already sent
 /// more than asked is logged, and the excess dropped. Pubky uses SSE framing regardless of
 /// `EventStreamBuilder::live()`, so a failure after the response headers arrives as a
-/// stream item, which fails the read as a transport error.
+/// stream item, which fails the Read as a transport error.
 async fn read_stream_events<S>(
     stream: &mut S,
     limit: u16,
@@ -340,7 +342,7 @@ where
         events.push(StreamEvent::from(event));
     }
 
-    // Polled once, never awaited: only an event that has already arrived counts.
+    // Checked once, never awaited: only an Event that has already arrived counts.
     let sent_more =
         events.len() == limit && matches!(stream.next().now_or_never(), Some(Some(Ok(_))));
     if sent_more {
@@ -355,8 +357,8 @@ where
     Ok(events)
 }
 
-/// The lookup behind `Pubky::get_homeserver_of`, which folds a missing packet and a packet
-/// naming no homeserver into one `None` and fails on a malformed `_pubky` record.
+/// The PKDNS lookup behind `Pubky::get_homeserver_of`, which folds a missing packet and a
+/// packet naming no Homeserver into one `None` and fails on a malformed `_pubky` record.
 #[async_trait::async_trait]
 impl PkdnsLookup for WatcherClient {
     async fn lookup_homeserver_record(
@@ -385,7 +387,7 @@ impl FeedReader for WatcherClient {
         cursor: u64,
         limit: u16,
     ) -> Result<Vec<String>, HsError> {
-        // TODO: move to `request_async`, which falls back to the homeserver's ICANN domain
+        // TODO: move to `request_async`, which falls back to the Homeserver's ICANN domain
         // when its direct endpoint is unreachable.
         let send = self
             .pubky
@@ -424,8 +426,8 @@ impl ResourceReader for WatcherClient {
     }
 }
 
-/// Reads the lines of the `/events/` poll `send` makes, labelling a failure as `hs_pubkey`'s
-/// poll.
+/// Reads the lines of the Events feed request `send` makes, labelling a failure as a Read of
+/// `hs_pubkey`'s Events feed.
 async fn read_feed_with(
     hs_pubkey: &PublicKey,
     send: impl Future<Output = Result<reqwest::Response, reqwest::Error>>,
@@ -437,8 +439,8 @@ async fn read_feed_with(
     event_lines_from_response(response).await.map_err(error)
 }
 
-/// Fetches a user's events with `fetch`, retrying while rate limited, and labels a failure
-/// as the `/events-stream` request's, which decides that it stops the homeserver's run.
+/// Reads a User pubkey's Event stream with `fetch`, retrying while rate limited, and labels
+/// a failure as a Read of the Event stream, which decides that it stops the Homeserver's Run.
 async fn read_stream_with<F, Fut>(
     hs_pubkey: &PublicKey,
     user_pubkey: &PublicKey,
@@ -453,8 +455,8 @@ where
         .map_err(|kind| HsError::new(hs_pubkey, HsOp::ReadStream, kind))
 }
 
-/// Reads a resource fetch's body, at most [`MAX_RESOURCE_SIZE`], labelling a failure as a
-/// resource's, which keeps it one event's failure.
+/// Reads the body of a Resource's response, at most [`MAX_RESOURCE_SIZE`], labelling a
+/// failure as a Read of a Resource, which keeps it one Event's failure.
 async fn read_resource_with(
     resource: &PubkyResource,
     fetch: impl Future<Output = Result<reqwest::Response, HsErrorKind>>,
@@ -464,8 +466,8 @@ async fn read_resource_with(
         .map_err(|kind| owner_error(resource, HsOp::ReadResource, kind))
 }
 
-/// Reads a blob fetch's body, at most `max` bytes, labelling a failure as a blob's, which
-/// keeps it one event's failure.
+/// Reads the body of a blob's response, at most `max` bytes, labelling a failure as a Read
+/// of a blob, which keeps it one Event's failure.
 async fn read_blob_with(
     resource: &PubkyResource,
     max: u64,
@@ -483,9 +485,9 @@ async fn read_capped(
     fetch_capped(fetch.await?, max).await
 }
 
-/// A failed resource or blob fetch, labelled with the owner's key: nothing is charged to a
-/// homeserver yet, and resolving the one the owner publishes would cost a PKARR query on
-/// every failure.
+/// A failed Read of a Resource or a blob, labelled with its User pubkey: nothing is charged
+/// to a Homeserver yet, and a PKDNS lookup of the one that User pubkey publishes would cost
+/// a PKARR query on every failure.
 fn owner_error(resource: &PubkyResource, op: HsOp, kind: HsErrorKind) -> HsError {
     HsError::new(&resource.owner, op, kind)
 }
@@ -518,8 +520,8 @@ where
     }
 }
 
-/// The primary-style `/events/` URL of `hs_pubkey`, from `cursor` on, for at most `limit`
-/// events.
+/// The URL of `hs_pubkey`'s Events feed (`/events/`), from `cursor` on, for at most `limit`
+/// Events.
 fn events_url(hs_pubkey: &PublicKey, cursor: u64, limit: u16) -> String {
     format!(
         "https://{}/events/?cursor={cursor}&limit={limit}",
@@ -527,11 +529,11 @@ fn events_url(hs_pubkey: &PublicKey, cursor: u64, limit: u16) -> String {
     )
 }
 
-/// Turns a `/events/` response into the lines it carries.
+/// Turns an Events feed's response into the lines it carries.
 ///
 /// The status is checked before the body is read: an error page has lines and
-/// no `cursor:` line, so parsed as events it would be rejected as a stalled
-/// cursor. A non-2xx instead fails the poll with the status and a capped body.
+/// no `cursor:` line, so parsed as Event lines it would be rejected as a stalled
+/// Cursor. A non-2xx instead fails the Read with the status and a capped body.
 async fn event_lines_from_response(
     response: reqwest::Response,
 ) -> Result<Vec<String>, HsErrorKind> {
@@ -652,7 +654,7 @@ mod tests {
     // --- read_feed_with ---
 
     /// The incident shape: a proxy error page. Before the status check this
-    /// read as "events with no cursor line" and was counted as a stalled cursor.
+    /// read as "Events with no cursor line" and was counted as a stalled Cursor.
     #[tokio::test]
     async fn error_page_fails_the_feed_read_with_status_and_body() {
         let html = "<html>\n<head><title>502 Bad Gateway</title></head>\n<body>bad gateway</body>\n</html>";
@@ -679,8 +681,8 @@ mod tests {
         );
     }
 
-    /// A poll that gets no response is labelled as the homeserver's poll too, as a
-    /// transport failure.
+    /// A Read that gets no response is labelled as a Read of the Homeserver's Events feed
+    /// too, as a transport failure.
     #[tokio::test]
     async fn unanswered_feed_read_is_a_transport_failure_of_the_homeserver() {
         let error = read_feed_with(&hs_pubkey(), async { Err(transport_error().await) })
@@ -715,7 +717,7 @@ mod tests {
     }
 
     /// An oversized error body is truncated into the message, not rejected as
-    /// a size violation: the size cap exists for event batches.
+    /// a size violation: the size cap exists for Batches.
     #[tokio::test]
     async fn error_body_is_capped() {
         let body = "x".repeat(MAX_ERROR_BODY * 4);
@@ -763,7 +765,7 @@ mod tests {
         );
     }
 
-    /// An idle poll answers 2xx with nothing in it.
+    /// An idle Homeserver answers 2xx with nothing in it.
     #[tokio::test]
     async fn empty_success_body_is_no_events() {
         let lines = event_lines_from_response(response(200, "")).await.unwrap();
@@ -771,7 +773,7 @@ mod tests {
         assert!(lines.is_empty());
     }
 
-    /// A 2xx body over the events cap is still a size violation.
+    /// A 2xx body over the cap for a Batch is still a size violation.
     #[tokio::test]
     async fn oversized_success_body_is_rejected() {
         let body = "x".repeat(MAX_EVENTS_BODY + 1);
@@ -794,8 +796,8 @@ mod tests {
         })
     }
 
-    /// The read ends once it holds exactly `limit` events: a homeserver that then holds the
-    /// connection open is neither waited for nor logged. Time is paused, so a read that
+    /// The Read ends once it holds exactly `limit` Events: a Homeserver that then holds the
+    /// connection open is neither waited for nor logged. Time is paused, so a Read that
     /// waits fails at once.
     #[tokio::test(start_paused = true)]
     #[tracing_test::traced_test]
@@ -817,7 +819,7 @@ mod tests {
         assert!(!logs_contain("more than the requested limit"));
     }
 
-    /// A full page is normal: a homeserver that sends exactly `limit` events and ends the
+    /// A full Batch is normal: a Homeserver that sends exactly `limit` Events and ends the
     /// stream is not logged.
     #[tokio::test]
     #[tracing_test::traced_test]
@@ -833,8 +835,8 @@ mod tests {
         assert!(!logs_contain("more than the requested limit"));
     }
 
-    /// A homeserver that has already sent more than the `limit` asked for is logged, and
-    /// only the events asked for are returned.
+    /// A Homeserver that has already sent more than the `limit` asked for is logged, and
+    /// only the Events asked for are returned.
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn stream_events_past_the_limit_are_logged_and_dropped() {
@@ -850,8 +852,8 @@ mod tests {
         assert!(logs_contain("more than the requested limit"));
     }
 
-    /// A failure after the response headers fails the read as a transport error, which
-    /// aborts the homeserver's run.
+    /// A failure after the response headers fails the Read as a transport error, which
+    /// aborts the Homeserver's Run.
     #[tokio::test]
     async fn event_stream_error_is_a_transport_failure() {
         let error = pubky::Error::from(pubky::errors::RequestError::Validation {
@@ -869,9 +871,9 @@ mod tests {
 
     // --- read_stream_with ---
 
-    /// A 5xx or a transport failure on the `/events-stream` request is labelled as that
-    /// request's, which is what makes it stop the homeserver's run, unlike the same failure
-    /// on a file fetch.
+    /// A 5xx or a transport failure reading an Event stream is labelled as that Read's,
+    /// which is what makes it stop the Homeserver's Run, unlike the same failure reading a
+    /// Resource.
     #[tokio::test]
     async fn event_stream_failures_are_labelled_as_the_stream_request() {
         let user = pubky::Keypair::random().public_key();
@@ -898,8 +900,8 @@ mod tests {
         }
     }
 
-    /// A rate-limited `/events-stream` request is retried, and only a 429 that outlasts the
-    /// retries stops the homeserver's run.
+    /// A rate-limited Read of an Event stream is retried, and only a 429 that outlasts the
+    /// retries stops the Homeserver's Run.
     #[tokio::test(start_paused = true)]
     async fn stream_reads_retry_a_rate_limited_request() {
         let user = pubky::Keypair::random().public_key();
@@ -932,9 +934,9 @@ mod tests {
 
     // --- read_resource_with / read_blob_with ---
 
-    /// A 5xx or a transport failure fetching a resource or a blob, which any user can point
-    /// at any host, is labelled as that fetch's, with the owner's key, which is what keeps it
-    /// one event's failure.
+    /// A 5xx or a transport failure reading a Resource or a blob, which any user can point
+    /// at any host, is labelled as that Read's, with its User pubkey, which is what keeps it
+    /// one Event's failure.
     #[tokio::test]
     async fn resource_and_blob_failures_are_labelled_as_the_fetch() {
         let owner = pubky::Keypair::random().public_key();
@@ -948,7 +950,7 @@ mod tests {
             ]
         };
 
-        // The fetch fails before any body is read, so the blob cap plays no part.
+        // The Read fails before any body is read, so the blob cap plays no part.
         let unused_cap = 1024;
         let mut errors = Vec::new();
         for kind in failures() {
@@ -978,7 +980,7 @@ mod tests {
         }
     }
 
-    /// A JSON resource is read up to [`MAX_RESOURCE_SIZE`] bytes and no further.
+    /// A JSON Resource is read up to [`MAX_RESOURCE_SIZE`] bytes and no further.
     #[tokio::test]
     async fn resources_are_capped_at_max_resource_size() {
         let owner = pubky::Keypair::random().public_key();

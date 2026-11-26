@@ -1,17 +1,22 @@
 # pubky-watcher
 
-Read events from [Pubky](https://pubky.org) homeservers, for applications that index them:
-search engines, moderation tools, archives, application-specific indexes.
+`pubky-watcher` consumes [Pubky](https://pubky.org) Homeservers' Events for an Indexer. It
+brings the Client that reads them, the Consumers that hand each Event to the Indexer's
+Handler, and the Cycle that goes round every Homeserver the Indexer follows. The Indexer
+brings the meaning: what an Event does, where Cursors are kept, and which Homeservers to
+follow.
 
-A homeserver emits one line per change, `PUT pubky://<user>/<path>` or
-`DEL pubky://<user>/<path>`, plus a cursor. Neither kind carries a body: for a `PUT`, the
-application fetches the resource itself. This crate reads those events and hands each one to
-your handler. What an event means, where it is stored, where cursors are kept, and when a
-failure is retried stay with your application.
+An Indexer is a service that reads Events from Homeservers to build its own queryable view of
+their data: a search engine, a moderation tool, an archive, an app-specific index.
+
+A Homeserver reports each write or delete of a Resource as an Event,
+`PUT pubky://<user>/<path>` or `DEL pubky://<user>/<path>`. An Event names its Resource and
+never carries its data: for a `PUT`, the Indexer reads the Resource itself, and it may be gone
+by then.
 
 Status: `0.1.0`, not published. The boundary and the names are still under discussion.
 
-## Quick start: one homeserver
+## Quick start: a Feed consumer
 
 ```rust,ignore
 use pubky::EventCursor;
@@ -19,7 +24,7 @@ use pubky_watcher::{EventHandler, FeedEvent, Watcher, WatcherClient};
 
 struct Print;
 
-/// The handler's own error type: a failed run gives it back as `WatcherError::Handler`.
+/// The Handler's own error type: a failed Run gives it back as `WatcherError::Handler`.
 #[derive(Debug, thiserror::Error)]
 #[error("could not print the event")]
 struct PrintError;
@@ -37,35 +42,40 @@ let consumer = Watcher::feed(WatcherClient::mainnet()?, hs_pubkey)
     .build(shutdown_rx)?;
 
 let outcome = consumer.run(EventCursor::new(stored_cursor)).await?;
-// Persist `outcome.checkpoint`, and start the next run from it.
+// Store `outcome.checkpoint`, and start the next Run from it.
 ```
 
-`Watcher::stream(client, hs_pubkey, users)` reads a known set of users instead, one
-`/events-stream` each, with one cursor per user and an optional path prefix (`/pub/` by
-default).
+`Watcher::feed` builds a Feed consumer, which reads a Homeserver's Events feed (`/events/`):
+the Events of every user it hosts, under one Cursor. `Watcher::stream(client, hs_pubkey, users)`
+builds a Stream consumer instead: it reads the Event streams (`/events-stream`) of chosen User
+pubkeys, with one Cursor per User pubkey and an optional path prefix (`/pub/` by default).
 
-What a run guarantees:
+Each call of a Consumer makes one Run. What a Run guarantees:
 
-- **The cursor it returns is safe to persist.** Every event before it was handled.
-- **Shutdown loses nothing.** A run stopped by its shutdown signal returns `Ok` with
-  `completed = false` and a cursor that is still safe to persist.
-- **An idle homeserver is cheap.** It answers no events, and the cursor stays where it was.
-- **A hostile or broken homeserver cannot move you backwards.** A `/events/` batch must be a
-  success, within the size cap, and carry a numeric cursor that moves forward when it has
-  events. A key stream must return no more events than requested, only the requested user's,
-  with cursors that only move forward. A batch that breaks this fails the run before any of
-  its events reaches your handler.
-- **Misconfiguration fails at build time:** an events limit of zero, an empty or duplicated
-  user list, or a path that does not start with `/`.
+- **It returns a Checkpoint.** Every Event before it was handled, so it is the Cursor to
+  store.
+- **Shutdown loses nothing.** A Run stopped by its shutdown signal returns `Ok` with
+  `completed = false` and a Checkpoint that may still be stored.
+- **An idle Homeserver is cheap.** It answers no Events, and the Checkpoint is the Cursor the
+  Run started from.
+- **A hostile or broken Homeserver cannot move you backwards.** The Batch of an Events feed
+  must be a success, within the size cap, and carry a numeric Cursor that moves forward when
+  it has Events. The Batch of an Event stream must hold no more Events than asked for, only
+  those of the User pubkey asked for, with Cursors that only move forward. A Batch that breaks
+  this is a Protocol violation: it fails the Run before any of its Events reaches your
+  Handler.
+- **Misconfiguration fails at build time:** an events limit of zero, an empty list of User
+  pubkeys or one listed twice, or a path that does not start with `/`.
 
-`build` fails with a `ConfigError`. A run fails with a `WatcherError<E>`, where `E` is your
-handler's error: `Homeserver` (an `HsError`), `Protocol` (a `ProtocolViolation`: which rule the
-homeserver broke, with the cursors and users involved), `Handler(E)`, or `Panicked`.
+`build` fails with a `ConfigError`. A Run fails with a `WatcherError<E>`, where `E` is your
+Handler's error: `Homeserver` (an `HsError`), `Protocol` (a `ProtocolViolation`: which rule the
+Homeserver broke, with the Cursors and User pubkeys involved), `Handler(E)`, or `Panicked`.
 
-## The client
+## The Client
 
-`WatcherClient` makes every homeserver call. Build it with `WatcherClient::mainnet()` or
-`WatcherClient::testnet(host)`, or set the request timeout and the blob cap yourself:
+`WatcherClient` is the crate's read-only access to the Pubky network. Build it with
+`WatcherClient::mainnet()` or `WatcherClient::testnet(host)`, or set the request timeout and
+the blob cap yourself:
 
 ```rust
 let client = WatcherClient::builder()
@@ -75,46 +85,51 @@ let client = WatcherClient::builder()
     .build()?;
 ```
 
-All three fail with a `ClientError`, whose `source()` is the SDK's error. A client can also
-wrap an SDK client you already have, with `from_pubky` or `from_shared`. `sdk()` returns the
-SDK client for calls the watcher does not cover.
+All three fail with a `ClientError`, whose `source()` is the SDK's error. A Client can also
+wrap an SDK you already set up, with `from_pubky` or `from_shared`. `sdk()` returns the SDK
+underneath, for what the Client does not read.
 
-Its capabilities are split into narrow traits, so that your tests fake only the one they
-exercise:
+The Client makes four Reads and never writes. Each Read is a trait of its own, so that your
+tests fake only the one they exercise:
 
-| Trait | What it does |
+| Trait | What it reads |
 |---|---|
-| `FeedReader` | a homeserver's `/events/` feed |
-| `StreamReader` | a user's `/events-stream` (a `429` is retried inside the client) |
-| `ResourceReader` | a `PUT` event's resource or blob, under a size cap |
-| `PkdnsLookup` | the signed PKDNS record a user publishes; `published_homeserver` reads the homeserver it names |
+| `FeedReader` | a Homeserver's Events feed, `/events/` |
+| `StreamReader` | a User pubkey's Event stream, `/events-stream` (a `429` is retried inside the Client) |
+| `ResourceReader` | the Resource a `PUT` Event names, or a blob, under a size cap |
+| `PkdnsLookup` | the Homeserver record a User pubkey publishes; `published_homeserver` reads the Homeserver pubkey it names |
 
-The resolver returns the raw signed record, so that you can keep it, check its timestamp,
-and refuse an older answer that is replayed or lagging. A failed lookup is a `PkdnsLookupError`,
-whose `source()` is pkarr's error.
+The PKDNS lookup returns the Homeserver record as it was signed, so that you can keep it,
+check its timestamp, and refuse an older answer that is replayed or lagging. A failed PKDNS
+lookup is a `PkdnsLookupError`, whose `source()` is pkarr's error.
 
-A failed call is an `HsError`: the operation (poll events, user events, get resource, get
-blob) and a kind (not found, rate limited, server error, rejected, timeout, transport, too
-large, SDK, malformed), so that you can choose your own retry policy.
+A failed Read of a Homeserver is an `HsError`: which Read (`ReadFeed`, `ReadStream`,
+`ReadResource`, `ReadBlob`) and a kind (not found, rate limited, server error, rejected,
+timeout, transport, too large, SDK, malformed), so that you can choose your own Retry policy.
 
-## Advanced: processors and runners
+## Advanced: your own `Run` and `Cycle`
 
-The builders are built on lower-level traits, which an application with its own cursor store,
-retry queue or backoff implements directly:
+The Consumers are built on lower-level traits, which an Indexer with its own Cursor store,
+Retry queue or backoff implements directly:
 
-- `FromEventLine` parses an event line into your event type.
-- `Run<E, Err>` is one run over one homeserver. Each run is waited for on its own
-  task, logged as slow after a threshold, and reported as failed if it panics. Its
-  `handle_error` fails fast by default.
-- `Cycle<E, Err>` runs one processor per homeserver, one after the other, and
-  reports run statistics (succeeded, failed, panicked, budget spent, skipped). A hook decides
-  which homeservers to skip, e.g. those in your backoff.
-- Retry is opt-in: implement `RetryableError` for your error type and `RetryQueue`
-  for your queue, and call `dispatch_retryable_error` from `handle_error`.
+- `FromEventLine` parses an Event line into your Event type.
+- `Run<E, Err>` is one pass over one Homeserver: Events are read from a Cursor and each is
+  handed to the Handler. Each Run is waited for on its own task, logged as slow after a
+  threshold, and reported as failed if it panics. Its `handle_error` fails fast by default.
+- `Cycle<E, Err>` is one round over the Homeservers you follow: one Turn each, one after the
+  other, reported in `CycleStats` (Runs that completed, failed, panicked or reached their
+  Budget, and Homeservers skipped). Its hooks decide which Homeservers it goes round
+  (`homeservers`), which it skips, e.g. those in your backoff (`should_skip`), and how many
+  Runs it makes (`run_limit`).
+- Retry is opt-in: implement `RetryableError` for your error type and `RetryQueue` for your
+  queue, and call `dispatch_retryable_error` from `handle_error`. The crate sorts a Handler's
+  failure into a Missing dependency or a Transient failure; the queue and its limits are
+  yours.
 
 ## Examples
 
-See [`examples/`](examples/README.md): one per builder and one for the low-level traits.
+See [`examples/`](examples/README.md): one per Consumer and one for your own `Run` under a
+`Cycle`.
 
 ## Versioning
 
@@ -122,22 +137,36 @@ Until the crate is published, its API changes in breaking ways without a version
 first published release starts the semver promise. Breaking changes so far, against the API
 as it was first extracted:
 
-- `WatcherError` is generic over the handler's error: `WatcherError<E>` with `Homeserver`,
-  `Protocol`, `Handler(E)` and `Panicked`, instead of a boxed error. A handler returns its own
-  error type, and the watchers are `FeedConsumer<E>` and `StreamConsumer<E>`.
-- `build()` fails with the new `ConfigError`, and a homeserver that breaks the events
-  protocol fails a run with the new `ProtocolViolation`.
-- `BuildError` is removed: `Cycle` has an associated `type Error`, returned
-  by `build`, `homeservers` and `run`.
+- Every public name follows one glossary, written for the crate on its own. The event types
+  are `FeedEvent`, `StreamEvent` and `EventType`. The Client's Reads are
+  `FeedReader::read_feed`, `StreamReader::read_stream`, `ResourceReader::read_resource` and
+  `read_blob`, and `PkdnsLookup::lookup_homeserver_record`. The hooks are `FromEventLine` and
+  `RetryQueue`. The lower-level traits are `Run` and `Cycle`, with `Turn`, `TurnStatus`,
+  `CycleStats` and `CycleReport`. The entry points are `Watcher::feed` and `Watcher::stream`,
+  which build a `FeedConsumer` and a `StreamConsumer` whose outcomes carry a `checkpoint`.
+  A parameter or field that holds a Homeserver pubkey is `hs_pubkey`, and one that holds a
+  User pubkey is `user_pubkey`; only the `hs` field of `HsError`, and the parameter of
+  `HsError::new` that fills it, keep their name. No old name is kept as an alias. Behaviour is
+  unchanged. Text changes only where it prints a renamed name: a failed Read prints its `HsOp`
+  variant, each Consumer labels its Run's span with its type name, and a `Debug` print shows
+  the new type and field names.
+- `WatcherError` is generic over the Handler's error: `WatcherError<E>` with `Homeserver`,
+  `Protocol`, `Handler(E)` and `Panicked`, instead of a boxed error. A Handler returns its own
+  error type, and the Consumers are `FeedConsumer<E>` and `StreamConsumer<E>`.
+- `build()` fails with the new `ConfigError`, and a Homeserver that breaks the rules of its
+  Events feed or Event stream fails a Run with the new `ProtocolViolation`.
+- `BuildError` is removed: `Cycle` has an associated `type Error`, returned by `build_run`,
+  `homeservers` and `run`.
 - `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public.
 - `WatcherClient::mainnet()` and `testnet()` fail with `ClientError` instead of
-  `pubky::Error`, and `PkdnsLookup::lookup_homeserver_record` with the crate's `PkdnsLookupError`
-  instead of pkarr's. Neither names an SDK type: the SDK's error is reachable only as their
-  `source()`. `PkdnsLookupError`'s message still keeps the SDK's wording and includes the source's
-  text ("Failed to resolve the DHT record: …"), so logs that print it read as before.
+  `pubky::Error`, and `PkdnsLookup::lookup_homeserver_record` with the crate's
+  `PkdnsLookupError` instead of pkarr's. Neither names an SDK type: the SDK's error is
+  reachable only as their `source()`. `PkdnsLookupError`'s message still keeps the SDK's
+  wording and includes the source's text ("Failed to resolve the DHT record: …"), so logs that
+  print it read as before.
 
 ## Dependencies
 
-Homeservers and users are `pubky::PublicKey`s. The crate depends on the Pubky SDK, `reqwest`,
-`tokio`, `futures` and `tracing`, and brings no database, metrics or application config
-with it.
+The Client takes a Homeserver pubkey and a User pubkey as a `pubky::PublicKey`. The crate
+depends on the Pubky SDK, `reqwest`, `tokio`, `futures` and `tracing`, and brings no database,
+no metrics and no configuration with it.

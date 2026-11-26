@@ -1,40 +1,39 @@
-//! The `/events/` line protocol: a `text/plain` body with one event per line
-//! (`PUT <uri>` / `DEL <uri>`), closed by a `cursor: <value>` line.
+//! The line protocol of an Events feed (`/events/`): a `text/plain` body with one Event line
+//! per Event (`PUT <uri>` / `DEL <uri>`), closed by a `cursor: <value>` line.
 //!
-//! Use [`FeedBatch::split`] when you poll `/events/` yourself, through
-//! [`FeedReader`](crate::FeedReader) in your own
-//! [`Run`](crate::Run), and [`FeedEvent`] when the method and
-//! URI are all your handler needs. [`Watcher::feed`](crate::Watcher::feed) does
-//! both for you.
+//! Use [`FeedBatch::split`] when you read an Events feed yourself, through
+//! [`FeedReader`](crate::FeedReader) in your own [`Run`](crate::Run), and [`FeedEvent`] when
+//! the Event type and the URI are all your Handler needs. A Feed consumer
+//! ([`Watcher::feed`](crate::Watcher::feed)) does both for you.
 
 use std::convert::Infallible;
 
 use crate::client::EventType;
 use crate::hooks::{EventLineOutcome, FromEventLine};
 
-/// Prefix of the line closing a homeserver `/events/` response with its cursor.
+/// Prefix of the line closing an Events feed's Batch with the Cursor to resume from.
 /// [`FeedBatch::split`] reads it.
 pub const CURSOR_PREFIX: &str = "cursor: ";
 
-/// An event line of a homeserver's `/events/` feed: `PUT <uri>` or `DEL <uri>`.
+/// A Feed event: an Event read from a Homeserver's Events feed, `PUT <uri>` or `DEL <uri>`.
 ///
-/// The event type [`Watcher::feed`](crate::Watcher::feed) hands to its handler.
-/// An application that needs richer parsing defines its own type and implements
+/// The Event a Feed consumer ([`Watcher::feed`](crate::Watcher::feed)) hands to its Handler.
+/// An Indexer that needs richer parsing defines its own type and implements
 /// [`FromEventLine`] for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedEvent {
     /// `PUT` or `DEL`, as an [`EventType`].
     pub event_type: EventType,
-    /// The resource's `pubky://` URI, as the line carries it.
-    /// A `PUT`'s resource is read with
+    /// The Resource's `pubky://` URI, as the Event line carries it.
+    /// A `PUT`'s Resource is read with
     /// [`ResourceReader::read_resource`](crate::ResourceReader::read_resource).
     pub uri: String,
 }
 
 /// Parsing never fails: an empty line is [`EventLineOutcome::Skipped`], and a line that is
 /// not `PUT <uri>` or `DEL <uri>` is [`EventLineOutcome::Unrecognized`]. Only the first space
-/// separates the method from the URI: homeservers write a stored file's name unencoded, and
-/// a name may contain spaces.
+/// separates the Event type from the URI: Homeservers write a stored file's name unencoded,
+/// and a name may contain spaces.
 impl FromEventLine for FeedEvent {
     type Error = Infallible;
 
@@ -72,26 +71,27 @@ impl FromEventLine for FeedEvent {
     }
 }
 
-/// A homeserver `/events/` response, split into its event lines and the cursor closing the batch.
+/// The Batch one read of an Events feed returns, split into its Event lines and the Cursor
+/// closing it.
 ///
-/// The homeserver sends the cursor line last, but that is positional convention
+/// The Homeserver sends the cursor line last, but that is positional convention
 /// rather than something we can rely on from an untrusted peer: the split is
-/// order-independent, and if a batch carries several cursor lines the last one
-/// wins, being the position the homeserver ends the batch at.
+/// order-independent, and if a Batch carries several cursor lines the last one
+/// wins, being the position the Homeserver ends the Batch at.
 /// Built by [`FeedBatch::split`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedBatch<'a> {
-    /// The event lines, in the order the homeserver sent them, for
+    /// The Event lines, in the order the Homeserver sent them, for
     /// [`FromEventLine::from_event_line`](crate::FromEventLine::from_event_line).
     pub event_lines: Vec<&'a str>,
-    /// Raw, still unparsed value of the batch's cursor line, if it carried one.
+    /// Raw, still unparsed value of the Batch's cursor line, if it carried one.
     /// It is what follows [`CURSOR_PREFIX`].
     pub cursor: Option<&'a str>,
 }
 
 impl<'a> FeedBatch<'a> {
-    /// Splits the lines of a `/events/` response.
-    /// A line starting with [`CURSOR_PREFIX`] is a cursor line; any other is an event line.
+    /// Splits the lines of an Events feed's response.
+    /// A line starting with [`CURSOR_PREFIX`] is a cursor line; any other is an Event line.
     pub fn split(lines: &'a [String]) -> Self {
         let mut event_lines = Vec::with_capacity(lines.len());
         let mut cursor = None;
@@ -109,13 +109,13 @@ impl<'a> FeedBatch<'a> {
         }
     }
 
-    /// Whether the batch carried anything other than its cursor line: whether
+    /// Whether the Batch carried anything other than its cursor line: whether
     /// [`Self::event_lines`] is non-empty.
     ///
     /// Deliberately counts *every* non-cursor line, including ones that later
     /// parse as skipped or unrecognized: those still legitimately advance the
-    /// cursor, so narrowing this to "lines that reached a handler" would let a
-    /// non-advancing cursor through and re-open the replay loop.
+    /// Cursor, so narrowing this to "lines that reached a Handler" would let a
+    /// non-advancing Cursor through and re-open the replay loop.
     pub fn has_events(&self) -> bool {
         !self.event_lines.is_empty()
     }
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(parsed("DEL pubky://a/pub/x").event_type, EventType::Del);
     }
 
-    /// Only the first space separates the method from the URI, so a file name with spaces
+    /// Only the first space separates the Event type from the URI, so a file name with spaces
     /// stays in the URI.
     #[test]
     fn the_uri_runs_from_the_first_space_to_the_end() {
@@ -180,7 +180,7 @@ mod tests {
         assert!(unrecognized("put pubky://a/pub/x"));
     }
 
-    /// A cursor line that reaches the parser is no event either.
+    /// A cursor line that reaches the parser is no Event either.
     #[test]
     fn a_cursor_line_is_unrecognized() {
         assert!(unrecognized("cursor: 42"));
@@ -192,7 +192,7 @@ mod tests {
 
     // --- FeedBatch::split ---
 
-    /// The usual shape: events followed by the cursor that closes the batch.
+    /// The usual shape: Event lines followed by the Cursor that closes the Batch.
     #[test]
     fn splits_events_from_the_trailing_cursor() {
         let lines = lines(&["PUT pubky://a/pub/x", "DEL pubky://b/pub/y", "cursor: 42"]);
@@ -206,7 +206,7 @@ mod tests {
         assert!(batch.has_events());
     }
 
-    /// An idle poll: a cursor and nothing else, which must not read as "had events".
+    /// An idle Homeserver: a Cursor and nothing else, which must not read as "had events".
     #[test]
     fn cursor_only_batch_has_no_events() {
         let lines = lines(&["cursor: 42"]);
@@ -217,7 +217,7 @@ mod tests {
         assert!(!batch.has_events());
     }
 
-    /// The cursor is found wherever it sits, not only in last position.
+    /// The Cursor is found wherever it sits, not only in last position.
     #[test]
     fn cursor_is_found_out_of_position() {
         let lines = lines(&["cursor: 42", "PUT pubky://a/pub/x"]);
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(batch.cursor, Some("42"));
     }
 
-    /// Several cursor lines: the last one wins, being where the batch ends.
+    /// Several cursor lines: the last one wins, being where the Batch ends.
     #[test]
     fn last_cursor_line_wins() {
         let lines = lines(&["cursor: 41", "PUT pubky://a/pub/x", "cursor: 42"]);
@@ -237,8 +237,8 @@ mod tests {
         assert_eq!(batch.cursor, Some("42"));
     }
 
-    /// A batch with no cursor line at all, which the caller rejects as stalled
-    /// when it carries events: there is nothing to move the checkpoint with.
+    /// A Batch with no cursor line at all, which the caller rejects as stalled
+    /// when it carries Event lines: there is nothing to move the Checkpoint with.
     #[test]
     fn batch_without_cursor_line() {
         let lines = lines(&["PUT pubky://a/pub/x"]);
@@ -250,8 +250,8 @@ mod tests {
     }
 
     /// Lines that will later parse as skipped or unrecognized still count as
-    /// events: they legitimately advance the cursor, so a batch made only of
-    /// them must not be treated as an idle poll.
+    /// events: they legitimately advance the Cursor, so a Batch made only of
+    /// them must not be treated as an idle Homeserver's.
     #[test]
     fn unrecognized_lines_count_as_events() {
         let lines = lines(&["garbage", "cursor: 42"]);

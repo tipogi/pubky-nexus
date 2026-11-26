@@ -1,11 +1,11 @@
-//! Five `/events/` polls of one homeserver through the low-level traits:
-//! a [`Run`] for one poll, run by a [`Cycle`].
+//! An Indexer's own [`Run`] under a [`Cycle`]: five Cycles over one Homeserver, each giving
+//! it one Turn, in which the Run reads one Batch of its Events feed.
 //!
-//! This is the path Nexus takes, with its own cursor store, retry queue and backoff. The
-//! example keeps its cursor in memory and fails fast on any error. From the workspace root:
+//! This is the path Nexus takes, with its own Cursor store, Retry queue and backoff. The
+//! example keeps its Cursor in memory and fails fast on any error. From the workspace root:
 //!
 //! ```bash
-//! cargo run -p pubky-watcher --example poll_homeserver
+//! cargo run -p pubky-watcher --example run_under_cycle
 //! ```
 //!
 //! The crate logs with `tracing`. This example prints instead of installing a subscriber.
@@ -17,15 +17,15 @@ use pubky::PublicKey;
 use pubky_watcher::{Cycle, FeedBatch, FeedEvent, FeedReader, Run, RunOutcome, WatcherClient};
 use tokio::sync::{watch, Mutex};
 
-/// This example's error: any error, boxed. An application would use its own type.
+/// This example's error: any error, boxed. An Indexer would use its own type.
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const STAGING_HOMESERVER: &str = "ufibwbmed6jeq9k4p583go95wofakh9fwpp4k734trq79pd9u1uy";
-const POLL_TICKS: usize = 5;
-const EVENTS_PER_TICK: u16 = 8;
+const CYCLES: usize = 5;
+const EVENTS_PER_RUN: u16 = 8;
 
-/// One poll of the homeserver: reads the batch after the cursor, prints each event, and
-/// moves the cursor once the batch is done.
+/// One Run over the Homeserver: reads the Batch after the Cursor, prints each Event, and
+/// moves the Cursor once the Batch is handled.
 struct PrintRun {
     hs_pubkey: PublicKey,
     hs_pubkey_z32: String,
@@ -36,7 +36,7 @@ struct PrintRun {
 #[async_trait]
 impl Run<FeedEvent, BoxError> for PrintRun {
     fn instance_name(&self) -> &'static str {
-        "poll_homeserver"
+        "run_under_cycle"
     }
 
     fn hs_pubkey(&self) -> &str {
@@ -52,14 +52,14 @@ impl Run<FeedEvent, BoxError> for PrintRun {
         let cursor = *self.cursor.lock().await;
         let lines = self
             .reader
-            .read_feed(&self.hs_pubkey, cursor, EVENTS_PER_TICK)
+            .read_feed(&self.hs_pubkey, cursor, EVENTS_PER_RUN)
             .await?;
         let batch = FeedBatch::split(&lines);
         if !batch.has_events() {
             println!("No new events");
         }
 
-        // `handle_event_line` parses each line with `FeedEvent`'s `FromEventLine`,
+        // `handle_event_line` parses each Event line with `FeedEvent`'s `FromEventLine`,
         // skips what it does not recognise, and hands the rest to `handle`.
         for line in &batch.event_lines {
             self.handle_event_line(line).await?;
@@ -73,7 +73,7 @@ impl Run<FeedEvent, BoxError> for PrintRun {
     }
 }
 
-/// Runs one [`PrintRun`] per tick, for the staging homeserver only.
+/// A Cycle over the staging Homeserver only: one Turn, one [`PrintRun`].
 struct StagingCycle {
     reader: Arc<dyn FeedReader>,
     cursor: Arc<Mutex<u64>>,
@@ -114,11 +114,11 @@ async fn main() -> Result<(), BoxError> {
         shutdown_rx,
     };
 
-    for tick in 1..=POLL_TICKS {
-        println!("Tick {tick}/{POLL_TICKS}");
+    for n in 1..=CYCLES {
+        println!("Cycle {n}/{CYCLES}");
         let stats = cycle.run().await?.0;
         if stats.count_ok() != 1 {
-            return Err("the poll failed".into());
+            return Err("the Run failed".into());
         }
     }
     Ok(())

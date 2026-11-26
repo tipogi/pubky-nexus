@@ -54,7 +54,7 @@ pub struct KeyBasedEventProcessor {
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
     /// HS PKs that should not be indexed. Defense-in-depth: the runner already
-    /// excludes these from `pre_run`, but the processor refuses to run for a
+    /// excludes these from `homeservers`, but the processor refuses to run for a
     /// blacklisted HS too.
     pub hs_blacklist: HsBlacklist,
 
@@ -111,7 +111,7 @@ impl Run<Event, EventProcessorError> for KeyBasedEventProcessor {
         let hs_id = self.homeserver_id.to_string();
 
         // Blacklisted HSs must never be indexed. The runner already excludes
-        // them from `pre_run`, so reaching here is unexpected.
+        // them from `homeservers`, so reaching here is unexpected.
         if self.hs_blacklist.is_blacklisted(&hs_id) {
             error!(action = "abort_hs", "Refusing to process blacklisted HS");
             return Err(EventProcessorError::HsBlacklisted { hs_id });

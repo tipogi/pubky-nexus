@@ -13,8 +13,8 @@ use crate::hooks::EventHandler;
 use crate::run::{Run, RunOutcome};
 use crate::{StreamEvent, StreamReader};
 
-/// The paths a user's stream is read under when the builder sets none: everything they
-/// publish.
+/// The path an Event stream is read under when the builder sets none: everything its User
+/// pubkey publishes.
 /// Set another with [`StreamConsumerBuilder::path`].
 pub const DEFAULT_STREAM_PATH: &str = "/pub/";
 
@@ -49,14 +49,14 @@ impl StreamConsumerBuilder<Missing> {
 }
 
 impl<H> StreamConsumerBuilder<H> {
-    /// The most events a run requests per user ([`DEFAULT_EVENTS_LIMIT`] by default). Zero is
-    /// rejected by [`Self::build`].
+    /// The most Events a Run asks for per User pubkey ([`DEFAULT_EVENTS_LIMIT`] by default).
+    /// Zero is rejected by [`Self::build`].
     pub fn events_limit(mut self, limit: u16) -> Self {
         self.events_limit = limit;
         self
     }
 
-    /// Reads only the events whose resource path starts with `path`
+    /// Reads only the Events whose Resource path starts with `path`
     /// ([`DEFAULT_STREAM_PATH`] by default). A path that does not start with `/` is
     /// rejected by [`Self::build`].
     pub fn path(mut self, path: impl Into<String>) -> Self {
@@ -64,8 +64,8 @@ impl<H> StreamConsumerBuilder<H> {
         self
     }
 
-    /// The handler each event goes to: an [`EventHandler`] of [`StreamEvent`]s, whose
-    /// error a failed run gives back as [`WatcherError::Handler`].
+    /// The Handler each Event goes to: an [`EventHandler`] of [`StreamEvent`]s, whose
+    /// error a failed Run gives back as [`WatcherError::Handler`].
     pub fn handler<NewH>(self, handler: NewH) -> StreamConsumerBuilder<NewH> {
         StreamConsumerBuilder {
             hs_pubkey: self.hs_pubkey,
@@ -79,9 +79,9 @@ impl<H> StreamConsumerBuilder<H> {
 }
 
 impl<H> StreamConsumerBuilder<H> {
-    /// Builds the watcher, which stops reading once `shutdown_rx` turns `true`. Fails on an
-    /// events limit of zero, an empty or duplicated user list, or a path that does not start
-    /// with `/`.
+    /// Builds the Stream consumer, which stops reading once `shutdown_rx` turns `true`. Fails
+    /// on an events limit of zero, an empty list of User pubkeys or one listed twice, or a
+    /// path that does not start with `/`.
     /// The error is a [`ConfigError`].
     pub fn build<Err>(self, shutdown_rx: Receiver<bool>) -> Result<StreamConsumer<Err>, ConfigError>
     where
@@ -120,24 +120,25 @@ struct Config<Err> {
     shutdown_rx: Receiver<bool>,
 }
 
-/// How a run of a [`StreamConsumer`] ended.
+/// How a Run of a [`StreamConsumer`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamOutcome {
-    /// The cursor to start each user's next run from, in the order the users were given,
-    /// safe to persist: every event of the user before it was handled.
+    /// One Checkpoint per User pubkey, in the order they were given: the Cursor with every
+    /// Event of that User pubkey before it handled. They are the ones an Indexer may store.
     /// Pass them to the next [`Watcher::stream`](super::Watcher::stream).
     pub checkpoints: Vec<(PublicKey, EventCursor)>,
-    /// The events handed to the handler.
-    /// Each went to the handler's [`EventHandler::handle`].
+    /// The Events handed to the Handler.
+    /// Each went to the Handler's [`EventHandler::handle`].
     pub handled_events: usize,
-    /// Whether the run read every user. A run stopped by the shutdown signal given to
-    /// [`StreamConsumerBuilder::build`] returns `false`; each user's cursor is still safe
-    /// to persist.
+    /// Whether the Run read every User pubkey's Event stream. A Run stopped by the shutdown
+    /// signal given to [`StreamConsumerBuilder::build`] returns `false`; each Checkpoint may
+    /// still be stored.
     pub completed: bool,
 }
 
-/// Reads a known set of users' `/events-stream`s on one homeserver, one user after the other,
-/// one batch each per [`Self::run`]. `Err` is its handler's error.
+/// A Stream consumer: a Consumer that reads the Event streams of chosen User pubkeys on one
+/// Homeserver, one after the other, one Batch each per [`Self::run`]. `Err` is its Handler's
+/// error.
 pub struct StreamConsumer<Err> {
     config: Arc<Config<Err>>,
 }
@@ -146,13 +147,13 @@ impl<Err> StreamConsumer<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
-    /// Reads each user's events after their cursor, hands them to the handler in order, and
-    /// returns each user's cursor to start the next run from.
+    /// Makes one Run: reads each User pubkey's Events after its Cursor, hands them to the
+    /// Handler in order, and returns each one's Checkpoint to start the next Run from.
     ///
-    /// A user's stream is checked before any of its events is handled: no more events than
-    /// requested, every event the user's own, and cursors that only move forward
-    /// ([`ProtocolViolation`] otherwise). A stream that breaks this, or a handler error, fails
-    /// the run.
+    /// An Event stream's Batch is checked before any of its Events is handled: no more Events
+    /// than asked for, every Event its own User pubkey's, and Cursors that only move forward
+    /// ([`ProtocolViolation`] otherwise). A Batch that breaks this, or a Handler error, fails
+    /// the Run.
     pub async fn run(&self) -> Result<StreamOutcome, WatcherError<Err>> {
         let run = Arc::new(StreamRun {
             config: self.config.clone(),
@@ -165,7 +166,7 @@ where
     }
 }
 
-/// One run of a [`StreamConsumer`], as a processor, so each event is handled in its
+/// One Run of a [`StreamConsumer`], as a [`Run`], so each Event is handled in its
 /// [`Run::event_span`].
 struct StreamRun<Err> {
     config: Arc<Config<Err>>,
@@ -283,9 +284,9 @@ fn validate_users(users: &[(PublicKey, EventCursor)]) -> Result<(), ConfigError>
     Ok(())
 }
 
-/// Checks `user`'s stream, read after `requested` with `limit`: no more events than
-/// requested, every event owned by `user`, so that one user's stream cannot inject another's
-/// events, and cursors that only move forward.
+/// Checks the Batch of `user_pubkey`'s Event stream, read after `requested` with `limit`: no
+/// more Events than asked for, every Event `user_pubkey`'s own, so that one user's Event
+/// stream cannot inject another's Events, and Cursors that only move forward.
 fn validate_events(
     user_pubkey: &PublicKey,
     requested: EventCursor,
@@ -337,14 +338,14 @@ mod tests {
         Keypair::random().public_key()
     }
 
-    /// An event of `user_pubkey`'s at `cursor`.
+    /// An Event of `user_pubkey`'s at `cursor`.
     fn event(user_pubkey: &PublicKey, cursor: u64) -> StreamEvent {
         let resource =
             PubkyResource::new(user_pubkey.clone(), "/pub/app/item").expect("valid path");
         StreamEvent::new(EventType::Put, &resource, cursor)
     }
 
-    /// Answers each user with their scripted events, recording the requests.
+    /// Answers each User pubkey with its scripted Events, recording the requests.
     #[derive(Default)]
     struct Streams {
         events: HashMap<PublicKey, Vec<StreamEvent>>,
@@ -383,7 +384,7 @@ mod tests {
         }
     }
 
-    /// Records the cursors of the events it gets, and shuts the watcher down after
+    /// Records the Cursors of the Events it gets, and shuts the Consumer down after
     /// `shutdown_after` of them.
     #[derive(Default)]
     struct Recorder {
@@ -409,7 +410,7 @@ mod tests {
         Box::leak(Box::default())
     }
 
-    /// Each user's events are handled, and each user moves to their own last cursor.
+    /// Each User pubkey's Events are handled, and each moves to its own Checkpoint.
     #[tokio::test]
     async fn each_user_moves_to_their_own_checkpoint() {
         let (alice, bob, carol) = (key(), key(), key());
@@ -446,7 +447,8 @@ mod tests {
         assert_eq!(*handler.cursors.lock().unwrap(), [11, 12, 31]);
     }
 
-    /// Each request asks for the user's cursor, the limit and the path: `/pub/` unless set.
+    /// Each request asks for the User pubkey's Cursor, the limit and the path: `/pub/` unless
+    /// set.
     #[tokio::test]
     async fn requests_carry_the_cursor_limit_and_path() {
         let alice = key();
@@ -470,8 +472,8 @@ mod tests {
         }
     }
 
-    /// A stream with more events than requested, an event of another user, or a cursor that
-    /// does not move forward fails the run before any of its events is handled.
+    /// A Batch with more Events than asked for, an Event of another User pubkey, or a Cursor
+    /// that does not move forward fails the Run before any of its Events is handled.
     #[tokio::test]
     async fn a_stream_that_breaks_the_protocol_fails_before_any_event() {
         let (alice, mallory) = (key(), key());
@@ -523,8 +525,8 @@ mod tests {
         }
     }
 
-    /// A run stopped by shutdown is not an error: the user in progress keeps the cursor of
-    /// the last event handled, and the users after them keep theirs.
+    /// A Run stopped by shutdown is not an error: the Checkpoint of the User pubkey in
+    /// progress is the Cursor of the last Event handled, and the ones after it keep theirs.
     #[tokio::test]
     async fn a_run_stopped_by_shutdown_keeps_its_checkpoints() {
         let (alice, bob) = (key(), key());
@@ -558,7 +560,7 @@ mod tests {
         );
     }
 
-    /// Fails every stream request, as a homeserver that is down.
+    /// Fails every Read of an Event stream, as a Homeserver that is down.
     struct Down;
 
     #[async_trait::async_trait]
@@ -579,7 +581,7 @@ mod tests {
         }
     }
 
-    /// The handler's own error: the cursor of the event it failed on.
+    /// The Handler's own error: the Cursor of the Event it failed on.
     #[derive(Debug, PartialEq, Eq)]
     struct FailedAt(u64);
 
@@ -589,7 +591,7 @@ mod tests {
         }
     }
 
-    /// Records the cursors of the events it gets, and fails on the event at `fail_at`.
+    /// Records the Cursors of the Events it gets, and fails on the Event at `fail_at`.
     struct FailingAt {
         fail_at: u64,
         cursors: Mutex<Vec<u64>>,
@@ -606,7 +608,7 @@ mod tests {
         }
     }
 
-    /// A handler error fails the run with the handler's own error, typed; the events before
+    /// A Handler error fails the Run with the Handler's own error, typed; the Events before
     /// it were handled.
     #[tokio::test]
     async fn a_handler_failure_fails_the_run_with_its_own_error() {
@@ -636,7 +638,8 @@ mod tests {
         assert_eq!(*handler.cursors.lock().unwrap(), [11]);
     }
 
-    /// A failed stream request fails the run as the homeserver's error, before any event.
+    /// A failed Read of an Event stream fails the Run as the Homeserver's error, before any
+    /// Event.
     #[tokio::test]
     async fn a_failed_stream_request_fails_the_run() {
         let handler = recorder();
@@ -657,8 +660,8 @@ mod tests {
         assert!(handler.cursors.lock().unwrap().is_empty());
     }
 
-    /// An events limit of zero, no users, a user listed twice, or a path that does not start
-    /// with `/` is rejected at build time.
+    /// An events limit of zero, no User pubkeys, one listed twice, or a path that does not
+    /// start with `/` is rejected at build time.
     #[test]
     fn a_misconfigured_consumer_is_rejected_at_build_time() {
         let alice = key();

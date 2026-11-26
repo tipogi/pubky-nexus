@@ -19,7 +19,7 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, info, warn};
 
 /// Metrics for the external-HS monitoring loop, recorded once per run in
-/// [`KeyBasedEventProcessorRunner::post_run`].
+/// [`KeyBasedEventProcessorRunner::after_cycle`].
 ///
 /// Instruments come from the global meter, so they are no-ops until an
 /// `SdkMeterProvider` is installed.
@@ -80,7 +80,7 @@ pub struct KeyBasedEventProcessorRunner {
     /// Primary homeserver ID, excluded from the external targets list
     pub primary_homeserver: PubkyId,
 
-    /// HS PKs that must never be indexed. Excluded from `pre_run` and re-checked
+    /// HS PKs that must never be indexed. Excluded from `homeservers` and re-checked
     /// by each [`KeyBasedEventProcessor`] this runner builds.
     pub hs_blacklist: HsBlacklist,
 

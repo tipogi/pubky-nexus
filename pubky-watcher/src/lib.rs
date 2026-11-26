@@ -1,24 +1,32 @@
 //! # Pubky Watcher
 //!
-//! Reads events from Pubky homeservers, for applications that index them: search engines,
-//! moderation tools, archives, application-specific indexes.
+//! `pubky-watcher` consumes Homeservers' Events for an Indexer. It brings the Client that reads
+//! them, the Consumers that hand each Event to the Indexer's Handler, and the Cycle that goes
+//! round every Homeserver the Indexer follows. The Indexer brings the meaning: what an Event
+//! does, where Cursors are kept, and which Homeservers to follow.
 //!
-//! The crate owns the generic mechanics: the homeserver client and its capability traits,
-//! framing a homeserver's `/events/` body, parsing its lines, running a processor and waiting
-//! for it, running processors across many homeservers, and the hooks through which an
-//! application plugs in its own handling and retry policy. The application owns what an event
-//! means, where it is stored, where cursors are kept, and its retry and backoff policy.
+//! The parts:
 //!
-//! - [`WatcherClient`] makes every homeserver call, split into narrow capability traits:
-//!   [`FeedReader`], [`StreamReader`], [`ResourceReader`] and
-//!   [`PkdnsLookup`]. A failure is an [`HsError`].
-//! - [`Run`] is one run over one homeserver, generic over the application's
-//!   event and error types; [`Cycle`] runs one per homeserver.
-//! - Retry is opt-in through [`RetryableError`], [`RetryQueue`] and
-//!   [`dispatch_retryable_error`].
+//! - **The Client and its four Reads.** [`WatcherClient`] is the crate's read-only access to
+//!   the Pubky network. Each Read is a trait of its own: [`FeedReader`] reads a Homeserver's
+//!   Events feed (`/events/`), [`StreamReader`] a User pubkey's Event stream
+//!   (`/events-stream`), [`ResourceReader`] the Resource an Event names, and [`PkdnsLookup`]
+//!   the Homeserver record a User pubkey publishes. A failed Read of a Homeserver is an
+//!   [`HsError`], a failed PKDNS lookup a [`PkdnsLookupError`].
+//! - **The two Consumers.** [`Watcher::feed`] builds a [`FeedConsumer`], which reads a
+//!   Homeserver's Events feed, and [`Watcher::stream`] a [`StreamConsumer`], which reads the
+//!   Event streams of chosen User pubkeys. Each is given an [`EventHandler`]; each call makes
+//!   one Run and returns a Checkpoint, the Cursor an Indexer may store.
+//! - **[`Run`].** One pass over one Homeserver, for an Indexer that writes its own: its own
+//!   Cursor store, its own Event type ([`FromEventLine`]), a Budget.
+//! - **[`Cycle`].** One round over the Homeservers an Indexer follows, one Turn each, reported
+//!   in [`CycleStats`].
+//! - **The Retry hooks.** Opt-in, through [`RetryableError`], [`RetryQueue`] and
+//!   [`dispatch_retryable_error`]: the crate sorts a Handler's failure into a Missing
+//!   dependency or a Transient failure, and the Indexer owns the queue and its limits.
 //!
-//! Homeservers and users are [`pubky::PublicKey`]s in the client. The crate brings no
-//! database, metrics or application config with it.
+//! The Client takes a Homeserver pubkey and a User pubkey as a [`pubky::PublicKey`]. The crate
+//! brings no database, no metrics and no configuration with it.
 
 #![warn(missing_docs)]
 

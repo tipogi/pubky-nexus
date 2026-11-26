@@ -111,7 +111,7 @@ async fn test_multi_hs_event_processing_with_homeserver_limit_one() -> Result<()
     assert_ne!(
         hs_list.first().unwrap(),
         &runner_one.primary_homeserver(),
-        "Primary homeserver should be excluded from pre_run"
+        "Primary homeserver should be excluded from homeservers()"
     );
 
     let stats_one = runner_one.run().await.unwrap().0;

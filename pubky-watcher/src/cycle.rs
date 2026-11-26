@@ -1,9 +1,8 @@
-//! Running processors across many homeservers.
+//! The [`Cycle`]: one round over the Homeservers an Indexer follows.
 //!
-//! Use a [`Cycle`] when one application watches many homeservers: each
-//! cycle it lists them, skips those in backoff, builds and runs one processor per
-//! homeserver, one after the other, and reports how each turn ended in
-//! [`CycleStats`].
+//! Use a [`Cycle`] when one Indexer follows many Homeservers: each Cycle lists them and gives
+//! each its Turn, one after the other. A Homeserver in backoff is skipped; for any other, the
+//! Cycle builds its [`Run`] and runs it. How each Turn ended is reported in [`CycleStats`].
 
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
@@ -14,46 +13,46 @@ use tracing::{debug, error, info};
 
 use super::run::{Run, RunError};
 
-/// How one homeserver's turn in a runner cycle ended.
+/// How one Homeserver's Turn in a Cycle ended: how its Run went, or why it had none.
 /// Recorded in [`Turn::status`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnStatus {
-    /// [`Cycle::build_run`] failed, so no processor ran.
+    /// [`Cycle::build_run`] failed, so the Homeserver had no Run.
     FailedToBuild,
-    /// The processor's run completed ([`turn_status_from_run`] of `Ok`).
+    /// The Run completed ([`turn_status_from_run`] of `Ok`).
     Ok,
-    /// The processor's run failed ([`RunError::Internal`]).
+    /// The Run failed ([`RunError::Internal`]).
     Error,
-    /// The processor's run panicked ([`RunError::Panicked`]).
+    /// The Run panicked ([`RunError::Panicked`]).
     Panic,
-    /// The processor's run stopped at its budget ([`RunError::BudgetSpent`]).
+    /// The Run reached its Budget ([`RunError::BudgetSpent`]).
     BudgetSpent,
-    /// [`Cycle::should_skip`] skipped the homeserver.
+    /// [`Cycle::should_skip`] skipped the Homeserver, so it had no Run.
     Skipped,
 }
 
-/// One homeserver's turn in a runner cycle.
+/// A Turn: one Homeserver's place in a Cycle, its Run or the reason it had none.
 /// Collected in [`CycleStats`].
 pub struct Turn {
-    /// The homeserver's ID, as [`Cycle::homeservers`] listed it.
+    /// The Homeserver pubkey, as z-base-32 text, as [`Cycle::homeservers`] listed it.
     pub hs_pubkey: String,
-    /// How long building and running its processor took; zero when it was skipped.
+    /// How long building and running its Run took; zero when it was skipped.
     /// Measured by [`Cycle::run`].
     pub duration: Duration,
-    /// How the turn ended, as a [`TurnStatus`].
+    /// How the Turn ended, as a [`TurnStatus`].
     pub status: TurnStatus,
 }
 
-/// Every homeserver's turn in a runner cycle, in order.
+/// Every Homeserver's Turn in a Cycle, in order.
 /// Handed to [`Cycle::after_cycle`].
 #[derive(Default)]
 pub struct CycleStats {
-    /// One [`Turn`] per homeserver, in the order they ran.
+    /// One [`Turn`] per Homeserver, in the order they were taken.
     pub turns: Vec<Turn>,
 }
 
 impl CycleStats {
-    /// Records the turn of `hs_pubkey`, which took `duration` and ended with `status`.
+    /// Records the Turn of `hs_pubkey`, which took `duration` and ended with `status`.
     /// Appends a [`Turn`].
     pub fn add_turn(&mut self, hs_pubkey: String, duration: Duration, status: TurnStatus) {
         let turn = Turn {
@@ -71,45 +70,45 @@ impl CycleStats {
             .count()
     }
 
-    /// Number of homeservers whose run completed ([`TurnStatus::Ok`]).
+    /// Number of Homeservers whose Run completed ([`TurnStatus::Ok`]).
     pub fn count_ok(&self) -> usize {
         self.count(TurnStatus::Ok)
     }
 
-    /// Number of homeservers whose run failed with an error ([`TurnStatus::Error`]).
+    /// Number of Homeservers whose Run failed with an error ([`TurnStatus::Error`]).
     pub fn count_error(&self) -> usize {
         self.count(TurnStatus::Error)
     }
 
-    /// Number of homeservers whose run panicked ([`TurnStatus::Panic`]).
+    /// Number of Homeservers whose Run panicked ([`TurnStatus::Panic`]).
     pub fn count_panic(&self) -> usize {
         self.count(TurnStatus::Panic)
     }
 
-    /// Number of homeservers whose run stopped at its budget
+    /// Number of Homeservers whose Run reached its Budget
     /// ([`TurnStatus::BudgetSpent`]).
     pub fn count_budget_spent(&self) -> usize {
         self.count(TurnStatus::BudgetSpent)
     }
 
-    /// Number of homeservers whose processor could not be built
+    /// Number of Homeservers whose Run could not be built
     /// ([`TurnStatus::FailedToBuild`]).
     pub fn count_failed_to_build(&self) -> usize {
         self.count(TurnStatus::FailedToBuild)
     }
 
-    /// Number of homeservers skipped because they were in backoff
+    /// Number of Homeservers skipped, e.g. because they were in backoff
     /// ([`TurnStatus::Skipped`]).
     pub fn count_skipped(&self) -> usize {
         self.count(TurnStatus::Skipped)
     }
 }
 
-/// A cycle's [`CycleStats`] once [`Cycle::after_cycle`] has processed
-/// them. [`Cycle::run`] returns it.
+/// A Cycle's [`CycleStats`] once [`Cycle::after_cycle`] has been through them.
+/// [`Cycle::run`] returns it.
 pub struct CycleReport(pub CycleStats);
 
-/// The [`TurnStatus`] a processor run that ended with `result` is recorded with.
+/// The [`TurnStatus`] a Run that ended with `result` is recorded with.
 pub fn turn_status_from_run<Err>(result: Result<(), RunError<Err>>) -> TurnStatus {
     match result {
         Ok(_) => TurnStatus::Ok,
@@ -119,71 +118,71 @@ pub fn turn_status_from_run<Err>(result: Result<(), RunError<Err>>) -> TurnStatu
     }
 }
 
-/// The orchestrator that builds and runs an event processor per homeserver, one after the
-/// other, so that runs never overlap.
+/// A Cycle: one round over the Homeservers an Indexer follows, one Turn each, one after the
+/// other, so that Runs never overlap.
 ///
-/// Generic over the processors' event type `E` and error type `Err`. Which homeservers run,
-/// in what order, how many per cycle and which are skipped are hooks: [`Self::homeservers`],
-/// [`Self::run_limit`] and [`Self::should_skip`].
+/// Generic over the Runs' Event type `E` and error type `Err`. Which Homeservers get a Turn,
+/// in what order, how many Runs a Cycle makes and which Homeservers are skipped are hooks:
+/// [`Self::homeservers`], [`Self::run_limit`] and [`Self::should_skip`].
 ///
 /// # Implementation Notes
-/// - The `build_run` method should create and return a fully configured event processor ready for immediate use
-/// - Implementors should ensure that created processors are properly isolated and don't share mutable state unless explicitly intended
+/// - [`Self::build_run`] should return a fully configured [`Run`], ready to be run at once
+/// - Implementors should ensure that the Runs they build are isolated and share no mutable
+///   state unless that is intended
 #[async_trait::async_trait]
 pub trait Cycle<E, Err>: Send + Sync
 where
     E: Send + Sync + 'static,
     Err: Display + Debug + Send + Sync + 'static,
 {
-    /// Why this runner could not list its homeservers ([`Self::homeservers`]) or build a
-    /// processor ([`Self::build_run`]). These are the implementor's own lookups, so the
+    /// Why this Cycle could not list its Homeservers ([`Self::homeservers`]) or build a
+    /// Run ([`Self::build_run`]). These are the implementor's own lookups, so the
     /// implementor picks the type.
     type Error: Display + Debug + Send + Sync + 'static;
 
-    /// The shutdown signal: once it is `true`, [`Self::run`] stops before the next homeserver.
+    /// The shutdown signal: once it is `true`, [`Self::run`] stops before the next Turn.
     fn shutdown_rx(&self) -> Receiver<bool>;
 
-    /// Creates and returns a new event processor instance for the specified homeserver.
+    /// Builds the [`Run`] of one Homeserver's Turn.
     ///
     /// # Parameters
-    /// * `hs_pubkey` - The homeserver ID. Represents the homeserver this event processor will
-    ///   fetch and process events from.
+    /// * `hs_pubkey` - The Homeserver pubkey, as z-base-32 text: the Homeserver the Run reads
+    ///   and handles Events from.
     ///
     /// # Returns
-    /// A reference to the event processor instance, ready to be executed with its
-    /// [`Run::run`] method.
+    /// The Run, ready to be run with its [`Run::run`] method.
     ///
     /// # Errors
-    /// Returns an error if the event processor couldn't be built.
+    /// Returns an error if the Run couldn't be built.
     async fn build_run(&self, hs_pubkey: &str) -> Result<Arc<dyn Run<E, Err>>, Self::Error>;
 
-    /// Pre-processing step before the main run loop.
-    ///
-    /// Determines the list of target HS IDs to process in this run cycle, ordered by priority.
+    /// The Homeservers this Cycle goes round, as Homeserver pubkeys in z-base-32 text,
+    /// ordered by priority. Called once, at the start of [`Self::run`].
     ///
     /// The list is not truncated here: [`Self::run_limit`] is applied in [`Self::run`], after
-    /// the HS IDs in backoff are skipped.
+    /// the Homeservers [`Self::should_skip`] names are skipped.
     async fn homeservers(&self) -> Result<Vec<String>, Self::Error>;
 
-    /// Maximum number of HS IDs built and run per cycle. HS IDs skipped by
-    /// [`Self::should_skip`] don't count.
+    /// Maximum number of Homeservers whose Run is built and run per Cycle. Homeservers
+    /// skipped by [`Self::should_skip`] don't count.
     ///
-    /// No limit by default. Runners that cap the targets per run should overwrite this.
+    /// No limit by default. A Cycle that caps its Runs should overwrite this.
     fn run_limit(&self) -> usize {
         usize::MAX
     }
 
-    /// Post-processing of a cycle's [`CycleStats`], at the end of [`Self::run`].
+    /// What the Cycle does with its [`CycleStats`], at the end of [`Self::run`]: log them,
+    /// record metrics.
     ///
-    /// No-op default implementation. Callers that perform post-processing should overwrite this.
+    /// No-op default implementation. A Cycle that reports its Turns should overwrite this.
     async fn after_cycle(&self, stats: CycleStats) -> CycleReport {
         CycleReport(stats)
     }
 
-    /// Main run loop: builds and runs event processors for the relevant targets.
+    /// One Cycle: gives each Homeserver its Turn, building and running its Run.
     ///
     /// # Returns
-    /// Statistics about the event processor run results, summarized as [`CycleReport`].
+    /// How every Turn ended, as a [`CycleReport`].
     async fn run(&self) -> Result<CycleReport, Self::Error> {
         let hs_pubkeys = self.homeservers().await?;
         let run_limit = self.run_limit();
@@ -225,18 +224,18 @@ where
         Ok(report)
     }
 
-    /// Called before building a HS's processor, to check whether it should be skipped, e.g.
-    /// because it is in backoff. A skipped HS does not count against [`Self::run_limit`].
+    /// Whether the Homeserver `hs_pubkey` has no Run this Cycle, e.g. because it is in
+    /// backoff. Called before its Run is built. A skipped Homeserver does not count against
+    /// [`Self::run_limit`].
     ///
-    /// No-op default implementation. Runners that use backoff should overwrite as needed.
+    /// Skips none by default. A Cycle that uses backoff should overwrite as needed.
     async fn should_skip(&self, _hs_pubkey: &str) -> bool {
         false
     }
 
-    /// Called by [`Self::run`] after a HS is processed (build + run), with the
-    /// [`TurnStatus`] of its turn, to update the backoff that
-    /// [`Self::should_skip`] checks.
+    /// Called by [`Self::run`] after a Homeserver's Turn (build + run), with its
+    /// [`TurnStatus`], to update the backoff that [`Self::should_skip`] checks.
     ///
-    /// No-op default implementation. Runners that use backoff should overwrite as needed.
+    /// No-op default implementation. A Cycle that uses backoff should overwrite as needed.
     async fn record_turn(&self, _hs_pubkey: &str, _status: &TurnStatus) {}
 }

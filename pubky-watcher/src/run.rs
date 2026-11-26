@@ -1,9 +1,9 @@
-//! One run over one homeserver: [`Run`] reads a homeserver's events and hands
-//! each to the application, on its own task ([`run_on_own_task`]), with opt-in retry through
+//! The [`Run`]: one pass over one Homeserver, in which Events are read from a Cursor and each
+//! is handed to the Handler, on its own task ([`run_on_own_task`]), with opt-in Retry through
 //! [`dispatch_retryable_error`].
 //!
-//! Implement it when the [`Watcher`](crate::Watcher) builders are not enough: your own
-//! cursor store, your own event type, retries, or many homeservers under a
+//! Implement it when the Consumers ([`Watcher`](crate::Watcher)) are not enough: your own
+//! Cursor store, your own Event type, Retry, or many Homeservers under a
 //! [`Cycle`](crate::Cycle).
 
 use std::fmt::{Debug, Display};
@@ -13,39 +13,39 @@ use tracing::{debug, error, trace, warn, Instrument};
 
 use super::hooks::{EventLineOutcome, FromEventLine, RetryQueue, RetryableError};
 
-/// How long a processor run may take before it is logged as slow, unless the processor sets
-/// its own ([`Run::slow_run_threshold`]).
+/// How long a Run may take before it is logged as slow, unless it sets its own
+/// ([`Run::slow_run_threshold`]).
 // TODO(#1014): read it, and the run budget, from the config file
 pub const SLOW_RUN_THRESHOLD: Duration = Duration::from_secs(3_600);
 
-/// How a run of an event processor ended when it did not fail.
+/// How a Run ended when it did not fail.
 /// Returned by [`Run::run_internal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
-    /// The run ended without failing or spending its budget: it did the work it found, or
+    /// The Run ended without failing or reaching its Budget: it did the work it found, or
     /// stopped early for shutdown.
     /// [`Run::run`] then returns `Ok`.
     Completed,
-    /// The run stopped at its budget with work left, keeping the cursors it reached. Not an
-    /// event failure: nothing is retried.
+    /// The Run reached its Budget and ended with work left, keeping the Cursors it reached.
+    /// It has not failed: no Event failed, and nothing goes to a Retry.
     /// [`Run::run`] then returns [`RunError::BudgetSpent`].
     BudgetSpent,
 }
 
-/// Why an event processor run did not complete.
+/// Why a Run did not complete.
 /// Returned by [`Run::run`] and [`run_on_own_task`].
 #[derive(Debug)]
 pub enum RunError<Err> {
-    /// [`Run::run_internal`] failed with the processor's own error.
+    /// [`Run::run_internal`] failed with the Run's own error.
     Internal(Err),
-    /// The run's task panicked: see [`run_on_own_task`].
+    /// The Run's task panicked: see [`run_on_own_task`].
     Panicked,
-    /// The run stopped at its budget: see [`RunOutcome::BudgetSpent`].
+    /// The Run reached its Budget: see [`RunOutcome::BudgetSpent`].
     BudgetSpent,
 }
 
 impl<Err> RunError<Err> {
-    /// Whether the run panicked ([`RunError::Panicked`]).
+    /// Whether the Run panicked ([`RunError::Panicked`]).
     pub fn is_panic(&self) -> bool {
         matches!(self, RunError::Panicked)
     }
@@ -63,11 +63,12 @@ impl<Err: Display> Display for RunError<Err> {
     }
 }
 
-/// Classifies `error` with [`RetryableError`] and queues the event when it is worth retrying.
+/// Sorts `error`, a Handler's failure on `event`, with [`RetryableError`], and hands the
+/// Event to `queue` when it is worth a Retry.
 ///
-/// - An error that should not be retried now is returned, so the caller stops its batch.
-/// - One not worth retrying is dropped.
-/// - Otherwise the event is queued on `queue`, as a missing dependency or as a transient
+/// - An error that should not be retried now is returned, so the caller stops its Batch.
+/// - One not worth a Retry is dropped.
+/// - Otherwise the Event is queued on `queue`, as a Missing dependency or as a Transient
 ///   failure. Without a queue it is dropped.
 ///
 /// Opt-in: call it from an overridden [`Run::handle_error`]. The default
@@ -103,24 +104,25 @@ where
     }
 }
 
-/// An event processor: one run reads a homeserver's events and hands each to the
-/// application, and can be stopped gracefully through a shutdown signal the implementation
-/// watches.
+/// A Run: one pass over one Homeserver, in which Events are read from a Cursor and each is
+/// handed to the Handler. It can be stopped gracefully through a shutdown signal the
+/// implementation watches.
 ///
-/// Generic over the application's event type `E` and error type `Err`.
-/// [`Cycle`](crate::Cycle) runs one per homeserver.
+/// An implementation is one Run: a Consumer makes one per call, and a
+/// [`Cycle`](crate::Cycle) builds one per Turn and uses it once. Generic over the Indexer's
+/// Event type `E` and error type `Err`.
 #[async_trait::async_trait]
 pub trait Run<E, Err>: Send + Sync + 'static
 where
     E: Send + Sync + 'static,
     Err: Display + Debug + Send + Sync + 'static,
 {
-    /// A short service label (e.g. `HsEventProcessor`), named in the span and logs of
+    /// A short service label (e.g. `FeedConsumer`), named in the span and logs of
     /// [`Self::run`].
     fn instance_name(&self) -> &'static str;
 
-    /// The ID of the homeserver this processor reads events from, named in the span and logs
-    /// of [`Self::run`].
+    /// The Homeserver pubkey this Run reads Events from, as z-base-32 text, named in the span
+    /// and logs of [`Self::run`].
     fn hs_pubkey(&self) -> &str;
 
     /// Runs [`Self::run_internal`] on its own task, and waits for it to end: see
@@ -138,33 +140,33 @@ where
         .await
     }
 
-    /// Runs the event processor once; [`Self::run`] calls it on its own task.
+    /// The pass itself; [`Self::run`] calls it on its own task.
     ///
-    /// Returns how the run ended ([`RunOutcome`]), or the error it failed with.
+    /// Returns how the Run ended ([`RunOutcome`]), or the error it failed with.
     async fn run_internal(self: Arc<Self>) -> Result<RunOutcome, Err>;
 
-    /// How long a run of this event processor may take before it is logged as slow.
+    /// How long this Run may take before it is logged as slow.
     ///
     /// If not set, the [`SLOW_RUN_THRESHOLD`] is applied.
     fn slow_run_threshold(&self) -> Option<Duration> {
         None
     }
 
-    /// Hands `event` to the application's handler, from [`Self::handle_event`] once
+    /// Hands `event` to the Indexer's Handler, from [`Self::handle_event`] once
     /// [`Self::should_handle_event`] accepted it.
     async fn handle(&self, event: &E) -> Result<(), Err>;
 
-    /// Parses a single event line and dispatches to [`Self::handle_event`]. A line that does
-    /// not parse, or names a resource the application does not recognise, is logged and
-    /// skipped: event lines come from untrusted homeservers.
+    /// Parses one Event line and hands its Event to [`Self::handle_event`]. A line that does
+    /// not parse, or names a Resource the Indexer does not recognise, is logged and
+    /// skipped: Event lines come from untrusted Homeservers.
     async fn handle_event_line(&self, line: &str) -> Result<(), Err>
     where
         E: FromEventLine + Debug,
     {
         let outcome = match E::from_event_line(line) {
             Ok(outcome) => outcome,
-            // Invalid event lines come from untrusted homeservers; treat as bad peer data, not
-            // application errors.
+            // Invalid Event lines come from untrusted Homeservers; treat as bad peer data, not
+            // the Indexer's errors.
             Err(e) => {
                 warn!(error = %e, "Invalid event line");
                 return Ok(());
@@ -184,28 +186,28 @@ where
         Ok(())
     }
 
-    /// Handles an error of processing `event`.
+    /// Handles the failure of handling `event`.
     ///
-    /// Called in the event processing loop. Returns:
-    /// - `Ok(())` to continue processing the batch
-    /// - `Err(e)` to stop processing and return the error
+    /// Called by [`Self::handle_event`]. Returns:
+    /// - `Ok(())` to go on with the Batch
+    /// - `Err(e)` to stop the Run and return the error
     ///
-    /// The default fails fast. A processor that queues failures overrides it and calls
-    /// [`dispatch_retryable_error`].
+    /// The default fails fast. A Run that hands failed Events back for a Retry overrides it
+    /// and calls [`dispatch_retryable_error`].
     async fn handle_error(&self, _event: &E, error: Err) -> Result<(), Err> {
         Err(error)
     }
 
-    /// Decides whether `event` should be processed by this processor.
+    /// Decides whether this Run hands `event` to the Handler.
     ///
-    /// Called at the start of [`Self::handle_event`], before the event is handed to
-    /// [`Self::handle`]. The default always processes the event.
+    /// Called at the start of [`Self::handle_event`], before the Event is handed to
+    /// [`Self::handle`]. The default always handles the Event.
     async fn should_handle_event(&self, _event: &E) -> Result<bool, Err> {
         Ok(true)
     }
 
     /// The span [`Self::handle_event`] runs in. It must declare the empty fields
-    /// `otel.status_code` and `otel.status_message`, which record the event's outcome.
+    /// `otel.status_code` and `otel.status_message`, which record the Event's outcome.
     fn event_span(&self, _event: &E) -> tracing::Span {
         tracing::info_span!(
             "event.process",
@@ -214,7 +216,7 @@ where
         )
     }
 
-    /// Processes an event and delegates to [`Self::handle_error`] on failure.
+    /// Handles `event` in its span, and hands a failure to [`Self::handle_error`].
     async fn handle_event(&self, event: &E) -> Result<(), Err> {
         let span = self.event_span(event);
         async {
@@ -250,17 +252,17 @@ where
     }
 }
 
-/// Runs `run_internal`, a run of the processor `instance_name`, on its own task, and waits for
-/// it to end.
+/// Runs `run_internal`, the Run labelled `instance_name`, on its own task, and waits for it
+/// to end.
 ///
-/// A run that takes longer than `slow_run_threshold` is logged as slow, again after each
-/// further threshold, and still waited for: it is not stopped, so the next run cannot start
-/// next to it. A run that never returns therefore holds up its loop for good.
+/// A Run that takes longer than `slow_run_threshold` is logged as slow, again after each
+/// further threshold, and still waited for: it is not stopped, so the next Run cannot start
+/// next to it. A Run that never returns therefore holds up its caller for good.
 ///
-/// `hs_pubkey` is the homeserver the run is bound to, named in its span. A run that is not
-/// bound to one homeserver names none.
+/// `hs_pubkey` is the Homeserver the Run is bound to, named in its span. A Run that is not
+/// bound to one Homeserver names none.
 /// It fails with [`RunError::Panicked`] or [`RunError::Internal`], or with
-/// [`RunError::BudgetSpent`] when the run returns [`RunOutcome::BudgetSpent`].
+/// [`RunError::BudgetSpent`] when the Run returns [`RunOutcome::BudgetSpent`].
 pub async fn run_on_own_task<Err>(
     instance_name: &'static str,
     hs_pubkey: Option<&str>,
@@ -278,11 +280,11 @@ where
     }
 }
 
-/// The task of a run ended without returning: it panicked.
+/// The task of a Run ended without returning: it panicked.
 pub(crate) struct Panicked;
 
 /// Runs `run` on its own task as [`run_on_own_task`] does, and returns what it returned, or
-/// [`Panicked`]. A run that fails is logged.
+/// [`Panicked`]. A Run that fails is logged.
 pub(crate) async fn wait_on_own_task<T, Err>(
     instance_name: &'static str,
     hs_pubkey: Option<&str>,
@@ -320,7 +322,7 @@ where
     //   - JoinHandle::abort() is called on the handle
     //   - the Tokio runtime is shut down
     // In our model, we don't trigger such interruptions. Instead we use the shutdown signal
-    // to gracefully stop the event processing loop. Therefore we consider all JoinErrors as panics.
+    // to gracefully stop a Run. Therefore we consider all JoinErrors as panics.
     let result = join_result
         .inspect_err(|je| {
             error!(
@@ -350,8 +352,8 @@ mod tests {
 
     use super::{run_on_own_task, RunOutcome};
 
-    /// The warning is the only sign of a run that never returns, so it repeats after every
-    /// threshold, with how long the run has been going, and the run is still waited for.
+    /// The warning is the only sign of a Run that never returns, so it repeats after every
+    /// threshold, with how long the Run has been going, and the Run is still waited for.
     #[tokio::test(start_paused = true)]
     #[tracing_test::traced_test]
     async fn a_slow_run_is_logged_at_every_threshold_and_still_waited_for() {
