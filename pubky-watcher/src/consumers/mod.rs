@@ -1,8 +1,8 @@
 //! Watchers of one homeserver, for an application that needs no more than a handler and a
 //! place to keep cursors.
 //!
-//! [`Watcher::homeserver`] reads a homeserver's `/events/` feed, which covers every user it
-//! hosts under one cursor. [`Watcher::key_stream`] reads a known set of users'
+//! [`Watcher::feed`] reads a homeserver's `/events/` feed, which covers every user it
+//! hosts under one cursor. [`Watcher::stream`] reads a known set of users'
 //! `/events-stream`s on one homeserver, with one cursor each. Each run returns the cursors
 //! that are safe to persist; where they are kept is the application's choice.
 
@@ -12,8 +12,8 @@
     reason = "the errors carry the keys involved (a `PublicKey` is about 200 bytes); a run fails at most once"
 )]
 
-mod homeserver;
-mod key_stream;
+mod feed_consumer;
+mod stream_consumer;
 
 use std::fmt::{Debug, Display};
 use std::future::Future;
@@ -24,38 +24,38 @@ use thiserror::Error;
 use crate::run::{wait_on_own_task, Panicked, SLOW_RUN_THRESHOLD};
 use crate::{FeedReader, HsError, StreamReader};
 
-pub use homeserver::{HomeserverWatcher, HomeserverWatcherBuilder};
-pub use key_stream::{
-    KeyStreamOutcome, KeyStreamWatcher, KeyStreamWatcherBuilder, DEFAULT_KEY_STREAM_PATH,
+pub use feed_consumer::{FeedConsumer, FeedConsumerBuilder};
+pub use stream_consumer::{
+    StreamConsumer, StreamConsumerBuilder, StreamOutcome, DEFAULT_STREAM_PATH,
 };
 
 /// The events a run requests when the builder sets no limit.
-/// Set another with [`HomeserverWatcherBuilder::events_limit`] or
-/// [`KeyStreamWatcherBuilder::events_limit`].
+/// Set another with [`FeedConsumerBuilder::events_limit`] or
+/// [`StreamConsumerBuilder::events_limit`].
 pub const DEFAULT_EVENTS_LIMIT: u16 = 100;
 
-/// Why a builder refused to build its watcher: see [`HomeserverWatcherBuilder::build`] and
-/// [`KeyStreamWatcherBuilder::build`].
+/// Why a builder refused to build its watcher: see [`FeedConsumerBuilder::build`] and
+/// [`StreamConsumerBuilder::build`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ConfigError {
-    /// The events limit ([`HomeserverWatcherBuilder::events_limit`],
-    /// [`KeyStreamWatcherBuilder::events_limit`]) is zero, so a run could never read an event.
+    /// The events limit ([`FeedConsumerBuilder::events_limit`],
+    /// [`StreamConsumerBuilder::events_limit`]) is zero, so a run could never read an event.
     #[error("the events limit must be greater than zero")]
     ZeroEventsLimit,
-    /// [`Watcher::key_stream`] was given no users to read.
+    /// [`Watcher::stream`] was given no users to read.
     #[error("a key stream needs at least one user")]
     NoUsers,
-    /// [`Watcher::key_stream`] was given `user` more than once, each with its own cursor.
+    /// [`Watcher::stream`] was given `user_pubkey` more than once, each with its own cursor.
     #[error("a key stream cannot list a user twice")]
     DuplicateUser {
         /// The user listed twice.
-        user: PublicKey,
+        user_pubkey: PublicKey,
     },
-    /// The key stream's path ([`KeyStreamWatcherBuilder::path`]) does not start with `/`.
+    /// The key stream's path ([`StreamConsumerBuilder::path`]) does not start with `/`.
     #[error("the event-stream path must start with '/'")]
     InvalidPath {
-        /// The path given to [`KeyStreamWatcherBuilder::path`].
+        /// The path given to [`StreamConsumerBuilder::path`].
         path: String,
     },
 }
@@ -65,13 +65,13 @@ pub enum ConfigError {
 /// A failed run carries it as [`WatcherError::Protocol`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum ProtocolError {
+pub enum ProtocolViolation {
     /// A `/events/` batch had events but no `cursor:` line.
-    /// Checked by [`HomeserverWatcher::run`].
+    /// Checked by [`FeedConsumer::run`].
     #[error("the homeserver sent events without a cursor line")]
     MissingCursor,
     /// A `/events/` batch's cursor is not a number.
-    /// Checked by [`HomeserverWatcher::run`].
+    /// Checked by [`FeedConsumer::run`].
     #[error("the homeserver sent a cursor that is no number: {raw:?}")]
     MalformedCursor {
         /// The cursor as the homeserver sent it.
@@ -80,22 +80,22 @@ pub enum ProtocolError {
     },
     /// Events came with a cursor that does not move past the one they had to: the one the
     /// run asked from, or on a key stream, the previous event's.
-    /// Checked by [`HomeserverWatcher::run`] and [`KeyStreamWatcher::run`].
-    #[error("{}", cursor_not_advanced(.user.as_ref(), *.requested, *.got))]
+    /// Checked by [`FeedConsumer::run`] and [`StreamConsumer::run`].
+    #[error("{}", cursor_not_advanced(.user_pubkey.as_ref(), *.requested, *.got))]
     CursorNotAdvanced {
-        /// The user whose stream it was, on a [`KeyStreamWatcher`]; `None` on a
-        /// [`HomeserverWatcher`].
-        user: Option<PublicKey>,
+        /// The user whose stream it was, on a [`StreamConsumer`]; `None` on a
+        /// [`FeedConsumer`].
+        user_pubkey: Option<PublicKey>,
         /// The cursor the events had to move past.
-        /// On a [`KeyStreamWatcher`], the previous event's cursor after the first event.
+        /// On a [`StreamConsumer`], the previous event's cursor after the first event.
         requested: u64,
         /// The cursor the homeserver sent.
-        /// The batch's cursor on a [`HomeserverWatcher`], the event's on a [`KeyStreamWatcher`].
+        /// The batch's cursor on a [`FeedConsumer`], the event's on a [`StreamConsumer`].
         got: u64,
     },
     /// A `/events/` batch had no events but moved the cursor, which would skip whatever lies
     /// between.
-    /// Checked by [`HomeserverWatcher::run`].
+    /// Checked by [`FeedConsumer::run`].
     #[error("the homeserver sent no events but moved the cursor from {requested} to {got}")]
     CursorMovedWithoutEvents {
         /// The cursor the run asked from.
@@ -105,42 +105,49 @@ pub enum ProtocolError {
         got: u64,
     },
     /// A user's stream held more events than the run asked for.
-    /// Checked by [`KeyStreamWatcher::run`].
-    #[error("the stream of {} returned {got} events, more than the {limit} requested", .user.z32())]
+    /// Checked by [`StreamConsumer::run`].
+    #[error(
+        "the stream of {} returned {got} events, more than the {limit} requested",
+        .user_pubkey.z32()
+    )]
     TooManyEvents {
         /// The user whose stream it was.
-        user: PublicKey,
+        user_pubkey: PublicKey,
         /// The events the stream held.
         got: usize,
         /// The events the run asked for.
-        /// Set by [`KeyStreamWatcherBuilder::events_limit`].
+        /// Set by [`StreamConsumerBuilder::events_limit`].
         limit: u16,
     },
     /// A user's stream held an event of another user, which would let one user's stream
     /// inject another's events.
-    /// Checked by [`KeyStreamWatcher::run`].
-    #[error("the stream of {} returned an event of {}", .user.z32(), .owner.z32())]
+    /// Checked by [`StreamConsumer::run`].
+    #[error(
+        "the stream of {} returned an event of {}",
+        .user_pubkey.z32(),
+        .event_user_pubkey.z32()
+    )]
     ForeignEvent {
         /// The user whose stream it was.
-        user: PublicKey,
+        user_pubkey: PublicKey,
         /// The owner of the event ([`StreamEvent::user_pubkey`](crate::StreamEvent::user_pubkey)).
-        owner: PublicKey,
+        event_user_pubkey: PublicKey,
     },
 }
 
-fn cursor_not_advanced(user: Option<&PublicKey>, requested: u64, got: u64) -> String {
-    match user {
+fn cursor_not_advanced(user_pubkey: Option<&PublicKey>, requested: u64, got: u64) -> String {
+    match user_pubkey {
         None => format!(
             "the homeserver sent events with cursor {got}, which does not move past {requested}"
         ),
-        Some(user) => format!(
+        Some(user_pubkey) => format!(
             "the stream of {} returned cursor {got}, which does not move past {requested}",
-            user.z32()
+            user_pubkey.z32()
         ),
     }
 }
 
-/// Why a run of a [`HomeserverWatcher`] or a [`KeyStreamWatcher`] failed. `Err` is the
+/// Why a run of a [`FeedConsumer`] or a [`StreamConsumer`] failed. `Err` is the
 /// handler's own error, given back as it was returned.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -148,9 +155,9 @@ pub enum WatcherError<Err> {
     /// A homeserver call failed, with an [`HsError`].
     #[error(transparent)]
     Homeserver(#[from] HsError),
-    /// The homeserver's answer breaks the events protocol, as a [`ProtocolError`] says.
+    /// The homeserver's answer breaks the events protocol, as a [`ProtocolViolation`] says.
     #[error(transparent)]
-    Protocol(#[from] ProtocolError),
+    Protocol(#[from] ProtocolViolation),
     /// The handler failed on an event; the events before it were handled.
     /// `Err` is what the [`EventHandler`](crate::EventHandler) returned.
     ///
@@ -167,94 +174,94 @@ pub enum WatcherError<Err> {
 }
 
 /// A builder whose handler is not set yet.
-/// [`HomeserverWatcherBuilder::handler`] and [`KeyStreamWatcherBuilder::handler`]
+/// [`FeedConsumerBuilder::handler`] and [`StreamConsumerBuilder::handler`]
 /// replace it.
 #[derive(Debug, Default)]
 pub struct Missing;
 
-/// How a run of a [`HomeserverWatcher`] ended.
+/// How a run of a [`FeedConsumer`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WatchOutcome {
+pub struct FeedOutcome {
     /// The cursor to start the next run from, safe to persist: every event before it was
     /// handled.
-    /// Pass it to the next [`HomeserverWatcher::run`].
-    pub cursor: EventCursor,
+    /// Pass it to the next [`FeedConsumer::run`].
+    pub checkpoint: EventCursor,
     /// The events handed to the handler.
     /// Each went to the handler's [`EventHandler::handle`](crate::EventHandler::handle).
-    pub processed_events: usize,
+    pub handled_events: usize,
     /// Whether the run handled everything it read. A run stopped by the shutdown signal given
-    /// to [`HomeserverWatcherBuilder::build`] returns `false`, with the cursor it started from,
+    /// to [`FeedConsumerBuilder::build`] returns `false`, with the cursor it started from,
     /// so the next run reads the batch again.
     pub completed: bool,
 }
 
-impl WatchOutcome {
-    fn completed(cursor: EventCursor, processed_events: usize) -> Self {
+impl FeedOutcome {
+    fn completed(checkpoint: EventCursor, handled_events: usize) -> Self {
         Self {
-            cursor,
-            processed_events,
+            checkpoint,
+            handled_events,
             completed: true,
         }
     }
 
-    fn interrupted(cursor: EventCursor, processed_events: usize) -> Self {
+    fn interrupted(checkpoint: EventCursor, handled_events: usize) -> Self {
         Self {
-            cursor,
-            processed_events,
+            checkpoint,
+            handled_events,
             completed: false,
         }
     }
 }
 
-/// Picks what to watch on one homeserver: [`Watcher::homeserver`] reads its `/events/` feed,
-/// [`Watcher::key_stream`] a known set of users' streams.
+/// Picks what to watch on one homeserver: [`Watcher::feed`] reads its `/events/` feed,
+/// [`Watcher::stream`] a known set of users' streams.
 ///
 /// ```ignore
-/// let watcher = Watcher::homeserver(WatcherClient::mainnet()?, homeserver)
+/// let consumer = Watcher::feed(WatcherClient::mainnet()?, hs_pubkey)
 ///     .handler(MyHandler)
 ///     .build(shutdown_rx)?;
 /// let outcome = watcher.run(cursor).await?;
-/// // persist outcome.cursor
+/// // persist outcome.checkpoint
 /// ```
 pub struct Watcher;
 
 impl Watcher {
-    /// Watches `homeserver`'s `/events/` feed, which covers every user it hosts under one
+    /// Watches `hs_pubkey`'s `/events/` feed, which covers every user it hosts under one
     /// cursor. The handler gets each [`FeedEvent`](crate::FeedEvent).
-    pub fn homeserver<C>(client: C, homeserver: PublicKey) -> HomeserverWatcherBuilder<Missing>
+    pub fn feed<C>(client: C, hs_pubkey: PublicKey) -> FeedConsumerBuilder<Missing>
     where
         C: FeedReader,
     {
-        HomeserverWatcherBuilder::new(client, homeserver)
+        FeedConsumerBuilder::new(client, hs_pubkey)
     }
 
-    /// Watches the `/events-stream` of each of `users` on `homeserver`, from the cursor given
+    /// Watches the `/events-stream` of each of `users` on `hs_pubkey`, from the cursor given
     /// with it. The handler gets each [`StreamEvent`](crate::StreamEvent).
-    pub fn key_stream<C>(
+    pub fn stream<C>(
         client: C,
-        homeserver: PublicKey,
+        hs_pubkey: PublicKey,
         users: Vec<(PublicKey, EventCursor)>,
-    ) -> KeyStreamWatcherBuilder<Missing>
+    ) -> StreamConsumerBuilder<Missing>
     where
         C: StreamReader,
     {
-        KeyStreamWatcherBuilder::new(client, homeserver, users)
+        StreamConsumerBuilder::new(client, hs_pubkey, users)
     }
 }
 
-/// Runs `read`, a run of the watcher `instance_name` on `homeserver`, on its own task, as
+/// Runs `read`, a run of the watcher `instance_name` on `hs_pubkey`, on its own task, as
 /// [`run_on_own_task`](crate::run_on_own_task) does a processor's, and returns its outcome. A
 /// panic is [`WatcherError::Panicked`].
-async fn run_watcher<T, Err>(
+async fn run_consumer<T, Err>(
     instance_name: &'static str,
-    homeserver: &str,
+    hs_pubkey: &str,
     read: impl Future<Output = Result<T, WatcherError<Err>>> + Send + 'static,
 ) -> Result<T, WatcherError<Err>>
 where
     T: Send + 'static,
     Err: Display + Debug + Send + 'static,
 {
-    match wait_on_own_task(instance_name, Some(homeserver), SLOW_RUN_THRESHOLD, read).await {
+    match wait_on_own_task(instance_name, Some(hs_pubkey), SLOW_RUN_THRESHOLD, read).await {
         Ok(result) => result,
         Err(Panicked) => Err(WatcherError::Panicked),
     }

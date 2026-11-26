@@ -6,29 +6,29 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, warn};
 
 use super::{
-    run_watcher, validate_limit, ConfigError, Missing, ProtocolError, WatchOutcome, WatcherError,
-    DEFAULT_EVENTS_LIMIT,
+    run_consumer, validate_limit, ConfigError, FeedOutcome, Missing, ProtocolViolation,
+    WatcherError, DEFAULT_EVENTS_LIMIT,
 };
 use crate::feed::{FeedBatch, FeedEvent};
 use crate::hooks::{EventHandler, EventLineOutcome, FromEventLine};
 use crate::run::{Run, RunOutcome};
 use crate::FeedReader;
 
-/// Builds a [`HomeserverWatcher`]: see [`Watcher::homeserver`](super::Watcher::homeserver).
-pub struct HomeserverWatcherBuilder<H> {
-    homeserver: PublicKey,
+/// Builds a [`FeedConsumer`]: see [`Watcher::feed`](super::Watcher::feed).
+pub struct FeedConsumerBuilder<H> {
+    hs_pubkey: PublicKey,
     handler: H,
     events_limit: u16,
     reader: Arc<dyn FeedReader>,
 }
 
-impl HomeserverWatcherBuilder<Missing> {
-    pub(super) fn new<C>(client: C, homeserver: PublicKey) -> Self
+impl FeedConsumerBuilder<Missing> {
+    pub(super) fn new<C>(client: C, hs_pubkey: PublicKey) -> Self
     where
         C: FeedReader,
     {
         Self {
-            homeserver,
+            hs_pubkey,
             handler: Missing,
             events_limit: DEFAULT_EVENTS_LIMIT,
             reader: Arc::new(client),
@@ -36,7 +36,7 @@ impl HomeserverWatcherBuilder<Missing> {
     }
 }
 
-impl<H> HomeserverWatcherBuilder<H> {
+impl<H> FeedConsumerBuilder<H> {
     /// The most events a run requests ([`DEFAULT_EVENTS_LIMIT`] by default). Zero is
     /// rejected by [`Self::build`].
     pub fn events_limit(mut self, limit: u16) -> Self {
@@ -46,9 +46,9 @@ impl<H> HomeserverWatcherBuilder<H> {
 
     /// The handler each event goes to: an [`EventHandler`] of [`FeedEvent`]s, whose
     /// error a failed run gives back as [`WatcherError::Handler`].
-    pub fn handler<NewH>(self, handler: NewH) -> HomeserverWatcherBuilder<NewH> {
-        HomeserverWatcherBuilder {
-            homeserver: self.homeserver,
+    pub fn handler<NewH>(self, handler: NewH) -> FeedConsumerBuilder<NewH> {
+        FeedConsumerBuilder {
+            hs_pubkey: self.hs_pubkey,
             handler,
             events_limit: self.events_limit,
             reader: self.reader,
@@ -58,19 +58,16 @@ impl<H> HomeserverWatcherBuilder<H> {
     /// Builds the watcher, which stops reading once `shutdown_rx` turns `true`. Fails on an
     /// events limit of zero.
     /// The error is a [`ConfigError`].
-    pub fn build<Err>(
-        self,
-        shutdown_rx: Receiver<bool>,
-    ) -> Result<HomeserverWatcher<Err>, ConfigError>
+    pub fn build<Err>(self, shutdown_rx: Receiver<bool>) -> Result<FeedConsumer<Err>, ConfigError>
     where
         H: EventHandler<FeedEvent, Err> + 'static,
         Err: Display + Debug + Send + Sync + 'static,
     {
         validate_limit(self.events_limit)?;
-        Ok(HomeserverWatcher {
+        Ok(FeedConsumer {
             config: Arc::new(Config {
-                hs_pubkey_z32: self.homeserver.z32(),
-                homeserver: self.homeserver,
+                hs_pubkey_z32: self.hs_pubkey.z32(),
+                hs_pubkey: self.hs_pubkey,
                 handler: Arc::new(self.handler),
                 events_limit: self.events_limit,
                 reader: self.reader,
@@ -81,7 +78,7 @@ impl<H> HomeserverWatcherBuilder<H> {
 }
 
 struct Config<Err> {
-    homeserver: PublicKey,
+    hs_pubkey: PublicKey,
     hs_pubkey_z32: String,
     handler: Arc<dyn EventHandler<FeedEvent, Err>>,
     events_limit: u16,
@@ -91,11 +88,11 @@ struct Config<Err> {
 
 /// Reads a homeserver's `/events/` feed, one batch per [`Self::run`]. `Err` is its handler's
 /// error.
-pub struct HomeserverWatcher<Err> {
+pub struct FeedConsumer<Err> {
     config: Arc<Config<Err>>,
 }
 
-impl<Err> HomeserverWatcher<Err>
+impl<Err> FeedConsumer<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
@@ -103,23 +100,23 @@ where
     /// the cursor to start the next run from.
     ///
     /// The batch's cursor is checked before any event is handled: it must be a number, and
-    /// move past `cursor` when the batch has events ([`ProtocolError`] otherwise). An idle
+    /// move past `cursor` when the batch has events ([`ProtocolViolation`] otherwise). An idle
     /// homeserver answers no events, and the cursor stays where it was. A handler error fails
     /// the run.
-    pub async fn run(&self, cursor: EventCursor) -> Result<WatchOutcome, WatcherError<Err>> {
+    pub async fn run(&self, cursor: EventCursor) -> Result<FeedOutcome, WatcherError<Err>> {
         let run = Arc::new(FeedRun {
             config: self.config.clone(),
             cursor,
         });
         let read_run = run.clone();
-        run_watcher(run.instance_name(), run.hs_pubkey(), async move {
+        run_consumer(run.instance_name(), run.hs_pubkey(), async move {
             read_run.read().await
         })
         .await
     }
 }
 
-/// One run of a [`HomeserverWatcher`], as a processor, so each event is handled in its
+/// One run of a [`FeedConsumer`], as a processor, so each event is handled in its
 /// [`Run::event_span`].
 struct FeedRun<Err> {
     config: Arc<Config<Err>>,
@@ -132,7 +129,7 @@ where
     Err: Display + Debug + Send + Sync + 'static,
 {
     fn instance_name(&self) -> &'static str {
-        "HomeserverWatcher"
+        "FeedConsumer"
     }
 
     fn hs_pubkey(&self) -> &str {
@@ -157,10 +154,10 @@ impl<Err> FeedRun<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
-    async fn read(&self) -> Result<WatchOutcome, WatcherError<Err>> {
+    async fn read(&self) -> Result<FeedOutcome, WatcherError<Err>> {
         let config = &self.config;
         if *config.shutdown_rx.borrow() {
-            return Ok(WatchOutcome::interrupted(self.cursor, 0));
+            return Ok(FeedOutcome::interrupted(self.cursor, 0));
         }
 
         debug!(
@@ -170,30 +167,30 @@ where
         );
         let lines = config
             .reader
-            .read_feed(&config.homeserver, self.cursor.id(), config.events_limit)
+            .read_feed(&config.hs_pubkey, self.cursor.id(), config.events_limit)
             .await?;
         if lines.is_empty() {
             debug!("No new events");
-            return Ok(WatchOutcome::completed(self.cursor, 0));
+            return Ok(FeedOutcome::completed(self.cursor, 0));
         }
 
         let batch = FeedBatch::split(&lines);
-        let next_cursor = next_cursor(self.cursor, &batch)?;
+        let closing_cursor = closing_cursor(self.cursor, &batch)?;
 
-        let mut processed_events = 0;
+        let mut handled_events = 0;
         for line in &batch.event_lines {
             if *config.shutdown_rx.borrow() {
                 debug!(
-                    processed_events,
+                    processed_events = handled_events,
                     "Shutdown detected; the batch is read again next run"
                 );
-                return Ok(WatchOutcome::interrupted(self.cursor, processed_events));
+                return Ok(FeedOutcome::interrupted(self.cursor, handled_events));
             }
 
             match FeedEvent::from_event_line(line) {
                 Ok(EventLineOutcome::Parsed(event)) => {
                     self.handle_event(&event).await?;
-                    processed_events += 1;
+                    handled_events += 1;
                 }
                 Ok(EventLineOutcome::Skipped) => {}
                 Ok(EventLineOutcome::Unrecognized { reason }) => {
@@ -203,7 +200,7 @@ where
             }
         }
 
-        Ok(WatchOutcome::completed(next_cursor, processed_events))
+        Ok(FeedOutcome::completed(closing_cursor, handled_events))
     }
 }
 
@@ -211,26 +208,28 @@ where
 /// batch has events, and `requested` itself when it has none. A homeserver that sent events
 /// without a cursor, or one that would hold the cursor, would have the next run read the
 /// same batch again.
-fn next_cursor(
+fn closing_cursor(
     requested: EventCursor,
     batch: &FeedBatch<'_>,
-) -> Result<EventCursor, ProtocolError> {
+) -> Result<EventCursor, ProtocolViolation> {
     let Some(raw) = batch.cursor else {
-        return Err(ProtocolError::MissingCursor);
+        return Err(ProtocolViolation::MissingCursor);
     };
-    let got: u64 = raw.parse().map_err(|_| ProtocolError::MalformedCursor {
-        raw: raw.to_string(),
-    })?;
+    let got: u64 = raw
+        .parse()
+        .map_err(|_| ProtocolViolation::MalformedCursor {
+            raw: raw.to_string(),
+        })?;
 
     if batch.has_events() && got <= requested.id() {
-        return Err(ProtocolError::CursorNotAdvanced {
-            user: None,
+        return Err(ProtocolViolation::CursorNotAdvanced {
+            user_pubkey: None,
             requested: requested.id(),
             got,
         });
     }
     if !batch.has_events() && got != requested.id() {
-        return Err(ProtocolError::CursorMovedWithoutEvents {
+        return Err(ProtocolViolation::CursorMovedWithoutEvents {
             requested: requested.id(),
             got,
         });
@@ -248,7 +247,7 @@ mod tests {
 
     use crate::{
         ConfigError, EventHandler, EventType, FeedEvent, FeedReader, HsError, HsErrorKind, HsOp,
-        ProtocolError, Watcher, WatcherError,
+        ProtocolViolation, Watcher, WatcherError,
     };
 
     /// The handler's own error: the index of the event it failed on.
@@ -264,14 +263,14 @@ mod tests {
     /// Answers every poll with `lines`, recording the cursors and limits asked for.
     struct Lines {
         lines: Vec<String>,
-        polls: Mutex<Vec<(u64, u16)>>,
+        reads: Mutex<Vec<(u64, u16)>>,
     }
 
     impl Lines {
         fn new(lines: &[&str]) -> &'static Self {
             leak(Self {
                 lines: lines.iter().map(|line| line.to_string()).collect(),
-                polls: Mutex::default(),
+                reads: Mutex::default(),
             })
         }
     }
@@ -284,7 +283,7 @@ mod tests {
             cursor: u64,
             limit: u16,
         ) -> Result<Vec<String>, HsError> {
-            self.polls.lock().unwrap().push((cursor, limit));
+            self.reads.lock().unwrap().push((cursor, limit));
             Ok(self.lines.clone())
         }
     }
@@ -338,7 +337,7 @@ mod tests {
         Box::leak(Box::new(value))
     }
 
-    fn homeserver() -> PublicKey {
+    fn hs_pubkey() -> PublicKey {
         Keypair::random().public_key()
     }
 
@@ -346,9 +345,9 @@ mod tests {
         reader: impl FeedReader,
         handler: &'static Recorder,
         cursor: u64,
-    ) -> Result<crate::WatchOutcome, WatcherError<HandlerFailed>> {
+    ) -> Result<crate::FeedOutcome, WatcherError<HandlerFailed>> {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        Watcher::homeserver(reader, homeserver())
+        Watcher::feed(reader, hs_pubkey())
             .handler(handler)
             .build(shutdown_rx)
             .expect("a valid configuration")
@@ -358,14 +357,14 @@ mod tests {
 
     /// The events are handed over in order, and the cursor moves to the batch's.
     #[tokio::test]
-    async fn a_batch_is_handled_and_moves_the_cursor() {
+    async fn a_batch_is_handled_and_moves_the_checkpoint() {
         let handler = leak(Recorder::default());
         let reader = Lines::new(&["PUT pubky://a/pub/x", "DEL pubky://a/pub/y", "cursor: 12"]);
 
         let outcome = run(reader, handler, 10).await.unwrap();
 
-        assert_eq!(outcome.cursor, EventCursor::new(12));
-        assert_eq!(outcome.processed_events, 2);
+        assert_eq!(outcome.checkpoint, EventCursor::new(12));
+        assert_eq!(outcome.handled_events, 2);
         assert!(outcome.completed);
         let events = handler.events.lock().unwrap();
         assert_eq!(events[0].event_type, EventType::Put);
@@ -380,21 +379,21 @@ mod tests {
 
         let outcome = run(reader, handler, 10).await.unwrap();
 
-        assert_eq!(outcome.cursor, EventCursor::new(11));
-        assert_eq!(outcome.processed_events, 1);
+        assert_eq!(outcome.checkpoint, EventCursor::new(11));
+        assert_eq!(outcome.handled_events, 1);
     }
 
     /// An idle homeserver answers no lines, or only the cursor it was asked from: no events,
     /// and the cursor stays.
     #[tokio::test]
-    async fn an_idle_homeserver_keeps_the_cursor() {
+    async fn an_idle_homeserver_keeps_the_checkpoint() {
         for lines in [vec![], vec!["cursor: 7"]] {
             let handler = leak(Recorder::default());
 
             let outcome = run(Lines::new(&lines), handler, 7).await.unwrap();
 
-            assert_eq!(outcome.cursor, EventCursor::new(7), "{lines:?}");
-            assert_eq!(outcome.processed_events, 0);
+            assert_eq!(outcome.checkpoint, EventCursor::new(7), "{lines:?}");
+            assert_eq!(outcome.handled_events, 0);
             assert!(outcome.completed);
         }
     }
@@ -403,22 +402,25 @@ mod tests {
     /// moves without events fails the run before any event is handled.
     #[tokio::test]
     async fn a_batch_with_a_bad_cursor_fails_before_any_event() {
-        let not_advanced = |got| ProtocolError::CursorNotAdvanced {
-            user: None,
+        let not_advanced = |got| ProtocolViolation::CursorNotAdvanced {
+            user_pubkey: None,
             requested: 10,
             got,
         };
         for (lines, expected) in [
-            (vec!["PUT pubky://a/pub/x"], ProtocolError::MissingCursor),
+            (
+                vec!["PUT pubky://a/pub/x"],
+                ProtocolViolation::MissingCursor,
+            ),
             (
                 vec!["PUT pubky://a/pub/x", "cursor: nope"],
-                ProtocolError::MalformedCursor { raw: "nope".into() },
+                ProtocolViolation::MalformedCursor { raw: "nope".into() },
             ),
             (vec!["PUT pubky://a/pub/x", "cursor: 10"], not_advanced(10)),
             (vec!["PUT pubky://a/pub/x", "cursor: 9"], not_advanced(9)),
             (
                 vec!["cursor: 11"],
-                ProtocolError::CursorMovedWithoutEvents {
+                ProtocolViolation::CursorMovedWithoutEvents {
                     requested: 10,
                     got: 11,
                 },
@@ -439,7 +441,7 @@ mod tests {
     /// A run stopped by shutdown is not an error. It keeps the cursor it started from, so
     /// the next run reads the batch again and no event is skipped.
     #[tokio::test]
-    async fn a_run_stopped_by_shutdown_keeps_the_cursor() {
+    async fn a_run_stopped_by_shutdown_keeps_the_checkpoint() {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let handler = leak(Recorder {
             shutdown_after: Some((1, shutdown_tx)),
@@ -447,7 +449,7 @@ mod tests {
         });
         let reader = Lines::new(&["PUT pubky://a/pub/x", "PUT pubky://a/pub/y", "cursor: 12"]);
 
-        let outcome = Watcher::homeserver(reader, homeserver())
+        let outcome = Watcher::feed(reader, hs_pubkey())
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -456,18 +458,18 @@ mod tests {
             .unwrap();
 
         assert!(!outcome.completed);
-        assert_eq!(outcome.cursor, EventCursor::new(10));
-        assert_eq!(outcome.processed_events, 1);
+        assert_eq!(outcome.checkpoint, EventCursor::new(10));
+        assert_eq!(outcome.handled_events, 1);
     }
 
     /// A watcher shut down before the run does not poll.
     #[tokio::test]
-    async fn a_run_after_shutdown_does_not_poll() {
+    async fn a_run_after_shutdown_does_not_read() {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         shutdown_tx.send(true).unwrap();
         let reader = Lines::new(&["PUT pubky://a/pub/x", "cursor: 12"]);
 
-        let outcome = Watcher::homeserver(reader, homeserver())
+        let outcome = Watcher::feed(reader, hs_pubkey())
             .handler(leak(Recorder::default()))
             .build(shutdown_rx)
             .unwrap()
@@ -476,13 +478,13 @@ mod tests {
             .unwrap();
 
         assert!(!outcome.completed);
-        assert_eq!(outcome.cursor, EventCursor::new(10));
-        assert!(reader.polls.lock().unwrap().is_empty());
+        assert_eq!(outcome.checkpoint, EventCursor::new(10));
+        assert!(reader.reads.lock().unwrap().is_empty());
     }
 
     /// A failed poll or a failed handler fails the run.
     #[tokio::test]
-    async fn a_failed_poll_or_handler_fails_the_run() {
+    async fn a_failed_read_or_handler_fails_the_run() {
         let error = run(Down, leak(Recorder::default()), 10).await.unwrap_err();
         assert!(
             matches!(&error, WatcherError::Homeserver(e) if e.op == HsOp::ReadFeed),
@@ -508,7 +510,7 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let reader = Lines::new(&[]);
 
-        Watcher::homeserver(reader, homeserver())
+        Watcher::feed(reader, hs_pubkey())
             .handler(leak(Recorder::default()))
             .events_limit(7)
             .build(shutdown_rx.clone())
@@ -516,9 +518,9 @@ mod tests {
             .run(EventCursor::new(3))
             .await
             .unwrap();
-        assert_eq!(*reader.polls.lock().unwrap(), [(3, 7)]);
+        assert_eq!(*reader.reads.lock().unwrap(), [(3, 7)]);
 
-        let zero = Watcher::homeserver(Lines::new(&[]), homeserver())
+        let zero = Watcher::feed(Lines::new(&[]), hs_pubkey())
             .handler(leak(Recorder::default()))
             .events_limit(0)
             .build::<HandlerFailed>(shutdown_rx);

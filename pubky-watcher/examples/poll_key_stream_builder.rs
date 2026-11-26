@@ -1,5 +1,5 @@
 //! One read of three users' `/events-stream`s on one homeserver through the
-//! [`Watcher::key_stream`] builder, with one cursor per user.
+//! [`Watcher::stream`] builder, with one cursor per user.
 //!
 //! From the workspace root:
 //!
@@ -41,21 +41,21 @@ impl EventHandler<StreamEvent, BoxError> for PrintingHandler {
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let client = WatcherClient::mainnet()?;
-    let homeserver = PublicKey::try_from_z32(STAGING_HOMESERVER)?;
+    let hs_pubkey = PublicKey::try_from_z32(STAGING_HOMESERVER)?;
     let users = USER_KEYS
         .into_iter()
         .map(|key| PublicKey::try_from_z32(key).map(|user| (user, EventCursor::new(0))))
         .collect::<Result<Vec<_>, _>>()?;
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let watcher = Watcher::key_stream(client, homeserver, users)
+    let consumer = Watcher::stream(client, hs_pubkey, users)
         .handler(PrintingHandler)
         .events_limit(EVENTS_PER_USER)
         .path("/pub/")
         .build(shutdown_rx)?;
 
-    let outcome = watcher.run().await?;
-    for (user, cursor) in outcome.cursors {
+    let outcome = consumer.run().await?;
+    for (user, cursor) in outcome.checkpoints {
         println!("{}: next cursor {}", user.z32(), cursor.id());
     }
     Ok(())

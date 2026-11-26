@@ -23,25 +23,25 @@
 #![warn(missing_docs)]
 
 mod client;
+mod consumers;
 mod cycle;
 mod feed;
 mod hooks;
 mod run;
-mod watcher;
 
 pub use client::{
     published_homeserver, ClientError, EventType, FeedReader, HsError, HsErrorKind, HsOp,
     PkdnsLookup, PkdnsLookupError, ResourceReader, StreamEvent, StreamReader, WatcherClient,
     WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };
+pub use consumers::{
+    ConfigError, FeedConsumer, FeedConsumerBuilder, FeedOutcome, Missing, ProtocolViolation,
+    StreamConsumer, StreamConsumerBuilder, StreamOutcome, Watcher, WatcherError,
+    DEFAULT_EVENTS_LIMIT, DEFAULT_STREAM_PATH,
+};
 pub use cycle::{turn_status_from_run, Cycle, CycleReport, CycleStats, Turn, TurnStatus};
 pub use feed::{FeedBatch, FeedEvent, CURSOR_PREFIX};
 pub use hooks::{EventHandler, EventLineOutcome, FromEventLine, RetryQueue, RetryableError};
 pub use run::{
     dispatch_retryable_error, run_on_own_task, Run, RunError, RunOutcome, SLOW_RUN_THRESHOLD,
-};
-pub use watcher::{
-    ConfigError, HomeserverWatcher, HomeserverWatcherBuilder, KeyStreamOutcome, KeyStreamWatcher,
-    KeyStreamWatcherBuilder, Missing, ProtocolError, WatchOutcome, Watcher, WatcherError,
-    DEFAULT_EVENTS_LIMIT, DEFAULT_KEY_STREAM_PATH,
 };

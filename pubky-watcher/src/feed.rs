@@ -4,7 +4,7 @@
 //! Use [`FeedBatch::split`] when you poll `/events/` yourself, through
 //! [`FeedReader`](crate::FeedReader) in your own
 //! [`Run`](crate::Run), and [`FeedEvent`] when the method and
-//! URI are all your handler needs. [`Watcher::homeserver`](crate::Watcher::homeserver) does
+//! URI are all your handler needs. [`Watcher::feed`](crate::Watcher::feed) does
 //! both for you.
 
 use std::convert::Infallible;
@@ -18,7 +18,7 @@ pub const CURSOR_PREFIX: &str = "cursor: ";
 
 /// An event line of a homeserver's `/events/` feed: `PUT <uri>` or `DEL <uri>`.
 ///
-/// The event type [`Watcher::homeserver`](crate::Watcher::homeserver) hands to its handler.
+/// The event type [`Watcher::feed`](crate::Watcher::feed) hands to its handler.
 /// An application that needs richer parsing defines its own type and implements
 /// [`FromEventLine`] for it.
 #[derive(Debug, Clone, PartialEq, Eq)]

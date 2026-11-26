@@ -1,4 +1,4 @@
-//! Five `/events/` polls of one homeserver through the [`Watcher::homeserver`] builder.
+//! Five `/events/` polls of one homeserver through the [`Watcher::feed`] builder.
 //!
 //! Polls the public staging homeserver, prints each event, and reads each `PUT`'s resource.
 //! Each run returns the cursor to start the next one from; an application would persist it.
@@ -53,10 +53,10 @@ impl EventHandler<FeedEvent, BoxError> for ResourcePrintingHandler {
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let homeserver = PublicKey::try_from_z32(STAGING_HOMESERVER)?;
+    let hs_pubkey = PublicKey::try_from_z32(STAGING_HOMESERVER)?;
     let client = WatcherClient::mainnet()?;
 
-    let watcher = Watcher::homeserver(client.clone(), homeserver)
+    let consumer = Watcher::feed(client.clone(), hs_pubkey)
         .handler(ResourcePrintingHandler { client })
         .events_limit(EVENTS_PER_TICK)
         .build(shutdown_rx)?;
@@ -64,8 +64,8 @@ async fn main() -> Result<(), BoxError> {
     let mut cursor = EventCursor::new(0);
     for tick in 1..=POLL_TICKS {
         println!("Tick {tick}/{POLL_TICKS}, from cursor {}", cursor.id());
-        let outcome = watcher.run(cursor).await?;
-        cursor = outcome.cursor;
+        let outcome = consumer.run(cursor).await?;
+        cursor = outcome.checkpoint;
     }
 
     println!("next cursor: {}", cursor.id());

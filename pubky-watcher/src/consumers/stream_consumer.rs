@@ -6,8 +6,8 @@ use tokio::sync::watch::Receiver;
 use tracing::debug;
 
 use super::{
-    run_watcher, validate_limit, ConfigError, Missing, ProtocolError, WatchOutcome, WatcherError,
-    DEFAULT_EVENTS_LIMIT,
+    run_consumer, validate_limit, ConfigError, FeedOutcome, Missing, ProtocolViolation,
+    WatcherError, DEFAULT_EVENTS_LIMIT,
 };
 use crate::hooks::EventHandler;
 use crate::run::{Run, RunOutcome};
@@ -15,12 +15,12 @@ use crate::{StreamEvent, StreamReader};
 
 /// The paths a user's stream is read under when the builder sets none: everything they
 /// publish.
-/// Set another with [`KeyStreamWatcherBuilder::path`].
-pub const DEFAULT_KEY_STREAM_PATH: &str = "/pub/";
+/// Set another with [`StreamConsumerBuilder::path`].
+pub const DEFAULT_STREAM_PATH: &str = "/pub/";
 
-/// Builds a [`KeyStreamWatcher`]: see [`Watcher::key_stream`](super::Watcher::key_stream).
-pub struct KeyStreamWatcherBuilder<H> {
-    homeserver: PublicKey,
+/// Builds a [`StreamConsumer`]: see [`Watcher::stream`](super::Watcher::stream).
+pub struct StreamConsumerBuilder<H> {
+    hs_pubkey: PublicKey,
     users: Vec<(PublicKey, EventCursor)>,
     handler: H,
     events_limit: u16,
@@ -28,27 +28,27 @@ pub struct KeyStreamWatcherBuilder<H> {
     reader: Arc<dyn StreamReader>,
 }
 
-impl KeyStreamWatcherBuilder<Missing> {
+impl StreamConsumerBuilder<Missing> {
     pub(super) fn new<C>(
         client: C,
-        homeserver: PublicKey,
+        hs_pubkey: PublicKey,
         users: Vec<(PublicKey, EventCursor)>,
     ) -> Self
     where
         C: StreamReader,
     {
         Self {
-            homeserver,
+            hs_pubkey,
             users,
             handler: Missing,
             events_limit: DEFAULT_EVENTS_LIMIT,
-            path: DEFAULT_KEY_STREAM_PATH.to_string(),
+            path: DEFAULT_STREAM_PATH.to_string(),
             reader: Arc::new(client),
         }
     }
 }
 
-impl<H> KeyStreamWatcherBuilder<H> {
+impl<H> StreamConsumerBuilder<H> {
     /// The most events a run requests per user ([`DEFAULT_EVENTS_LIMIT`] by default). Zero is
     /// rejected by [`Self::build`].
     pub fn events_limit(mut self, limit: u16) -> Self {
@@ -57,7 +57,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
     }
 
     /// Reads only the events whose resource path starts with `path`
-    /// ([`DEFAULT_KEY_STREAM_PATH`] by default). A path that does not start with `/` is
+    /// ([`DEFAULT_STREAM_PATH`] by default). A path that does not start with `/` is
     /// rejected by [`Self::build`].
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = path.into();
@@ -66,9 +66,9 @@ impl<H> KeyStreamWatcherBuilder<H> {
 
     /// The handler each event goes to: an [`EventHandler`] of [`StreamEvent`]s, whose
     /// error a failed run gives back as [`WatcherError::Handler`].
-    pub fn handler<NewH>(self, handler: NewH) -> KeyStreamWatcherBuilder<NewH> {
-        KeyStreamWatcherBuilder {
-            homeserver: self.homeserver,
+    pub fn handler<NewH>(self, handler: NewH) -> StreamConsumerBuilder<NewH> {
+        StreamConsumerBuilder {
+            hs_pubkey: self.hs_pubkey,
             users: self.users,
             handler,
             events_limit: self.events_limit,
@@ -78,15 +78,12 @@ impl<H> KeyStreamWatcherBuilder<H> {
     }
 }
 
-impl<H> KeyStreamWatcherBuilder<H> {
+impl<H> StreamConsumerBuilder<H> {
     /// Builds the watcher, which stops reading once `shutdown_rx` turns `true`. Fails on an
     /// events limit of zero, an empty or duplicated user list, or a path that does not start
     /// with `/`.
     /// The error is a [`ConfigError`].
-    pub fn build<Err>(
-        self,
-        shutdown_rx: Receiver<bool>,
-    ) -> Result<KeyStreamWatcher<Err>, ConfigError>
+    pub fn build<Err>(self, shutdown_rx: Receiver<bool>) -> Result<StreamConsumer<Err>, ConfigError>
     where
         H: EventHandler<StreamEvent, Err> + 'static,
         Err: Display + Debug + Send + Sync + 'static,
@@ -97,10 +94,10 @@ impl<H> KeyStreamWatcherBuilder<H> {
             return Err(ConfigError::InvalidPath { path: self.path });
         }
 
-        Ok(KeyStreamWatcher {
+        Ok(StreamConsumer {
             config: Arc::new(Config {
-                hs_pubkey_z32: self.homeserver.z32(),
-                homeserver: self.homeserver,
+                hs_pubkey_z32: self.hs_pubkey.z32(),
+                hs_pubkey: self.hs_pubkey,
                 users: self.users,
                 handler: Arc::new(self.handler),
                 events_limit: self.events_limit,
@@ -113,7 +110,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
 }
 
 struct Config<Err> {
-    homeserver: PublicKey,
+    hs_pubkey: PublicKey,
     hs_pubkey_z32: String,
     users: Vec<(PublicKey, EventCursor)>,
     handler: Arc<dyn EventHandler<StreamEvent, Err>>,
@@ -123,29 +120,29 @@ struct Config<Err> {
     shutdown_rx: Receiver<bool>,
 }
 
-/// How a run of a [`KeyStreamWatcher`] ended.
+/// How a run of a [`StreamConsumer`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyStreamOutcome {
+pub struct StreamOutcome {
     /// The cursor to start each user's next run from, in the order the users were given,
     /// safe to persist: every event of the user before it was handled.
-    /// Pass them to the next [`Watcher::key_stream`](super::Watcher::key_stream).
-    pub cursors: Vec<(PublicKey, EventCursor)>,
+    /// Pass them to the next [`Watcher::stream`](super::Watcher::stream).
+    pub checkpoints: Vec<(PublicKey, EventCursor)>,
     /// The events handed to the handler.
     /// Each went to the handler's [`EventHandler::handle`].
-    pub processed_events: usize,
+    pub handled_events: usize,
     /// Whether the run read every user. A run stopped by the shutdown signal given to
-    /// [`KeyStreamWatcherBuilder::build`] returns `false`; each user's cursor is still safe
+    /// [`StreamConsumerBuilder::build`] returns `false`; each user's cursor is still safe
     /// to persist.
     pub completed: bool,
 }
 
 /// Reads a known set of users' `/events-stream`s on one homeserver, one user after the other,
 /// one batch each per [`Self::run`]. `Err` is its handler's error.
-pub struct KeyStreamWatcher<Err> {
+pub struct StreamConsumer<Err> {
     config: Arc<Config<Err>>,
 }
 
-impl<Err> KeyStreamWatcher<Err>
+impl<Err> StreamConsumer<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
@@ -154,21 +151,21 @@ where
     ///
     /// A user's stream is checked before any of its events is handled: no more events than
     /// requested, every event the user's own, and cursors that only move forward
-    /// ([`ProtocolError`] otherwise). A stream that breaks this, or a handler error, fails
+    /// ([`ProtocolViolation`] otherwise). A stream that breaks this, or a handler error, fails
     /// the run.
-    pub async fn run(&self) -> Result<KeyStreamOutcome, WatcherError<Err>> {
+    pub async fn run(&self) -> Result<StreamOutcome, WatcherError<Err>> {
         let run = Arc::new(StreamRun {
             config: self.config.clone(),
         });
         let read_run = run.clone();
-        run_watcher(run.instance_name(), run.hs_pubkey(), async move {
+        run_consumer(run.instance_name(), run.hs_pubkey(), async move {
             read_run.read().await
         })
         .await
     }
 }
 
-/// One run of a [`KeyStreamWatcher`], as a processor, so each event is handled in its
+/// One run of a [`StreamConsumer`], as a processor, so each event is handled in its
 /// [`Run::event_span`].
 struct StreamRun<Err> {
     config: Arc<Config<Err>>,
@@ -180,7 +177,7 @@ where
     Err: Display + Debug + Send + Sync + 'static,
 {
     fn instance_name(&self) -> &'static str {
-        "KeyStreamWatcher"
+        "StreamConsumer"
     }
 
     fn hs_pubkey(&self) -> &str {
@@ -205,67 +202,67 @@ impl<Err> StreamRun<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
-    async fn read(&self) -> Result<KeyStreamOutcome, WatcherError<Err>> {
-        let mut cursors = self.config.users.clone();
-        let mut processed_events = 0;
+    async fn read(&self) -> Result<StreamOutcome, WatcherError<Err>> {
+        let mut checkpoints = self.config.users.clone();
+        let mut handled_events = 0;
 
-        for (user, cursor) in cursors.iter_mut() {
-            let read = self.read_user(user, *cursor).await?;
-            *cursor = read.cursor;
-            processed_events += read.processed_events;
+        for (user_pubkey, checkpoint) in checkpoints.iter_mut() {
+            let read = self.read_user(user_pubkey, *checkpoint).await?;
+            *checkpoint = read.checkpoint;
+            handled_events += read.handled_events;
             if !read.completed {
-                return Ok(KeyStreamOutcome {
-                    cursors,
-                    processed_events,
+                return Ok(StreamOutcome {
+                    checkpoints,
+                    handled_events,
                     completed: false,
                 });
             }
         }
 
-        Ok(KeyStreamOutcome {
-            cursors,
-            processed_events,
+        Ok(StreamOutcome {
+            checkpoints,
+            handled_events,
             completed: true,
         })
     }
 
     async fn read_user(
         &self,
-        user: &PublicKey,
+        user_pubkey: &PublicKey,
         cursor: EventCursor,
-    ) -> Result<WatchOutcome, WatcherError<Err>> {
+    ) -> Result<FeedOutcome, WatcherError<Err>> {
         let config = &self.config;
         if *config.shutdown_rx.borrow() {
-            return Ok(WatchOutcome::interrupted(cursor, 0));
+            return Ok(FeedOutcome::interrupted(cursor, 0));
         }
 
-        debug!(user = %user.z32(), cursor = cursor.id(), "Reading the user's events");
+        debug!(user = %user_pubkey.z32(), cursor = cursor.id(), "Reading the user's events");
         let events = config
             .reader
             .read_stream(
-                &config.homeserver,
-                user,
+                &config.hs_pubkey,
+                user_pubkey,
                 cursor.id(),
                 config.events_limit,
                 &config.path,
             )
             .await?;
-        validate_events(user, cursor, config.events_limit, &events)?;
+        validate_events(user_pubkey, cursor, config.events_limit, &events)?;
 
-        let mut safe_cursor = cursor;
-        let mut processed_events = 0;
+        let mut checkpoint = cursor;
+        let mut handled_events = 0;
         for event in &events {
             if *config.shutdown_rx.borrow() {
-                debug!(user = %user.z32(), processed_events, "Shutdown detected");
-                return Ok(WatchOutcome::interrupted(safe_cursor, processed_events));
+                debug!(user = %user_pubkey.z32(), processed_events = handled_events, "Shutdown detected");
+                return Ok(FeedOutcome::interrupted(checkpoint, handled_events));
             }
 
             self.handle_event(event).await?;
-            safe_cursor = EventCursor::new(event.cursor);
-            processed_events += 1;
+            checkpoint = EventCursor::new(event.cursor);
+            handled_events += 1;
         }
 
-        Ok(WatchOutcome::completed(safe_cursor, processed_events))
+        Ok(FeedOutcome::completed(checkpoint, handled_events))
     }
 }
 
@@ -273,9 +270,14 @@ fn validate_users(users: &[(PublicKey, EventCursor)]) -> Result<(), ConfigError>
     if users.is_empty() {
         return Err(ConfigError::NoUsers);
     }
-    for (index, (user, _)) in users.iter().enumerate() {
-        if users[..index].iter().any(|(earlier, _)| earlier == user) {
-            return Err(ConfigError::DuplicateUser { user: user.clone() });
+    for (index, (user_pubkey, _)) in users.iter().enumerate() {
+        if users[..index]
+            .iter()
+            .any(|(earlier, _)| earlier == user_pubkey)
+        {
+            return Err(ConfigError::DuplicateUser {
+                user_pubkey: user_pubkey.clone(),
+            });
         }
     }
     Ok(())
@@ -285,14 +287,14 @@ fn validate_users(users: &[(PublicKey, EventCursor)]) -> Result<(), ConfigError>
 /// requested, every event owned by `user`, so that one user's stream cannot inject another's
 /// events, and cursors that only move forward.
 fn validate_events(
-    user: &PublicKey,
+    user_pubkey: &PublicKey,
     requested: EventCursor,
     limit: u16,
     events: &[StreamEvent],
-) -> Result<(), ProtocolError> {
+) -> Result<(), ProtocolViolation> {
     if events.len() > limit as usize {
-        return Err(ProtocolError::TooManyEvents {
-            user: user.clone(),
+        return Err(ProtocolViolation::TooManyEvents {
+            user_pubkey: user_pubkey.clone(),
             got: events.len(),
             limit,
         });
@@ -300,15 +302,15 @@ fn validate_events(
 
     let mut floor = requested.id();
     for event in events {
-        if event.user_pubkey() != user {
-            return Err(ProtocolError::ForeignEvent {
-                user: user.clone(),
-                owner: event.user_pubkey().clone(),
+        if event.user_pubkey() != user_pubkey {
+            return Err(ProtocolViolation::ForeignEvent {
+                user_pubkey: user_pubkey.clone(),
+                event_user_pubkey: event.user_pubkey().clone(),
             });
         }
         if event.cursor <= floor {
-            return Err(ProtocolError::CursorNotAdvanced {
-                user: Some(user.clone()),
+            return Err(ProtocolViolation::CursorNotAdvanced {
+                user_pubkey: Some(user_pubkey.clone()),
                 requested: floor,
                 got: event.cursor,
             });
@@ -327,7 +329,7 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::{
-        ConfigError, EventHandler, EventType, HsError, HsErrorKind, HsOp, ProtocolError,
+        ConfigError, EventHandler, EventType, HsError, HsErrorKind, HsOp, ProtocolViolation,
         StreamEvent, StreamReader, Watcher, WatcherError,
     };
 
@@ -335,9 +337,10 @@ mod tests {
         Keypair::random().public_key()
     }
 
-    /// An event of `owner`'s at `cursor`.
-    fn event(owner: &PublicKey, cursor: u64) -> StreamEvent {
-        let resource = PubkyResource::new(owner.clone(), "/pub/app/item").expect("valid path");
+    /// An event of `user_pubkey`'s at `cursor`.
+    fn event(user_pubkey: &PublicKey, cursor: u64) -> StreamEvent {
+        let resource =
+            PubkyResource::new(user_pubkey.clone(), "/pub/app/item").expect("valid path");
         StreamEvent::new(EventType::Put, &resource, cursor)
     }
 
@@ -408,7 +411,7 @@ mod tests {
 
     /// Each user's events are handled, and each user moves to their own last cursor.
     #[tokio::test]
-    async fn each_user_moves_to_their_own_cursor() {
+    async fn each_user_moves_to_their_own_checkpoint() {
         let (alice, bob, carol) = (key(), key(), key());
         let reader = Streams::new(vec![
             (&alice, vec![event(&alice, 11), event(&alice, 12)]),
@@ -422,7 +425,7 @@ mod tests {
         ];
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let outcome = Watcher::key_stream(reader, key(), users)
+        let outcome = Watcher::stream(reader, key(), users)
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -431,9 +434,9 @@ mod tests {
             .unwrap();
 
         assert!(outcome.completed);
-        assert_eq!(outcome.processed_events, 3);
+        assert_eq!(outcome.handled_events, 3);
         assert_eq!(
-            outcome.cursors,
+            outcome.checkpoints,
             vec![
                 (alice, EventCursor::new(12)),
                 (bob, EventCursor::new(31)),
@@ -451,7 +454,7 @@ mod tests {
             let reader = Streams::new(vec![]);
             let (_shutdown_tx, shutdown_rx) = watch::channel(false);
             let mut builder =
-                Watcher::key_stream(reader, key(), vec![(alice.clone(), EventCursor::new(4))])
+                Watcher::stream(reader, key(), vec![(alice.clone(), EventCursor::new(4))])
                     .handler(recorder())
                     .events_limit(9);
             if let Some(path) = path {
@@ -472,25 +475,25 @@ mod tests {
     #[tokio::test]
     async fn a_stream_that_breaks_the_protocol_fails_before_any_event() {
         let (alice, mallory) = (key(), key());
-        let not_advanced = |requested, got| ProtocolError::CursorNotAdvanced {
-            user: Some(alice.clone()),
+        let not_advanced = |requested, got| ProtocolViolation::CursorNotAdvanced {
+            user_pubkey: Some(alice.clone()),
             requested,
             got,
         };
         for (events, expected) in [
             (
                 vec![event(&alice, 11), event(&alice, 12), event(&alice, 13)],
-                ProtocolError::TooManyEvents {
-                    user: alice.clone(),
+                ProtocolViolation::TooManyEvents {
+                    user_pubkey: alice.clone(),
                     got: 3,
                     limit: 2,
                 },
             ),
             (
                 vec![event(&alice, 11), event(&mallory, 12)],
-                ProtocolError::ForeignEvent {
-                    user: alice.clone(),
-                    owner: mallory.clone(),
+                ProtocolViolation::ForeignEvent {
+                    user_pubkey: alice.clone(),
+                    event_user_pubkey: mallory.clone(),
                 },
             ),
             (vec![event(&alice, 10)], not_advanced(10, 10)),
@@ -504,7 +507,7 @@ mod tests {
             let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
             let result =
-                Watcher::key_stream(reader, key(), vec![(alice.clone(), EventCursor::new(10))])
+                Watcher::stream(reader, key(), vec![(alice.clone(), EventCursor::new(10))])
                     .handler(handler)
                     .events_limit(2)
                     .build(shutdown_rx)
@@ -523,7 +526,7 @@ mod tests {
     /// A run stopped by shutdown is not an error: the user in progress keeps the cursor of
     /// the last event handled, and the users after them keep theirs.
     #[tokio::test]
-    async fn a_run_stopped_by_shutdown_keeps_safe_cursors() {
+    async fn a_run_stopped_by_shutdown_keeps_its_checkpoints() {
         let (alice, bob) = (key(), key());
         let reader = Streams::new(vec![
             (&alice, vec![event(&alice, 11), event(&alice, 12)]),
@@ -539,7 +542,7 @@ mod tests {
             (bob.clone(), EventCursor::new(30)),
         ];
 
-        let outcome = Watcher::key_stream(reader, key(), users)
+        let outcome = Watcher::stream(reader, key(), users)
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -548,9 +551,9 @@ mod tests {
             .unwrap();
 
         assert!(!outcome.completed);
-        assert_eq!(outcome.processed_events, 1);
+        assert_eq!(outcome.handled_events, 1);
         assert_eq!(
-            outcome.cursors,
+            outcome.checkpoints,
             vec![(alice, EventCursor::new(11)), (bob, EventCursor::new(30))]
         );
     }
@@ -618,7 +621,7 @@ mod tests {
         }));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let error = Watcher::key_stream(reader, key(), vec![(alice, EventCursor::new(10))])
+        let error = Watcher::stream(reader, key(), vec![(alice, EventCursor::new(10))])
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -639,7 +642,7 @@ mod tests {
         let handler = recorder();
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let error = Watcher::key_stream(Down, key(), vec![(key(), EventCursor::new(10))])
+        let error = Watcher::stream(Down, key(), vec![(key(), EventCursor::new(10))])
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -657,12 +660,12 @@ mod tests {
     /// An events limit of zero, no users, a user listed twice, or a path that does not start
     /// with `/` is rejected at build time.
     #[test]
-    fn a_misconfigured_watcher_is_rejected_at_build_time() {
+    fn a_misconfigured_consumer_is_rejected_at_build_time() {
         let alice = key();
         let one = || vec![(alice.clone(), EventCursor::new(0))];
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let build = |users, limit, path: &str| {
-            Watcher::key_stream(Streams::new(vec![]), key(), users)
+            Watcher::stream(Streams::new(vec![]), key(), users)
                 .handler(recorder())
                 .events_limit(limit)
                 .path(path)
@@ -678,7 +681,7 @@ mod tests {
         assert_eq!(
             build([one(), one()].concat(), 1, "/pub/").err(),
             Some(ConfigError::DuplicateUser {
-                user: alice.clone()
+                user_pubkey: alice.clone()
             })
         );
         assert_eq!(

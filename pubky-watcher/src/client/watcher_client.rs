@@ -72,7 +72,7 @@ impl From<pubky::Event> for StreamEvent {
 /// A homeserver's `/events/` feed, which covers every user it hosts under one cursor.
 ///
 /// A failure is labelled with `hs_pubkey`, the homeserver polled.
-/// [`WatcherClient`] implements it, and [`Watcher::homeserver`](crate::Watcher::homeserver)
+/// [`WatcherClient`] implements it, and [`Watcher::feed`](crate::Watcher::feed)
 /// reads through it.
 #[async_trait::async_trait]
 pub trait FeedReader: Send + Sync + 'static {
@@ -90,7 +90,7 @@ pub trait FeedReader: Send + Sync + 'static {
 /// A user's `/events-stream` on a homeserver, with a cursor per user.
 ///
 /// A failure is labelled with `hs_pubkey`, the homeserver asked.
-/// [`WatcherClient`] implements it, and [`Watcher::key_stream`](crate::Watcher::key_stream)
+/// [`WatcherClient`] implements it, and [`Watcher::stream`](crate::Watcher::stream)
 /// reads through it.
 #[async_trait::async_trait]
 pub trait StreamReader: Send + Sync + 'static {

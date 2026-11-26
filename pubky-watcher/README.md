@@ -32,15 +32,15 @@ impl EventHandler<FeedEvent, PrintError> for Print {
     }
 }
 
-let watcher = Watcher::homeserver(WatcherClient::mainnet()?, homeserver)
+let consumer = Watcher::feed(WatcherClient::mainnet()?, hs_pubkey)
     .handler(Print)
     .build(shutdown_rx)?;
 
-let outcome = watcher.run(EventCursor::new(stored_cursor)).await?;
-// Persist `outcome.cursor`, and start the next run from it.
+let outcome = consumer.run(EventCursor::new(stored_cursor)).await?;
+// Persist `outcome.checkpoint`, and start the next run from it.
 ```
 
-`Watcher::key_stream(client, homeserver, users)` reads a known set of users instead, one
+`Watcher::stream(client, hs_pubkey, users)` reads a known set of users instead, one
 `/events-stream` each, with one cursor per user and an optional path prefix (`/pub/` by
 default).
 
@@ -59,7 +59,7 @@ What a run guarantees:
   user list, or a path that does not start with `/`.
 
 `build` fails with a `ConfigError`. A run fails with a `WatcherError<E>`, where `E` is your
-handler's error: `Homeserver` (an `HsError`), `Protocol` (a `ProtocolError`: which rule the
+handler's error: `Homeserver` (an `HsError`), `Protocol` (a `ProtocolViolation`: which rule the
 homeserver broke, with the cursors and users involved), `Handler(E)`, or `Panicked`.
 
 ## The client
@@ -124,9 +124,9 @@ as it was first extracted:
 
 - `WatcherError` is generic over the handler's error: `WatcherError<E>` with `Homeserver`,
   `Protocol`, `Handler(E)` and `Panicked`, instead of a boxed error. A handler returns its own
-  error type, and the watchers are `HomeserverWatcher<E>` and `KeyStreamWatcher<E>`.
+  error type, and the watchers are `FeedConsumer<E>` and `StreamConsumer<E>`.
 - `build()` fails with the new `ConfigError`, and a homeserver that breaks the events
-  protocol fails a run with the new `ProtocolError`.
+  protocol fails a run with the new `ProtocolViolation`.
 - `BuildError` is removed: `Cycle` has an associated `type Error`, returned
   by `build`, `homeservers` and `run`.
 - `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public.
