@@ -124,6 +124,121 @@ Which failure belongs to whom:
 A user the Run stopped before keeps the Cursor they were given. `handled_events` counts every
 Event your Handler handled, those of a user whose Batch ended early included.
 
+## Catching up
+
+A Run reads one Batch: it asks an Events feed for no more Events than the events limit (100
+by default), and Event streams for that many per user. An Indexer that is behind makes one Run
+after the other, and the rule is the same for both Consumers: **run again while the Checkpoint
+moves.**
+
+When nothing failed and nothing stopped the Run, a Checkpoint moves exactly when its Batch had
+Events. A Checkpoint that moved may have more Events after it. One that stayed means the
+Homeserver had none: you have caught up.
+
+- **A Feed consumer has one Checkpoint.** Run again while `outcome.checkpoint` is not the
+  Cursor the Run was given. A Run stopped by its shutdown signal returns the Cursor it was
+  given, so the same test ends the loop. A Run that failed returned no Checkpoint: the Cursor
+  it was given is still the one to run from.
+- **A Stream consumer has one Checkpoint per user.** Run again while any user's Checkpoint
+  moved and the Run did not stop: `outcome.checkpoints` differ from the users given, and
+  `outcome.stopped` is `None`. Store the Checkpoints of every Run, a stopped one's too.
+
+```rust,ignore
+// A Feed consumer. `cursor` is an `EventCursor`, from your Cursor store.
+loop {
+    let outcome = consumer.run(cursor).await?;
+    if outcome.checkpoint == cursor {
+        break; // caught up, or shutting down
+    }
+    cursor = outcome.checkpoint; // store it
+}
+```
+
+```rust,ignore
+// A Stream consumer. `users` is a `Vec<(PublicKey, EventCursor)>`, from your Cursor store.
+loop {
+    let outcome = consumer.run(users.clone()).await?;
+    let moved = outcome.checkpoints != users;
+    users = outcome.checkpoints; // store them, whatever `stopped` says
+    match outcome.stopped {
+        None if moved => {} // there may be more: run again
+        None | Some(StopReason::Shutdown) => break, // caught up, or shutting down
+        Some(reason) => {
+            back_off(reason); // yours: see "When the Homeserver stopped the Run"
+            break;
+        }
+    }
+}
+```
+
+Compare Cursors; `handled_events` is not the test. On a Feed consumer it can be zero while the
+Checkpoint moved (a Batch whose lines are no Event), and more than zero while the Checkpoint
+stayed (a Run shut down inside its Batch).
+
+A user's Checkpoint also stays when the Homeserver refused their Read, or your Handler failed
+on the first Event of their Batch. Such a user does not keep the loop running, but has not
+caught up: they are in `failures` again on each Run, until the cause is gone.
+
+### When the Homeserver stopped the Run
+
+**Do not run again at once.** The Homeserver stopped the Run when:
+
+- a Stream consumer's `stopped` is `StopReason::Homeserver` (it could not be read) or
+  `StopReason::Protocol` (a Protocol violation);
+- a Feed consumer's Run failed with `WatcherError::Homeserver` or `WatcherError::Protocol`.
+
+Back the Homeserver off: wait before its next Run, for as long as you choose. The crate does
+not do it: a Consumer keeps nothing from one Run to the next, so a loop that runs again at once
+sends Read after Read to a Homeserver that is down. An `HsError` carries the kind of failure
+(`kind`) to choose the wait by. The Client retries a rate-limited Read of an Event stream a few
+times inside that Read, so a Run that stopped as rate limited has already used those retries.
+
+`StopReason::Shutdown` is your own signal: there is nothing to back off. An Indexer that
+follows many Homeservers under a `Cycle` skips the ones in its backoff with the `should_skip`
+hook (see [Advanced](#advanced-your-own-run-and-cycle)).
+
+## A Consumer never skips an Event
+
+**A Consumer never moves a Checkpoint past an Event your Handler did not handle.** When the
+Handler returns an error for an Event, the next Run hands it the same Event again:
+
+- **A Stream consumer keeps that user at the failing Event.** Their Checkpoint stays before
+  it, and each Run reads them from there and lists them in `failures`, until the Handler
+  returns `Ok` for the Event. The other users are read as before.
+- **A Feed consumer's Run fails and returns no Checkpoint.** The next Run, from the same
+  Cursor, reads that Batch again. An Events feed has one Cursor, so every user the Homeserver
+  hosts waits behind the failing Event, and the Handler gets the Events before it in the Batch
+  a second time: it must come to the same result.
+
+The one thing a Feed consumer passes over is a line of an Events feed that is no Event: an
+empty line, which it drops, or one that is not `PUT <uri>` or `DEL <uri>`, which it logs.
+
+**Moving past an Event is the Handler's decision.** A Consumer cannot tell an Event that can
+never be handled from a store of yours that is down for a minute; your Handler can. It returns
+`Ok` for the Event it chooses to skip, and the Consumer takes it as handled: the Checkpoint
+moves past it, and it counts in `handled_events`. It returns an error for the Event it wants
+again on the next Run.
+
+```rust,ignore
+// `Index`, `IndexError` and `is_permanent` are yours.
+#[async_trait::async_trait]
+impl EventHandler<StreamEvent, IndexError> for Index {
+    async fn handle(&self, event: &StreamEvent) -> Result<(), IndexError> {
+        match self.index(event).await {
+            // This Event can never be indexed: move past it.
+            Err(error) if error.is_permanent() => Ok(()),
+            // `Ok`, or an error that keeps the user at this Event until it is handled.
+            result => result,
+        }
+    }
+}
+```
+
+**A Consumer has no Retry queue.** It does not set a failed Event aside and go on to the next
+one. An Indexer that wants failed Events set aside and retried writes its own `Run` with the
+Retry hooks, `RetryableError`, `RetryQueue` and `dispatch_retryable_error`: see
+[Advanced: your own `Run` and `Cycle`](#advanced-your-own-run-and-cycle).
+
 ## The Client
 
 `WatcherClient` is the crate's read-only access to the Pubky network. Build it with
