@@ -15,8 +15,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pubky::PublicKey;
 use pubky_watcher::{
-    FeedBatch, FeedEvent, HomeserverEventSource, RunOutcome, TEventProcessor,
-    TEventProcessorRunner, WatcherClient,
+    FeedBatch, FeedEvent, FeedReader, RunOutcome, TEventProcessor, TEventProcessorRunner,
+    WatcherClient,
 };
 use tokio::sync::{watch, Mutex};
 
@@ -32,7 +32,7 @@ const EVENTS_PER_TICK: u16 = 8;
 struct PollProcessor {
     homeserver: PublicKey,
     homeserver_id: String,
-    source: Arc<dyn HomeserverEventSource>,
+    reader: Arc<dyn FeedReader>,
     cursor: Arc<Mutex<u64>>,
 }
 
@@ -54,8 +54,8 @@ impl TEventProcessor<FeedEvent, BoxError> for PollProcessor {
     async fn run_internal(self: Arc<Self>) -> Result<RunOutcome, BoxError> {
         let cursor = *self.cursor.lock().await;
         let lines = self
-            .source
-            .poll_events(&self.homeserver, cursor, EVENTS_PER_TICK)
+            .reader
+            .read_feed(&self.homeserver, cursor, EVENTS_PER_TICK)
             .await?;
         let batch = FeedBatch::split(&lines);
         if !batch.has_events() {
@@ -78,7 +78,7 @@ impl TEventProcessor<FeedEvent, BoxError> for PollProcessor {
 
 /// Runs one [`PollProcessor`] per tick, for the staging homeserver only.
 struct PollRunner {
-    source: Arc<dyn HomeserverEventSource>,
+    reader: Arc<dyn FeedReader>,
     cursor: Arc<Mutex<u64>>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -98,7 +98,7 @@ impl TEventProcessorRunner<FeedEvent, BoxError> for PollRunner {
         Ok(Arc::new(PollProcessor {
             homeserver: PublicKey::try_from_z32(hs_id)?,
             homeserver_id: hs_id.to_string(),
-            source: self.source.clone(),
+            reader: self.reader.clone(),
             cursor: self.cursor.clone(),
         }))
     }
@@ -112,7 +112,7 @@ impl TEventProcessorRunner<FeedEvent, BoxError> for PollRunner {
 async fn main() -> Result<(), BoxError> {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let runner = PollRunner {
-        source: Arc::new(WatcherClient::mainnet()?),
+        reader: Arc::new(WatcherClient::mainnet()?),
         cursor: Arc::new(Mutex::new(0)),
         shutdown_rx,
     };

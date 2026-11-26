@@ -38,7 +38,7 @@ impl EventHandler<FeedEvent, BoxError> for ResourcePrintingHandler {
         }
 
         let resource: PubkyResource = event.uri.parse()?;
-        match self.client.get_resource(&resource).await {
+        match self.client.read_resource(&resource).await {
             Ok(body) => {
                 let shown = &body[..body.len().min(PRINTED_BYTES)];
                 println!("  {} bytes: {}", body.len(), String::from_utf8_lossy(shown));

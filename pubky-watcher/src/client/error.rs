@@ -62,16 +62,16 @@ impl HsError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsOp {
     /// A read of the homeserver's `/events/` feed
-    /// ([`HomeserverEventSource::poll_events`](super::HomeserverEventSource::poll_events)).
-    PollEvents,
+    /// ([`FeedReader::read_feed`](super::FeedReader::read_feed)).
+    ReadFeed,
     /// A read of a user's `/events-stream`
-    /// ([`KeyEventSource::user_events`](super::KeyEventSource::user_events)).
-    UserEvents,
+    /// ([`StreamReader::read_stream`](super::StreamReader::read_stream)).
+    ReadStream,
     /// A read of a `PUT` event's resource
-    /// ([`ResourceReader::get_resource`](super::ResourceReader::get_resource)).
-    GetResource,
-    /// A read of a file's blob ([`ResourceReader::get_blob`](super::ResourceReader::get_blob)).
-    GetBlob,
+    /// ([`ResourceReader::read_resource`](super::ResourceReader::read_resource)).
+    ReadResource,
+    /// A read of a file's blob ([`ResourceReader::read_blob`](super::ResourceReader::read_blob)).
+    ReadBlob,
 }
 
 /// Why a homeserver call failed.

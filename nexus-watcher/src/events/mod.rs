@@ -208,7 +208,7 @@ pub async fn handle_put_event(
         Some(translated) => translated,
         None => {
             let pubky_resource = parse_resource(&event.uri)?;
-            let blob = client.get_resource(&pubky_resource).await?;
+            let blob = client.read_resource(&pubky_resource).await?;
             translate_put(&event.uri, &event.target, &blob)?
         }
     };

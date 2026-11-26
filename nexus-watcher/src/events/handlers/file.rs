@@ -77,7 +77,7 @@ async fn ingest(
         .inspect_err(|e| warn!("Aborting file ingest: source {}: {e}", file.src))?;
 
     let source = parse_resource(&file.src)?;
-    let bytes = read_blob(client.get_blob(&source).await?, &file.blob.blob_id)?;
+    let bytes = read_blob(client.read_blob(&source).await?, &file.blob.blob_id)?;
 
     let full_path = files_path.join(file_folder(user_id.as_ref(), file_id));
     write_main_variant(&full_path, &bytes)
@@ -134,7 +134,7 @@ pub async fn sync_put_v1(
         key.owner_id.to_string(),
         key.resource_id.clone(),
     ))?;
-    let bytes = read_v1_file(client.get_blob(&source).await?, hash).await?;
+    let bytes = read_v1_file(client.read_blob(&source).await?, hash).await?;
 
     write_v1_main(files_path, &folder, &bytes)
         .await

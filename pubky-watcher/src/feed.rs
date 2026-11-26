@@ -2,7 +2,7 @@
 //! (`PUT <uri>` / `DEL <uri>`), closed by a `cursor: <value>` line.
 //!
 //! Use [`FeedBatch::split`] when you poll `/events/` yourself, through
-//! [`HomeserverEventSource`](crate::HomeserverEventSource) in your own
+//! [`FeedReader`](crate::FeedReader) in your own
 //! [`TEventProcessor`](crate::TEventProcessor), and [`FeedEvent`] when the method and
 //! URI are all your handler needs. [`Watcher::homeserver`](crate::Watcher::homeserver) does
 //! both for you.
@@ -27,7 +27,7 @@ pub struct FeedEvent {
     pub event_type: EventType,
     /// The resource's `pubky://` URI, as the line carries it.
     /// A `PUT`'s resource is read with
-    /// [`ResourceReader::get_resource`](crate::ResourceReader::get_resource).
+    /// [`ResourceReader::read_resource`](crate::ResourceReader::read_resource).
     pub uri: String,
 }
 

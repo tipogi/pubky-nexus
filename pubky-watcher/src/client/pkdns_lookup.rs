@@ -2,18 +2,18 @@ use pubky::pkarr::dns::rdata::RData;
 use pubky::pkarr::SignedPacket;
 use pubky::PublicKey;
 
-/// Why a PKDNS lookup through a [`HomeserverResolver`] failed: no DHT node or relay gave a
+/// Why a PKDNS lookup through a [`PkdnsLookup`] failed: no DHT node or relay gave a
 /// usable answer. The underlying error, e.g. pkarr's, is its [`source`](std::error::Error::source).
 #[derive(Debug, thiserror::Error)]
 #[error("Failed to resolve the DHT record: {source}")]
-pub struct ResolveError {
+pub struct PkdnsLookupError {
     #[source]
     source: Box<dyn std::error::Error + Send + Sync>,
 }
 
-impl ResolveError {
+impl PkdnsLookupError {
     /// A lookup that failed because of `source`. An implementation of
-    /// [`HomeserverResolver`] other than [`WatcherClient`](super::WatcherClient) builds its
+    /// [`PkdnsLookup`] other than [`WatcherClient`](super::WatcherClient) builds its
     /// failures with it.
     pub fn new(source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
         Self {
@@ -28,16 +28,19 @@ impl ResolveError {
 /// check who signed it and when, and refuse an older answer that is replayed or lagging.
 /// [`published_homeserver`] reads the homeserver it names.
 #[async_trait::async_trait]
-pub trait HomeserverResolver: Send + Sync {
-    /// The signed packet `user` publishes, or `None` when no packet is found. A DHT or relay
-    /// failure is a [`ResolveError`], so `None` means no record, not an unknown.
-    async fn resolve_record(&self, user: &PublicKey) -> Result<Option<SignedPacket>, ResolveError>;
+pub trait PkdnsLookup: Send + Sync {
+    /// The signed packet `user_pubkey` publishes, or `None` when no packet is found. A DHT or relay
+    /// failure is a [`PkdnsLookupError`], so `None` means no record, not an unknown.
+    async fn lookup_homeserver_record(
+        &self,
+        user_pubkey: &PublicKey,
+    ) -> Result<Option<SignedPacket>, PkdnsLookupError>;
 }
 
 /// The homeserver a PKDNS record names: the target of its `_pubky` SVCB/HTTPS record, if
 /// there is one and it is a public key. Mirrors `Pubky::get_homeserver_of`, whose parsing
 /// the SDK does not export.
-/// Takes the packet [`HomeserverResolver::resolve_record`] returns.
+/// Takes the packet [`PkdnsLookup::lookup_homeserver_record`] returns.
 pub fn published_homeserver(packet: &SignedPacket) -> Option<PublicKey> {
     let target = packet
         .resource_records("_pubky")

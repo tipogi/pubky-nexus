@@ -7,8 +7,7 @@ use nexus_common::utils::test_utils::signed_packet_naming;
 use pubky::{Keypair, PubkyResource, PublicKey};
 use pubky_social_specs::PubkyId;
 use pubky_watcher::{
-    HomeserverEventSource, HsError, HsErrorKind, HsOp, KeyEventSource, ResolveError,
-    ResourceReader, StreamEvent,
+    FeedReader, HsError, HsErrorKind, HsOp, ResourceReader, StreamEvent, StreamReader,
 };
 
 type UserEventsResult = Result<Vec<StreamEvent>, HsErrorKind>;
@@ -17,7 +16,7 @@ type UserEventsResult = Result<Vec<StreamEvent>, HsErrorKind>;
 /// the watcher uses, and the PKDNS lookup.
 #[derive(Default)]
 pub struct MockHomeserverClient {
-    /// Lines the first `poll_events` returns. Later polls return none.
+    /// Lines the first `read_feed` returns. Later polls return none.
     lines: Mutex<Vec<String>>,
 
     /// The failure every poll returns instead, when set.
@@ -38,14 +37,14 @@ pub struct MockHomeserverClient {
     /// Useful for asserting the processor continued to, or stopped before, specific users.
     calls: Mutex<Vec<(String, String, u64, u16)>>,
 
-    /// Bodies served by `get_resource` and `get_blob`, by URI. Any other URI is a 404.
+    /// Bodies served by `read_resource` and `read_blob`, by URI. Any other URI is a 404.
     resources: HashMap<String, Vec<u8>>,
 
-    /// Failures `get_resource` and `get_blob` answer instead, by URI. Checked before
+    /// Failures `read_resource` and `read_blob` answer instead, by URI. Checked before
     /// `resources`.
     resource_errors: HashMap<String, HsErrorKind>,
 
-    /// Blob URIs `get_blob` was asked for, in fetch order, served or not, so a test that
+    /// Blob URIs `read_blob` was asked for, in fetch order, served or not, so a test that
     /// asserts no download happened reads this.
     blob_fetches: Mutex<Vec<String>>,
 
@@ -112,7 +111,7 @@ impl MockHomeserverClient {
         self
     }
 
-    /// `get_resource` of `uri` fails with `kind`, labelled with the owner's key as the real
+    /// `read_resource` of `uri` fails with `kind`, labelled with the owner's key as the real
     /// client labels a failed fetch.
     pub fn with_resource_error(mut self, uri: impl Into<String>, kind: HsErrorKind) -> Self {
         self.resource_errors.insert(uri.into(), kind);
@@ -136,7 +135,7 @@ impl MockHomeserverClient {
         self.calls.lock().await.clone()
     }
 
-    /// The blob URIs `get_blob` was asked for, in fetch order.
+    /// The blob URIs `read_blob` was asked for, in fetch order.
     pub async fn blob_fetches(&self) -> Vec<String> {
         self.blob_fetches.lock().await.clone()
     }
@@ -156,7 +155,7 @@ fn not_found(resource: &PubkyResource, op: HsOp) -> HsError {
 impl PkdnsHomeserverResolver for MockHomeserverClient {
     async fn resolve_record(&self, _user_pk: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
         if self.homeserver_lookup_fails {
-            return Err(ResolveError::new("homeserver lookup failed").into());
+            return Err(pubky_watcher::PkdnsLookupError::new("homeserver lookup failed").into());
         }
         Ok(match &self.homeserver_of {
             Some((user, homeserver)) => {
@@ -168,8 +167,8 @@ impl PkdnsHomeserverResolver for MockHomeserverClient {
 }
 
 #[async_trait::async_trait]
-impl HomeserverEventSource for MockHomeserverClient {
-    async fn poll_events(
+impl FeedReader for MockHomeserverClient {
+    async fn read_feed(
         &self,
         hs: &PublicKey,
         cursor: u64,
@@ -177,15 +176,15 @@ impl HomeserverEventSource for MockHomeserverClient {
     ) -> Result<Vec<String>, HsError> {
         self.polls.lock().await.push((hs.z32(), cursor, limit));
         if let Some(kind) = &self.poll_error {
-            return Err(HsError::new(hs, HsOp::PollEvents, kind.clone()));
+            return Err(HsError::new(hs, HsOp::ReadFeed, kind.clone()));
         }
         Ok(std::mem::take(&mut *self.lines.lock().await))
     }
 }
 
 #[async_trait::async_trait]
-impl KeyEventSource for MockHomeserverClient {
-    async fn user_events(
+impl StreamReader for MockHomeserverClient {
+    async fn read_stream(
         &self,
         hs: &PublicKey,
         user: &PublicKey,
@@ -212,19 +211,19 @@ impl KeyEventSource for MockHomeserverClient {
                 .unwrap_or_else(|| Ok(Vec::new())),
         };
 
-        result.map_err(|kind| HsError::new(hs, HsOp::UserEvents, kind))
+        result.map_err(|kind| HsError::new(hs, HsOp::ReadStream, kind))
     }
 }
 
 #[async_trait::async_trait]
 impl ResourceReader for MockHomeserverClient {
-    async fn get_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
-        self.serve(resource, HsOp::GetResource)
+    async fn read_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        self.serve(resource, HsOp::ReadResource)
     }
 
-    async fn get_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+    async fn read_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
         self.blob_fetches.lock().await.push(resource.to_pubky_url());
-        self.serve(resource, HsOp::GetBlob)
+        self.serve(resource, HsOp::ReadBlob)
     }
 }
 

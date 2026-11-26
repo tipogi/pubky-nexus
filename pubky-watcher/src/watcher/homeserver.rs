@@ -12,26 +12,26 @@ use super::{
 use crate::feed::{FeedBatch, FeedEvent};
 use crate::processor::{RunOutcome, TEventProcessor};
 use crate::traits::{EventHandler, LineParseOutcome, ParseFromLine};
-use crate::HomeserverEventSource;
+use crate::FeedReader;
 
 /// Builds a [`HomeserverWatcher`]: see [`Watcher::homeserver`](super::Watcher::homeserver).
 pub struct HomeserverWatcherBuilder<H> {
     homeserver: PublicKey,
     handler: H,
     events_limit: u16,
-    source: Arc<dyn HomeserverEventSource>,
+    reader: Arc<dyn FeedReader>,
 }
 
 impl HomeserverWatcherBuilder<Missing> {
     pub(super) fn new<C>(client: C, homeserver: PublicKey) -> Self
     where
-        C: HomeserverEventSource,
+        C: FeedReader,
     {
         Self {
             homeserver,
             handler: Missing,
             events_limit: DEFAULT_EVENTS_LIMIT,
-            source: Arc::new(client),
+            reader: Arc::new(client),
         }
     }
 }
@@ -51,7 +51,7 @@ impl<H> HomeserverWatcherBuilder<H> {
             homeserver: self.homeserver,
             handler,
             events_limit: self.events_limit,
-            source: self.source,
+            reader: self.reader,
         }
     }
 
@@ -73,7 +73,7 @@ impl<H> HomeserverWatcherBuilder<H> {
                 homeserver: self.homeserver,
                 handler: Arc::new(self.handler),
                 events_limit: self.events_limit,
-                source: self.source,
+                reader: self.reader,
                 shutdown_rx,
             }),
         })
@@ -85,7 +85,7 @@ struct Config<Err> {
     homeserver_id: String,
     handler: Arc<dyn EventHandler<FeedEvent, Err>>,
     events_limit: u16,
-    source: Arc<dyn HomeserverEventSource>,
+    reader: Arc<dyn FeedReader>,
     shutdown_rx: Receiver<bool>,
 }
 
@@ -169,8 +169,8 @@ where
             "Polling events"
         );
         let lines = config
-            .source
-            .poll_events(&config.homeserver, self.cursor.id(), config.events_limit)
+            .reader
+            .read_feed(&config.homeserver, self.cursor.id(), config.events_limit)
             .await?;
         if lines.is_empty() {
             debug!("No new events");
@@ -247,8 +247,8 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::{
-        ConfigError, EventHandler, EventType, FeedEvent, HomeserverEventSource, HsError,
-        HsErrorKind, HsOp, ProtocolError, Watcher, WatcherError,
+        ConfigError, EventHandler, EventType, FeedEvent, FeedReader, HsError, HsErrorKind, HsOp,
+        ProtocolError, Watcher, WatcherError,
     };
 
     /// The handler's own error: the index of the event it failed on.
@@ -277,10 +277,10 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl HomeserverEventSource for &'static Lines {
-        async fn poll_events(
+    impl FeedReader for &'static Lines {
+        async fn read_feed(
             &self,
-            _hs: &PublicKey,
+            _hs_pubkey: &PublicKey,
             cursor: u64,
             limit: u16,
         ) -> Result<Vec<String>, HsError> {
@@ -293,16 +293,16 @@ mod tests {
     struct Down;
 
     #[async_trait::async_trait]
-    impl HomeserverEventSource for Down {
-        async fn poll_events(
+    impl FeedReader for Down {
+        async fn read_feed(
             &self,
-            hs: &PublicKey,
+            hs_pubkey: &PublicKey,
             _cursor: u64,
             _limit: u16,
         ) -> Result<Vec<String>, HsError> {
             Err(HsError::new(
-                hs,
-                HsOp::PollEvents,
+                hs_pubkey,
+                HsOp::ReadFeed,
                 HsErrorKind::ServerError(503, "down".into()),
             ))
         }
@@ -343,12 +343,12 @@ mod tests {
     }
 
     async fn run(
-        source: impl HomeserverEventSource,
+        reader: impl FeedReader,
         handler: &'static Recorder,
         cursor: u64,
     ) -> Result<crate::WatchOutcome, WatcherError<HandlerFailed>> {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        Watcher::homeserver(source, homeserver())
+        Watcher::homeserver(reader, homeserver())
             .handler(handler)
             .build(shutdown_rx)
             .expect("a valid configuration")
@@ -360,9 +360,9 @@ mod tests {
     #[tokio::test]
     async fn a_batch_is_handled_and_moves_the_cursor() {
         let handler = leak(Recorder::default());
-        let source = Lines::new(&["PUT pubky://a/pub/x", "DEL pubky://a/pub/y", "cursor: 12"]);
+        let reader = Lines::new(&["PUT pubky://a/pub/x", "DEL pubky://a/pub/y", "cursor: 12"]);
 
-        let outcome = run(source, handler, 10).await.unwrap();
+        let outcome = run(reader, handler, 10).await.unwrap();
 
         assert_eq!(outcome.cursor, EventCursor::new(12));
         assert_eq!(outcome.processed_events, 2);
@@ -376,9 +376,9 @@ mod tests {
     #[tokio::test]
     async fn unrecognized_lines_are_skipped() {
         let handler = leak(Recorder::default());
-        let source = Lines::new(&["garbage", "PUT pubky://a/pub/x", "cursor: 11"]);
+        let reader = Lines::new(&["garbage", "PUT pubky://a/pub/x", "cursor: 11"]);
 
-        let outcome = run(source, handler, 10).await.unwrap();
+        let outcome = run(reader, handler, 10).await.unwrap();
 
         assert_eq!(outcome.cursor, EventCursor::new(11));
         assert_eq!(outcome.processed_events, 1);
@@ -445,9 +445,9 @@ mod tests {
             shutdown_after: Some((1, shutdown_tx)),
             ..Recorder::default()
         });
-        let source = Lines::new(&["PUT pubky://a/pub/x", "PUT pubky://a/pub/y", "cursor: 12"]);
+        let reader = Lines::new(&["PUT pubky://a/pub/x", "PUT pubky://a/pub/y", "cursor: 12"]);
 
-        let outcome = Watcher::homeserver(source, homeserver())
+        let outcome = Watcher::homeserver(reader, homeserver())
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -465,9 +465,9 @@ mod tests {
     async fn a_run_after_shutdown_does_not_poll() {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         shutdown_tx.send(true).unwrap();
-        let source = Lines::new(&["PUT pubky://a/pub/x", "cursor: 12"]);
+        let reader = Lines::new(&["PUT pubky://a/pub/x", "cursor: 12"]);
 
-        let outcome = Watcher::homeserver(source, homeserver())
+        let outcome = Watcher::homeserver(reader, homeserver())
             .handler(leak(Recorder::default()))
             .build(shutdown_rx)
             .unwrap()
@@ -477,7 +477,7 @@ mod tests {
 
         assert!(!outcome.completed);
         assert_eq!(outcome.cursor, EventCursor::new(10));
-        assert!(source.polls.lock().unwrap().is_empty());
+        assert!(reader.polls.lock().unwrap().is_empty());
     }
 
     /// A failed poll or a failed handler fails the run.
@@ -485,7 +485,7 @@ mod tests {
     async fn a_failed_poll_or_handler_fails_the_run() {
         let error = run(Down, leak(Recorder::default()), 10).await.unwrap_err();
         assert!(
-            matches!(&error, WatcherError::Homeserver(e) if e.op == HsOp::PollEvents),
+            matches!(&error, WatcherError::Homeserver(e) if e.op == HsOp::ReadFeed),
             "{error:?}"
         );
 
@@ -493,8 +493,8 @@ mod tests {
             fail_at: Some(1),
             ..Recorder::default()
         });
-        let source = Lines::new(&["PUT pubky://a/pub/x", "PUT pubky://a/pub/y", "cursor: 11"]);
-        let error = run(source, failing, 10).await.unwrap_err();
+        let reader = Lines::new(&["PUT pubky://a/pub/x", "PUT pubky://a/pub/y", "cursor: 11"]);
+        let error = run(reader, failing, 10).await.unwrap_err();
         assert!(
             matches!(error, WatcherError::Handler(HandlerFailed(1))),
             "{error:?}"
@@ -506,9 +506,9 @@ mod tests {
     #[tokio::test]
     async fn the_events_limit_is_requested_and_must_not_be_zero() {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        let source = Lines::new(&[]);
+        let reader = Lines::new(&[]);
 
-        Watcher::homeserver(source, homeserver())
+        Watcher::homeserver(reader, homeserver())
             .handler(leak(Recorder::default()))
             .events_limit(7)
             .build(shutdown_rx.clone())
@@ -516,7 +516,7 @@ mod tests {
             .run(EventCursor::new(3))
             .await
             .unwrap();
-        assert_eq!(*source.polls.lock().unwrap(), [(3, 7)]);
+        assert_eq!(*reader.polls.lock().unwrap(), [(3, 7)]);
 
         let zero = Watcher::homeserver(Lines::new(&[]), homeserver())
             .handler(leak(Recorder::default()))

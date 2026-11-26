@@ -194,7 +194,7 @@ impl From<ModelError> for EventProcessorError {
 /// (a file a user can point at any host) they stay per-event.
 impl From<HsError> for EventProcessorError {
     fn from(error: HsError) -> Self {
-        let on_stream = error.op == HsOp::UserEvents;
+        let on_stream = error.op == HsOp::ReadStream;
         let message = error.to_string();
         match error.kind {
             HsErrorKind::TooLarge { got, max } => Self::FetchSizeExceeded(got, max),
@@ -373,8 +373,8 @@ mod tests {
         let validation = HsErrorKind::Sdk("Cannot subscribe to more than 50 users".into());
         let parse = HsErrorKind::malformed("empty host");
 
-        let retried = hs_error(HsOp::GetResource, validation);
-        let dropped = hs_error(HsOp::GetResource, parse);
+        let retried = hs_error(HsOp::ReadResource, validation);
+        let dropped = hs_error(HsOp::ReadResource, parse);
         assert!(RetryScheduler::should_enqueue_related_event(&retried));
         assert!(!RetryScheduler::should_enqueue_related_event(&dropped));
         assert!(!dropped.should_not_retry_now());
@@ -385,10 +385,10 @@ mod tests {
     fn transport_failures_stop_the_stream_and_retry_fetches() {
         let kind = HsErrorKind::transport("connection reset");
 
-        let on_stream = hs_error(HsOp::UserEvents, kind.clone());
+        let on_stream = hs_error(HsOp::ReadStream, kind.clone());
         assert!(on_stream.should_not_retry_now(), "{on_stream:?}");
 
-        let on_blob = hs_error(HsOp::GetBlob, kind);
+        let on_blob = hs_error(HsOp::ReadBlob, kind);
         assert!(!on_blob.should_not_retry_now(), "{on_blob:?}");
         assert!(RetryScheduler::should_enqueue_related_event(&on_blob));
     }
@@ -397,13 +397,13 @@ mod tests {
     /// whole homeserver run, so the runner backs it off.
     #[test]
     fn event_stream_failures_abort_the_run() {
-        let server_error = hs_error(HsOp::UserEvents, HsErrorKind::ServerError(530, "".into()));
+        let server_error = hs_error(HsOp::ReadStream, HsErrorKind::ServerError(530, "".into()));
         let transport = hs_error(
-            HsOp::UserEvents,
+            HsOp::ReadStream,
             HsErrorKind::transport("connection refused"),
         );
-        let timeout = hs_error(HsOp::UserEvents, HsErrorKind::Timeout);
-        let rate_limited = hs_error(HsOp::UserEvents, HsErrorKind::RateLimited("".into()));
+        let timeout = hs_error(HsOp::ReadStream, HsErrorKind::Timeout);
+        let rate_limited = hs_error(HsOp::ReadStream, HsErrorKind::RateLimited("".into()));
 
         assert!(matches!(
             server_error,
@@ -431,12 +431,12 @@ mod tests {
     #[test]
     fn other_failures_stay_per_event() {
         for (op, kind) in [
-            (HsOp::GetResource, HsErrorKind::ServerError(500, "".into())),
-            (HsOp::GetBlob, HsErrorKind::transport("connection refused")),
-            (HsOp::PollEvents, HsErrorKind::RateLimited("".into())),
-            (HsOp::UserEvents, HsErrorKind::NotFound("".into())),
+            (HsOp::ReadResource, HsErrorKind::ServerError(500, "".into())),
+            (HsOp::ReadBlob, HsErrorKind::transport("connection refused")),
+            (HsOp::ReadFeed, HsErrorKind::RateLimited("".into())),
+            (HsOp::ReadStream, HsErrorKind::NotFound("".into())),
             (
-                HsOp::UserEvents,
+                HsOp::ReadStream,
                 HsErrorKind::Sdk("could not resolve".into()),
             ),
         ] {
@@ -445,7 +445,7 @@ mod tests {
             assert!(RetryScheduler::should_enqueue_related_event(&err) || err.is_not_found());
         }
 
-        let server_error = hs_error(HsOp::GetResource, HsErrorKind::ServerError(500, "".into()));
+        let server_error = hs_error(HsOp::ReadResource, HsErrorKind::ServerError(500, "".into()));
         assert!(
             matches!(
                 &server_error,
@@ -453,7 +453,7 @@ mod tests {
             ),
             "{server_error:?}"
         );
-        let rate_limited = hs_error(HsOp::PollEvents, HsErrorKind::RateLimited("".into()));
+        let rate_limited = hs_error(HsOp::ReadFeed, HsErrorKind::RateLimited("".into()));
         assert!(
             matches!(
                 &rate_limited,
@@ -461,14 +461,14 @@ mod tests {
             ),
             "{rate_limited:?}"
         );
-        assert!(hs_error(HsOp::UserEvents, HsErrorKind::NotFound("".into())).is_not_found());
+        assert!(hs_error(HsOp::ReadStream, HsErrorKind::NotFound("".into())).is_not_found());
     }
 
     /// A malformed event-stream request fails one user for the run: nothing is enqueued, the
     /// run goes on, and the user's kept cursor has the next run ask again.
     #[test]
     fn malformed_stream_request_skips_one_user_for_the_run() {
-        let err = hs_error(HsOp::UserEvents, HsErrorKind::malformed("bad url"));
+        let err = hs_error(HsOp::ReadStream, HsErrorKind::malformed("bad url"));
 
         assert!(matches!(err, EventProcessorError::Homeserver(_)), "{err:?}");
         assert!(!err.should_not_retry_now());
@@ -480,9 +480,9 @@ mod tests {
     #[test]
     fn timed_out_and_redirected_fetches_are_retried() {
         for (op, kind) in [
-            (HsOp::GetResource, HsErrorKind::Rejected(408, "".into())),
-            (HsOp::GetResource, HsErrorKind::Rejected(302, "".into())),
-            (HsOp::GetBlob, HsErrorKind::Timeout),
+            (HsOp::ReadResource, HsErrorKind::Rejected(408, "".into())),
+            (HsOp::ReadResource, HsErrorKind::Rejected(302, "".into())),
+            (HsOp::ReadBlob, HsErrorKind::Timeout),
         ] {
             let err = hs_error(op, kind);
             assert!(
@@ -504,7 +504,7 @@ mod tests {
     /// on (a fetch drops its event, the event stream skips its user) (#1202).
     #[test]
     fn rejected_fetches_are_not_retried() {
-        for op in [HsOp::GetResource, HsOp::GetBlob, HsOp::UserEvents] {
+        for op in [HsOp::ReadResource, HsOp::ReadBlob, HsOp::ReadStream] {
             for status in [400, 401, 403, 410] {
                 let err = hs_error(op, HsErrorKind::Rejected(status, "".into()));
                 assert!(
@@ -527,7 +527,7 @@ mod tests {
     /// An oversized body is a permanent size failure, not retried.
     #[test]
     fn too_large_is_a_size_failure() {
-        let err = hs_error(HsOp::GetBlob, HsErrorKind::TooLarge { got: 10, max: 5 });
+        let err = hs_error(HsOp::ReadBlob, HsErrorKind::TooLarge { got: 10, max: 5 });
 
         assert!(matches!(err, EventProcessorError::FetchSizeExceeded(10, 5)));
         assert!(!RetryScheduler::should_enqueue_related_event(&err));
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn message_names_the_homeserver_and_the_status() {
         let err = hs_error(
-            HsOp::PollEvents,
+            HsOp::ReadFeed,
             HsErrorKind::ServerError(502, "bad gateway".into()),
         );
 
@@ -556,12 +556,12 @@ mod tests {
     #[test]
     fn retried_fetch_errors_take_the_transient_class_and_keep_the_limit() {
         for err in [
-            hs_error(HsOp::GetResource, HsErrorKind::ServerError(500, "".into())),
-            hs_error(HsOp::GetResource, HsErrorKind::RateLimited("".into())),
-            hs_error(HsOp::GetResource, HsErrorKind::Rejected(408, "".into())),
-            hs_error(HsOp::GetResource, HsErrorKind::Timeout),
+            hs_error(HsOp::ReadResource, HsErrorKind::ServerError(500, "".into())),
+            hs_error(HsOp::ReadResource, HsErrorKind::RateLimited("".into())),
+            hs_error(HsOp::ReadResource, HsErrorKind::Rejected(408, "".into())),
+            hs_error(HsOp::ReadResource, HsErrorKind::Timeout),
             hs_error(
-                HsOp::GetResource,
+                HsOp::ReadResource,
                 HsErrorKind::Sdk("could not resolve".into()),
             ),
         ] {
@@ -573,7 +573,7 @@ mod tests {
             assert!(!err.is_flip_failed(), "{err:?}");
         }
 
-        let not_found = hs_error(HsOp::GetResource, HsErrorKind::NotFound("".into()));
+        let not_found = hs_error(HsOp::ReadResource, HsErrorKind::NotFound("".into()));
         assert!(!RetryScheduler::should_enqueue_related_event(&not_found));
         assert!(!not_found.is_flip_failed());
     }

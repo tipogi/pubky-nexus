@@ -13,7 +13,7 @@ use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::{EventCursor, PublicKey};
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{HsOp, KeyEventSource, StreamEvent};
+use pubky_watcher::{HsOp, StreamEvent, StreamReader};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
@@ -50,7 +50,7 @@ pub struct KeyBasedEventProcessor {
     pub limit: u16,
 
     pub event_handler: Arc<dyn EventHandler>,
-    pub client: Arc<dyn KeyEventSource>,
+    pub client: Arc<dyn StreamReader>,
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
     /// HS PKs that should not be indexed. Defense-in-depth: the runner already
@@ -119,7 +119,7 @@ impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
 
         // A format-valid id need not be a curve point, and then no user's stream on it can
         // be read. That never changes, so the run stops here instead of failing every user.
-        let hs_pk = homeserver_public_key(&self.homeserver_id, HsOp::UserEvents)?;
+        let hs_pk = homeserver_public_key(&self.homeserver_id, HsOp::ReadStream)?;
         let deadline = Instant::now() + self.budget;
 
         let mut users = self
@@ -249,7 +249,7 @@ impl KeyBasedEventProcessor {
         let hs_id: &str = self.homeserver_id.as_ref();
         let stream_events = self
             .client
-            .user_events(hs_pk, user_pk, cursor.id(), self.limit, USER_EVENTS_PATH)
+            .read_stream(hs_pk, user_pk, cursor.id(), self.limit, USER_EVENTS_PATH)
             .await?;
 
         let user_id = user_pk.z32();

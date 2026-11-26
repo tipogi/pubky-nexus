@@ -11,7 +11,7 @@ use super::{
 };
 use crate::processor::{RunOutcome, TEventProcessor};
 use crate::traits::EventHandler;
-use crate::{KeyEventSource, StreamEvent};
+use crate::{StreamEvent, StreamReader};
 
 /// The paths a user's stream is read under when the builder sets none: everything they
 /// publish.
@@ -25,7 +25,7 @@ pub struct KeyStreamWatcherBuilder<H> {
     handler: H,
     events_limit: u16,
     path: String,
-    source: Arc<dyn KeyEventSource>,
+    reader: Arc<dyn StreamReader>,
 }
 
 impl KeyStreamWatcherBuilder<Missing> {
@@ -35,7 +35,7 @@ impl KeyStreamWatcherBuilder<Missing> {
         users: Vec<(PublicKey, EventCursor)>,
     ) -> Self
     where
-        C: KeyEventSource,
+        C: StreamReader,
     {
         Self {
             homeserver,
@@ -43,7 +43,7 @@ impl KeyStreamWatcherBuilder<Missing> {
             handler: Missing,
             events_limit: DEFAULT_EVENTS_LIMIT,
             path: DEFAULT_KEY_STREAM_PATH.to_string(),
-            source: Arc::new(client),
+            reader: Arc::new(client),
         }
     }
 }
@@ -73,7 +73,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
             handler,
             events_limit: self.events_limit,
             path: self.path,
-            source: self.source,
+            reader: self.reader,
         }
     }
 }
@@ -105,7 +105,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
                 handler: Arc::new(self.handler),
                 events_limit: self.events_limit,
                 path: self.path,
-                source: self.source,
+                reader: self.reader,
                 shutdown_rx,
             }),
         })
@@ -119,7 +119,7 @@ struct Config<Err> {
     handler: Arc<dyn EventHandler<StreamEvent, Err>>,
     events_limit: u16,
     path: String,
-    source: Arc<dyn KeyEventSource>,
+    reader: Arc<dyn StreamReader>,
     shutdown_rx: Receiver<bool>,
 }
 
@@ -241,8 +241,8 @@ where
 
         debug!(user = %user.z32(), cursor = cursor.id(), "Reading the user's events");
         let events = config
-            .source
-            .user_events(
+            .reader
+            .read_stream(
                 &config.homeserver,
                 user,
                 cursor.id(),
@@ -327,8 +327,8 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::{
-        ConfigError, EventHandler, EventType, HsError, HsErrorKind, HsOp, KeyEventSource,
-        ProtocolError, StreamEvent, Watcher, WatcherError,
+        ConfigError, EventHandler, EventType, HsError, HsErrorKind, HsOp, ProtocolError,
+        StreamEvent, StreamReader, Watcher, WatcherError,
     };
 
     fn key() -> PublicKey {
@@ -361,20 +361,22 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl KeyEventSource for &'static Streams {
-        async fn user_events(
+    impl StreamReader for &'static Streams {
+        async fn read_stream(
             &self,
-            _hs: &PublicKey,
-            user: &PublicKey,
+            _hs_pubkey: &PublicKey,
+            user_pubkey: &PublicKey,
             cursor: u64,
             limit: u16,
             path: &str,
         ) -> Result<Vec<StreamEvent>, HsError> {
-            self.requests
-                .lock()
-                .unwrap()
-                .push((user.clone(), cursor, limit, path.to_string()));
-            Ok(self.events.get(user).cloned().unwrap_or_default())
+            self.requests.lock().unwrap().push((
+                user_pubkey.clone(),
+                cursor,
+                limit,
+                path.to_string(),
+            ));
+            Ok(self.events.get(user_pubkey).cloned().unwrap_or_default())
         }
     }
 
@@ -408,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn each_user_moves_to_their_own_cursor() {
         let (alice, bob, carol) = (key(), key(), key());
-        let source = Streams::new(vec![
+        let reader = Streams::new(vec![
             (&alice, vec![event(&alice, 11), event(&alice, 12)]),
             (&bob, vec![event(&bob, 31)]),
         ]);
@@ -420,7 +422,7 @@ mod tests {
         ];
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let outcome = Watcher::key_stream(source, key(), users)
+        let outcome = Watcher::key_stream(reader, key(), users)
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -446,10 +448,10 @@ mod tests {
     async fn requests_carry_the_cursor_limit_and_path() {
         let alice = key();
         for (path, expected) in [(None, "/pub/"), (Some("/pub/my.app/"), "/pub/my.app/")] {
-            let source = Streams::new(vec![]);
+            let reader = Streams::new(vec![]);
             let (_shutdown_tx, shutdown_rx) = watch::channel(false);
             let mut builder =
-                Watcher::key_stream(source, key(), vec![(alice.clone(), EventCursor::new(4))])
+                Watcher::key_stream(reader, key(), vec![(alice.clone(), EventCursor::new(4))])
                     .handler(recorder())
                     .events_limit(9);
             if let Some(path) = path {
@@ -459,7 +461,7 @@ mod tests {
             builder.build(shutdown_rx).unwrap().run().await.unwrap();
 
             assert_eq!(
-                *source.requests.lock().unwrap(),
+                *reader.requests.lock().unwrap(),
                 [(alice.clone(), 4, 9, expected.to_string())]
             );
         }
@@ -497,12 +499,12 @@ mod tests {
                 not_advanced(12, 11),
             ),
         ] {
-            let source = Streams::new(vec![(&alice, events)]);
+            let reader = Streams::new(vec![(&alice, events)]);
             let handler = recorder();
             let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
             let result =
-                Watcher::key_stream(source, key(), vec![(alice.clone(), EventCursor::new(10))])
+                Watcher::key_stream(reader, key(), vec![(alice.clone(), EventCursor::new(10))])
                     .handler(handler)
                     .events_limit(2)
                     .build(shutdown_rx)
@@ -523,7 +525,7 @@ mod tests {
     #[tokio::test]
     async fn a_run_stopped_by_shutdown_keeps_safe_cursors() {
         let (alice, bob) = (key(), key());
-        let source = Streams::new(vec![
+        let reader = Streams::new(vec![
             (&alice, vec![event(&alice, 11), event(&alice, 12)]),
             (&bob, vec![event(&bob, 31)]),
         ]);
@@ -537,7 +539,7 @@ mod tests {
             (bob.clone(), EventCursor::new(30)),
         ];
 
-        let outcome = Watcher::key_stream(source, key(), users)
+        let outcome = Watcher::key_stream(reader, key(), users)
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -557,18 +559,18 @@ mod tests {
     struct Down;
 
     #[async_trait::async_trait]
-    impl KeyEventSource for Down {
-        async fn user_events(
+    impl StreamReader for Down {
+        async fn read_stream(
             &self,
-            hs: &PublicKey,
-            _user: &PublicKey,
+            hs_pubkey: &PublicKey,
+            _user_pubkey: &PublicKey,
             _cursor: u64,
             _limit: u16,
             _path: &str,
         ) -> Result<Vec<StreamEvent>, HsError> {
             Err(HsError::new(
-                hs,
-                HsOp::UserEvents,
+                hs_pubkey,
+                HsOp::ReadStream,
                 HsErrorKind::ServerError(503, "down".into()),
             ))
         }
@@ -606,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn a_handler_failure_fails_the_run_with_its_own_error() {
         let alice = key();
-        let source = Streams::new(vec![(
+        let reader = Streams::new(vec![(
             &alice,
             vec![event(&alice, 11), event(&alice, 12), event(&alice, 13)],
         )]);
@@ -616,7 +618,7 @@ mod tests {
         }));
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let error = Watcher::key_stream(source, key(), vec![(alice, EventCursor::new(10))])
+        let error = Watcher::key_stream(reader, key(), vec![(alice, EventCursor::new(10))])
             .handler(handler)
             .build(shutdown_rx)
             .unwrap()
@@ -646,7 +648,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(&error, WatcherError::Homeserver(e) if e.op == HsOp::UserEvents),
+            matches!(&error, WatcherError::Homeserver(e) if e.op == HsOp::ReadStream),
             "{error:?}"
         );
         assert!(handler.cursors.lock().unwrap().is_empty());

@@ -26,8 +26,7 @@ use nexus_watcher::service::{
 use pubky::{Keypair, PubkyResource, PublicKey};
 use pubky_social_specs::PubkyId;
 use pubky_watcher::{
-    EventType, HomeserverEventSource, HsError, HsErrorKind, KeyEventSource, ResourceReader,
-    StreamEvent,
+    EventType, FeedReader, HsError, HsErrorKind, ResourceReader, StreamEvent, StreamReader,
 };
 use tokio::sync::watch;
 
@@ -1073,20 +1072,20 @@ impl PkdnsHomeserverResolver for MappingChangesDuringFetch {
 }
 
 #[async_trait::async_trait]
-impl HomeserverEventSource for MappingChangesDuringFetch {
-    async fn poll_events(
+impl FeedReader for MappingChangesDuringFetch {
+    async fn read_feed(
         &self,
         hs: &PublicKey,
         cursor: u64,
         limit: u16,
     ) -> Result<Vec<String>, HsError> {
-        self.inner.poll_events(hs, cursor, limit).await
+        self.inner.read_feed(hs, cursor, limit).await
     }
 }
 
 #[async_trait::async_trait]
-impl KeyEventSource for MappingChangesDuringFetch {
-    async fn user_events(
+impl StreamReader for MappingChangesDuringFetch {
+    async fn read_stream(
         &self,
         hs: &PublicKey,
         user: &PublicKey,
@@ -1102,18 +1101,18 @@ impl KeyEventSource for MappingChangesDuringFetch {
             }
         }
         .expect("the mapping changes");
-        self.inner.user_events(hs, user, cursor, limit, path).await
+        self.inner.read_stream(hs, user, cursor, limit, path).await
     }
 }
 
 #[async_trait::async_trait]
 impl ResourceReader for MappingChangesDuringFetch {
-    async fn get_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
-        self.inner.get_resource(resource).await
+    async fn read_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        self.inner.read_resource(resource).await
     }
 
-    async fn get_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
-        self.inner.get_blob(resource).await
+    async fn read_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        self.inner.read_blob(resource).await
     }
 }
 

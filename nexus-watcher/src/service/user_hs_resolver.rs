@@ -756,7 +756,6 @@ mod tests {
     use nexus_common::{StackConfig, StackManager};
     use pubky::Keypair;
     use pubky_social_specs::PubkyId;
-    use pubky_watcher::ResolveError;
 
     async fn setup() -> Result<(), DynError> {
         StackManager::setup(&StackConfig::default()).await
@@ -805,7 +804,7 @@ mod tests {
             &self,
             _user_pk: &PublicKey,
         ) -> Result<PkdnsRecord, PkdnsLookupError> {
-            Err(ResolveError::new("dht unreachable").into())
+            Err(pubky_watcher::PkdnsLookupError::new("dht unreachable").into())
         }
     }
 
@@ -1184,7 +1183,7 @@ mod tests {
             if user_id == self.target {
                 Ok(PkdnsRecord::Missing)
             } else {
-                Err(ResolveError::new("not the user under test").into())
+                Err(pubky_watcher::PkdnsLookupError::new("not the user under test").into())
             }
         }
     }

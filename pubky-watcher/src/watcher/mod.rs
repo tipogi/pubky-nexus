@@ -22,7 +22,7 @@ use pubky::{EventCursor, PublicKey};
 use thiserror::Error;
 
 use crate::processor::{wait_on_own_task, Panicked, SLOW_RUN_THRESHOLD};
-use crate::{HomeserverEventSource, HsError, KeyEventSource};
+use crate::{FeedReader, HsError, StreamReader};
 
 pub use homeserver::{HomeserverWatcher, HomeserverWatcherBuilder};
 pub use key_stream::{
@@ -223,7 +223,7 @@ impl Watcher {
     /// cursor. The handler gets each [`FeedEvent`](crate::FeedEvent).
     pub fn homeserver<C>(client: C, homeserver: PublicKey) -> HomeserverWatcherBuilder<Missing>
     where
-        C: HomeserverEventSource,
+        C: FeedReader,
     {
         HomeserverWatcherBuilder::new(client, homeserver)
     }
@@ -236,7 +236,7 @@ impl Watcher {
         users: Vec<(PublicKey, EventCursor)>,
     ) -> KeyStreamWatcherBuilder<Missing>
     where
-        C: KeyEventSource,
+        C: StreamReader,
     {
         KeyStreamWatcherBuilder::new(client, homeserver, users)
     }

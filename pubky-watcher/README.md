@@ -84,13 +84,13 @@ exercise:
 
 | Trait | What it does |
 |---|---|
-| `HomeserverEventSource` | a homeserver's `/events/` feed |
-| `KeyEventSource` | a user's `/events-stream` (a `429` is retried inside the client) |
+| `FeedReader` | a homeserver's `/events/` feed |
+| `StreamReader` | a user's `/events-stream` (a `429` is retried inside the client) |
 | `ResourceReader` | a `PUT` event's resource or blob, under a size cap |
-| `HomeserverResolver` | the signed PKDNS record a user publishes; `published_homeserver` reads the homeserver it names |
+| `PkdnsLookup` | the signed PKDNS record a user publishes; `published_homeserver` reads the homeserver it names |
 
 The resolver returns the raw signed record, so that you can keep it, check its timestamp,
-and refuse an older answer that is replayed or lagging. A failed lookup is a `ResolveError`,
+and refuse an older answer that is replayed or lagging. A failed lookup is a `PkdnsLookupError`,
 whose `source()` is pkarr's error.
 
 A failed call is an `HsError`: the operation (poll events, user events, get resource, get
@@ -131,9 +131,9 @@ as it was first extracted:
   by `build`, `pre_run` and `run`.
 - `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public.
 - `WatcherClient::mainnet()` and `testnet()` fail with `ClientError` instead of
-  `pubky::Error`, and `HomeserverResolver::resolve_record` with the crate's `ResolveError`
+  `pubky::Error`, and `PkdnsLookup::lookup_homeserver_record` with the crate's `PkdnsLookupError`
   instead of pkarr's. Neither names an SDK type: the SDK's error is reachable only as their
-  `source()`. `ResolveError`'s message still keeps the SDK's wording and includes the source's
+  `source()`. `PkdnsLookupError`'s message still keeps the SDK's wording and includes the source's
   text ("Failed to resolve the DHT record: …"), so logs that print it read as before.
 
 ## Dependencies

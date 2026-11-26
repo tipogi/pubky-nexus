@@ -10,7 +10,7 @@ use nexus_common::models::user::PkdnsHomeserverResolver;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{FeedBatch, HomeserverEventSource, HsErrorKind, HsOp};
+use pubky_watcher::{FeedBatch, FeedReader, HsErrorKind, HsOp};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::watch::Receiver;
@@ -129,7 +129,7 @@ pub struct HsEventProcessor {
     pub limit: u16,
     pub event_handler: Arc<dyn EventHandler>,
     /// Client the homeserver's events are polled through
-    pub client: Arc<dyn HomeserverEventSource>,
+    pub client: Arc<dyn FeedReader>,
     /// PKDNS lookup for the homeserver of a user without a `HOSTED_BY` edge
     pub resolver: Arc<dyn PkdnsHomeserverResolver>,
     pub shutdown_rx: Receiver<bool>,
@@ -293,10 +293,10 @@ impl HsEventProcessor {
     async fn poll_events(&self) -> Result<Vec<String>, EventProcessorError> {
         debug!(cursor = %self.homeserver.cursor, "Polling events");
 
-        let hs = homeserver_public_key(&self.homeserver.id, HsOp::PollEvents)?;
+        let hs = homeserver_public_key(&self.homeserver.id, HsOp::ReadFeed)?;
         let lines = self
             .client
-            .poll_events(&hs, self.homeserver.cursor, self.limit)
+            .read_feed(&hs, self.homeserver.cursor, self.limit)
             .await
             .inspect_err(|e| {
                 if matches!(e.kind, HsErrorKind::TooLarge { .. }) {

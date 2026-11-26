@@ -12,7 +12,7 @@ use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
 use pubky_social_specs::PubkyId;
-use pubky_watcher::KeyEventSource;
+use pubky_watcher::StreamReader;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
@@ -74,7 +74,7 @@ pub struct KeyBasedEventProcessorRunner {
 
     pub event_handler: Arc<dyn EventHandler>,
     /// Client the processors this runner builds read users' event streams through
-    pub client: Arc<dyn KeyEventSource>,
+    pub client: Arc<dyn StreamReader>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Primary homeserver ID, excluded from the external targets list
@@ -103,7 +103,7 @@ impl KeyBasedEventProcessorRunner {
     /// Creates a runner configured by `config`, sharing the given client, handler and scheduler
     pub fn new(
         config: &WatcherConfig,
-        client: Arc<dyn KeyEventSource>,
+        client: Arc<dyn StreamReader>,
         event_handler: Arc<dyn EventHandler>,
         retry_scheduler: Arc<RetryScheduler>,
         shutdown_rx: Receiver<bool>,

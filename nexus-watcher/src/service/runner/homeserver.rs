@@ -9,7 +9,7 @@ use nexus_common::models::user::PkdnsHomeserverResolver;
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use pubky_social_specs::PubkyId;
-use pubky_watcher::HomeserverEventSource;
+use pubky_watcher::FeedReader;
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 use tracing::debug;
@@ -20,7 +20,7 @@ pub struct HsEventProcessorRunner {
 
     pub event_handler: Arc<dyn EventHandler>,
     /// Client the processors this runner builds poll events through
-    pub client: Arc<dyn HomeserverEventSource>,
+    pub client: Arc<dyn FeedReader>,
     /// PKDNS lookup the processors this runner builds resolve users' homeservers through
     pub resolver: Arc<dyn PkdnsHomeserverResolver>,
     pub shutdown_rx: Receiver<bool>,
@@ -37,7 +37,7 @@ impl HsEventProcessorRunner {
     /// and scheduler
     pub fn new(
         config: &WatcherConfig,
-        client: Arc<dyn HomeserverEventSource>,
+        client: Arc<dyn FeedReader>,
         resolver: Arc<dyn PkdnsHomeserverResolver>,
         event_handler: Arc<dyn EventHandler>,
         retry_scheduler: Arc<RetryScheduler>,

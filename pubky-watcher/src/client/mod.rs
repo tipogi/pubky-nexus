@@ -3,10 +3,10 @@
 //! Its capabilities are split into narrow traits, so that a caller, or a test, depends only on
 //! the one it uses:
 //!
-//! - [`HomeserverEventSource`]: a homeserver's `/events/` feed
-//! - [`KeyEventSource`]: a user's `/events-stream`
+//! - [`FeedReader`]: a homeserver's `/events/` feed
+//! - [`StreamReader`]: a user's `/events-stream`
 //! - [`ResourceReader`]: a `PUT` event's resource or blob, under a size cap
-//! - [`HomeserverResolver`]: a user's PKDNS record
+//! - [`PkdnsLookup`]: a user's PKDNS record
 //!
 //! The module depends on no Nexus type: homeservers and users are [`pubky::PublicKey`]s,
 //! size caps are plain values, and it records no metrics.
@@ -14,13 +14,13 @@
 mod error;
 mod event;
 mod fetch;
-mod resolver;
+mod pkdns_lookup;
 mod watcher_client;
 
 pub use error::{ClientError, HsError, HsErrorKind, HsOp};
 pub use event::EventType;
-pub use resolver::{published_homeserver, HomeserverResolver, ResolveError};
+pub use pkdns_lookup::{published_homeserver, PkdnsLookup, PkdnsLookupError};
 pub use watcher_client::{
-    HomeserverEventSource, KeyEventSource, ResourceReader, StreamEvent, WatcherClient,
-    WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
+    FeedReader, ResourceReader, StreamEvent, StreamReader, WatcherClient, WatcherClientBuilder,
+    DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };

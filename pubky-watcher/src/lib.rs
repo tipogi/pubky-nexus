@@ -10,8 +10,8 @@
 //! means, where it is stored, where cursors are kept, and its retry and backoff policy.
 //!
 //! - [`WatcherClient`] makes every homeserver call, split into narrow capability traits:
-//!   [`HomeserverEventSource`], [`KeyEventSource`], [`ResourceReader`] and
-//!   [`HomeserverResolver`]. A failure is an [`HsError`].
+//!   [`FeedReader`], [`StreamReader`], [`ResourceReader`] and
+//!   [`PkdnsLookup`]. A failure is an [`HsError`].
 //! - [`TEventProcessor`] is one run over one homeserver, generic over the application's
 //!   event and error types; [`TEventProcessorRunner`] runs one per homeserver.
 //! - Retry is opt-in through [`RetryableError`], [`EventRetryScheduler`] and
@@ -30,9 +30,9 @@ mod traits;
 mod watcher;
 
 pub use client::{
-    published_homeserver, ClientError, EventType, HomeserverEventSource, HomeserverResolver,
-    HsError, HsErrorKind, HsOp, KeyEventSource, ResolveError, ResourceReader, StreamEvent,
-    WatcherClient, WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
+    published_homeserver, ClientError, EventType, FeedReader, HsError, HsErrorKind, HsOp,
+    PkdnsLookup, PkdnsLookupError, ResourceReader, StreamEvent, StreamReader, WatcherClient,
+    WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };
 pub use feed::{FeedBatch, FeedEvent, CURSOR_PREFIX};
 pub use processor::{

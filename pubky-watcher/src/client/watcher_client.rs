@@ -11,7 +11,7 @@ use tracing::{error, trace, warn};
 use super::fetch::{
     fetch_capped, read_stream_capped, MAX_ERROR_BODY, MAX_EVENTS_BODY, MAX_RESOURCE_SIZE,
 };
-use super::{ClientError, EventType, HomeserverResolver, HsError, HsErrorKind, HsOp, ResolveError};
+use super::{ClientError, EventType, HsError, HsErrorKind, HsOp, PkdnsLookup, PkdnsLookupError};
 
 /// The blob cap of a client that sets none ([`WatcherClient::with_max_file_size`]): 100 MiB,
 /// the homeserver's own limit.
@@ -23,11 +23,11 @@ pub const DEFAULT_MAX_FILE_SIZE: u64 = 100 * (1 << 20);
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Waits between the retries of a rate-limited `/events-stream` request.
-const USER_EVENTS_429_BACKOFF_SECS: [u64; 3] = [1, 2, 3];
+const READ_STREAM_429_BACKOFF_SECS: [u64; 3] = [1, 2, 3];
 
 /// One event from a homeserver's per-user `/events-stream`: all the key-based
 /// processor needs from it.
-/// Returned by [`KeyEventSource::user_events`].
+/// Returned by [`StreamReader::read_stream`].
 #[derive(Debug, Clone)]
 pub struct StreamEvent {
     /// Whether the event wrote or deleted the resource ([`EventType`]).
@@ -71,17 +71,17 @@ impl From<pubky::Event> for StreamEvent {
 
 /// A homeserver's `/events/` feed, which covers every user it hosts under one cursor.
 ///
-/// A failure is labelled with `hs`, the homeserver polled.
+/// A failure is labelled with `hs_pubkey`, the homeserver polled.
 /// [`WatcherClient`] implements it, and [`Watcher::homeserver`](crate::Watcher::homeserver)
 /// reads through it.
 #[async_trait::async_trait]
-pub trait HomeserverEventSource: Send + Sync + 'static {
+pub trait FeedReader: Send + Sync + 'static {
     /// Primary-style `GET /events/?cursor=&limit=`. Returns the raw lines, the
     /// cursor line included; an empty body has none. A body over the events cap fails
     /// with [`HsErrorKind::TooLarge`].
-    async fn poll_events(
+    async fn read_feed(
         &self,
-        hs: &PublicKey,
+        hs_pubkey: &PublicKey,
         cursor: u64,
         limit: u16,
     ) -> Result<Vec<String>, HsError>;
@@ -89,19 +89,19 @@ pub trait HomeserverEventSource: Send + Sync + 'static {
 
 /// A user's `/events-stream` on a homeserver, with a cursor per user.
 ///
-/// A failure is labelled with `hs`, the homeserver asked.
+/// A failure is labelled with `hs_pubkey`, the homeserver asked.
 /// [`WatcherClient`] implements it, and [`Watcher::key_stream`](crate::Watcher::key_stream)
 /// reads through it.
 #[async_trait::async_trait]
-pub trait KeyEventSource: Send + Sync + 'static {
+pub trait StreamReader: Send + Sync + 'static {
     /// Per-user `GET /events-stream?user=<pk>:<cursor>&limit=&path=<path>`, not live: the
     /// user's events after `cursor` whose resource path starts with `path` (e.g. `/pub/`).
     /// At most `limit` events are returned, each a [`StreamEvent`]. A rate-limited request
     /// is retried.
-    async fn user_events(
+    async fn read_stream(
         &self,
-        hs: &PublicKey,
-        user: &PublicKey,
+        hs_pubkey: &PublicKey,
+        user_pubkey: &PublicKey,
         cursor: u64,
         limit: u16,
         path: &str,
@@ -117,16 +117,16 @@ pub trait KeyEventSource: Send + Sync + 'static {
 pub trait ResourceReader: Send + Sync + 'static {
     /// The JSON resource at `resource`, capped at 2 MiB, from the homeserver
     /// its owner publishes. A larger one fails with [`HsErrorKind::TooLarge`].
-    async fn get_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError>;
+    async fn read_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError>;
 
     /// The blob at `resource`, capped at the client's `max_file_size`
     /// ([`WatcherClient::with_max_file_size`], [`DEFAULT_MAX_FILE_SIZE`] by default), from the
     /// homeserver its owner publishes.
-    async fn get_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError>;
+    async fn read_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError>;
 }
 
-/// Every homeserver call over the Pubky SDK: [`HomeserverEventSource`], [`KeyEventSource`],
-/// [`ResourceReader`] and [`HomeserverResolver`]. Cloning it shares the SDK client.
+/// Every homeserver call over the Pubky SDK: [`FeedReader`], [`StreamReader`],
+/// [`ResourceReader`] and [`PkdnsLookup`]. Cloning it shares the SDK client.
 #[derive(Clone)]
 pub struct WatcherClient {
     pubky: Arc<Pubky>,
@@ -290,10 +290,10 @@ impl WatcherClient {
     }
 
     /// One `/events-stream` request, without retries.
-    async fn fetch_user_events(
+    async fn fetch_stream_events(
         &self,
-        hs: &PublicKey,
-        user: &PublicKey,
+        hs_pubkey: &PublicKey,
+        user_pubkey: &PublicKey,
         cursor: u64,
         limit: u16,
         path: &str,
@@ -302,8 +302,8 @@ impl WatcherClient {
         // See rustdoc of EventStreamBuilder::live()
         let mut stream = self
             .pubky
-            .event_stream_for(hs)
-            .add_users(vec![(user, Some(EventCursor::new(cursor)))])
+            .event_stream_for(hs_pubkey)
+            .add_users(vec![(user_pubkey, Some(EventCursor::new(cursor)))])
             .map_err(HsErrorKind::from_sdk)?
             .limit(limit)
             .path(path)
@@ -312,7 +312,7 @@ impl WatcherClient {
             .map_err(HsErrorKind::from_sdk)
             .inspect_err(|e| error!(error = %e, "Failed to subscribe to event stream"))?;
 
-        read_user_events(&mut stream, limit, hs, user).await
+        read_stream_events(&mut stream, limit, hs_pubkey, user_pubkey).await
     }
 }
 
@@ -321,11 +321,11 @@ impl WatcherClient {
 /// more than asked is logged, and the excess dropped. Pubky uses SSE framing regardless of
 /// `EventStreamBuilder::live()`, so a failure after the response headers arrives as a
 /// stream item, which fails the read as a transport error.
-async fn read_user_events<S>(
+async fn read_stream_events<S>(
     stream: &mut S,
     limit: u16,
-    hs: &PublicKey,
-    user: &PublicKey,
+    hs_pubkey: &PublicKey,
+    user_pubkey: &PublicKey,
 ) -> Result<Vec<StreamEvent>, HsErrorKind>
 where
     S: Stream<Item = pubky::Result<pubky::Event>> + Unpin,
@@ -345,8 +345,8 @@ where
         events.len() == limit && matches!(stream.next().now_or_never(), Some(Some(Ok(_))));
     if sent_more {
         error!(
-            user_pk = %user.z32(),
-            hs_pk = %hs.z32(),
+            user_pk = %user_pubkey.z32(),
+            hs_pk = %hs_pubkey.z32(),
             limit,
             "Event stream returned more than the requested limit; ignoring the excess"
         );
@@ -358,27 +358,30 @@ where
 /// The lookup behind `Pubky::get_homeserver_of`, which folds a missing packet and a packet
 /// naming no homeserver into one `None` and fails on a malformed `_pubky` record.
 #[async_trait::async_trait]
-impl HomeserverResolver for WatcherClient {
-    async fn resolve_record(&self, user: &PublicKey) -> Result<Option<SignedPacket>, ResolveError> {
+impl PkdnsLookup for WatcherClient {
+    async fn lookup_homeserver_record(
+        &self,
+        user_pubkey: &PublicKey,
+    ) -> Result<Option<SignedPacket>, PkdnsLookupError> {
         match self
             .pubky
             .client()
             .pkarr()
-            .resolve(user, ResolvePolicy::CacheFirst)
+            .resolve(user_pubkey, ResolvePolicy::CacheFirst)
             .await
         {
             Ok(packet) => Ok(Some(packet)),
             Err(PkarrResolveError::NotFound) => Ok(None),
-            Err(e) => Err(ResolveError::new(e)),
+            Err(e) => Err(PkdnsLookupError::new(e)),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl HomeserverEventSource for WatcherClient {
-    async fn poll_events(
+impl FeedReader for WatcherClient {
+    async fn read_feed(
         &self,
-        hs: &PublicKey,
+        hs_pubkey: &PublicKey,
         cursor: u64,
         limit: u16,
     ) -> Result<Vec<String>, HsError> {
@@ -387,24 +390,24 @@ impl HomeserverEventSource for WatcherClient {
         let send = self
             .pubky
             .client()
-            .request(Method::GET, &events_url(hs, cursor, limit))
+            .request(Method::GET, &events_url(hs_pubkey, cursor, limit))
             .send();
-        poll_events_with(hs, send).await
+        read_feed_with(hs_pubkey, send).await
     }
 }
 
 #[async_trait::async_trait]
-impl KeyEventSource for WatcherClient {
-    async fn user_events(
+impl StreamReader for WatcherClient {
+    async fn read_stream(
         &self,
-        hs: &PublicKey,
-        user: &PublicKey,
+        hs_pubkey: &PublicKey,
+        user_pubkey: &PublicKey,
         cursor: u64,
         limit: u16,
         path: &str,
     ) -> Result<Vec<StreamEvent>, HsError> {
-        user_events_with(hs, user, || {
-            self.fetch_user_events(hs, user, cursor, limit, path)
+        read_stream_with(hs_pubkey, user_pubkey, || {
+            self.fetch_stream_events(hs_pubkey, user_pubkey, cursor, limit, path)
         })
         .await
     }
@@ -412,21 +415,22 @@ impl KeyEventSource for WatcherClient {
 
 #[async_trait::async_trait]
 impl ResourceReader for WatcherClient {
-    async fn get_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
-        get_resource_with(resource, self.get(resource)).await
+    async fn read_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        read_resource_with(resource, self.get(resource)).await
     }
 
-    async fn get_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
-        get_blob_with(resource, self.max_file_size, self.get(resource)).await
+    async fn read_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        read_blob_with(resource, self.max_file_size, self.get(resource)).await
     }
 }
 
-/// Reads the lines of the `/events/` poll `send` makes, labelling a failure as `hs`'s poll.
-async fn poll_events_with(
-    hs: &PublicKey,
+/// Reads the lines of the `/events/` poll `send` makes, labelling a failure as `hs_pubkey`'s
+/// poll.
+async fn read_feed_with(
+    hs_pubkey: &PublicKey,
     send: impl Future<Output = Result<reqwest::Response, reqwest::Error>>,
 ) -> Result<Vec<String>, HsError> {
-    let error = |kind| HsError::new(hs, HsOp::PollEvents, kind);
+    let error = |kind| HsError::new(hs_pubkey, HsOp::ReadFeed, kind);
     let response = send
         .await
         .map_err(|e| error(HsErrorKind::from_reqwest(&e)))?;
@@ -435,41 +439,41 @@ async fn poll_events_with(
 
 /// Fetches a user's events with `fetch`, retrying while rate limited, and labels a failure
 /// as the `/events-stream` request's, which decides that it stops the homeserver's run.
-async fn user_events_with<F, Fut>(
-    hs: &PublicKey,
-    user: &PublicKey,
+async fn read_stream_with<F, Fut>(
+    hs_pubkey: &PublicKey,
+    user_pubkey: &PublicKey,
     fetch: F,
 ) -> Result<Vec<StreamEvent>, HsError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Vec<StreamEvent>, HsErrorKind>>,
 {
-    retry_rate_limited(user, fetch)
+    retry_rate_limited(user_pubkey, fetch)
         .await
-        .map_err(|kind| HsError::new(hs, HsOp::UserEvents, kind))
+        .map_err(|kind| HsError::new(hs_pubkey, HsOp::ReadStream, kind))
 }
 
 /// Reads a resource fetch's body, at most [`MAX_RESOURCE_SIZE`], labelling a failure as a
 /// resource's, which keeps it one event's failure.
-async fn get_resource_with(
+async fn read_resource_with(
     resource: &PubkyResource,
     fetch: impl Future<Output = Result<reqwest::Response, HsErrorKind>>,
 ) -> Result<Vec<u8>, HsError> {
     read_capped(fetch, MAX_RESOURCE_SIZE as u64)
         .await
-        .map_err(|kind| owner_error(resource, HsOp::GetResource, kind))
+        .map_err(|kind| owner_error(resource, HsOp::ReadResource, kind))
 }
 
 /// Reads a blob fetch's body, at most `max` bytes, labelling a failure as a blob's, which
 /// keeps it one event's failure.
-async fn get_blob_with(
+async fn read_blob_with(
     resource: &PubkyResource,
     max: u64,
     fetch: impl Future<Output = Result<reqwest::Response, HsErrorKind>>,
 ) -> Result<Vec<u8>, HsError> {
     read_capped(fetch, max)
         .await
-        .map_err(|kind| owner_error(resource, HsOp::GetBlob, kind))
+        .map_err(|kind| owner_error(resource, HsOp::ReadBlob, kind))
 }
 
 async fn read_capped(
@@ -487,13 +491,16 @@ fn owner_error(resource: &PubkyResource, op: HsOp, kind: HsErrorKind) -> HsError
 }
 
 /// Calls `fetch` and, while it is rate limited, again after each of
-/// [`USER_EVENTS_429_BACKOFF_SECS`]. Returns the last 429 once they run out.
-async fn retry_rate_limited<T, F, Fut>(user: &PublicKey, mut fetch: F) -> Result<T, HsErrorKind>
+/// [`READ_STREAM_429_BACKOFF_SECS`]. Returns the last 429 once they run out.
+async fn retry_rate_limited<T, F, Fut>(
+    user_pubkey: &PublicKey,
+    mut fetch: F,
+) -> Result<T, HsErrorKind>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, HsErrorKind>>,
 {
-    let mut backoffs = USER_EVENTS_429_BACKOFF_SECS.into_iter();
+    let mut backoffs = READ_STREAM_429_BACKOFF_SECS.into_iter();
     loop {
         let kind = match fetch().await {
             Ok(value) => return Ok(value),
@@ -504,16 +511,20 @@ where
         };
 
         warn!(
-            user_id = %user.z32(), retry_after_secs = backoff_secs,
+            user_id = %user_pubkey.z32(), retry_after_secs = backoff_secs,
             "Homeserver rate-limited user event fetch; retrying",
         );
         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
     }
 }
 
-/// The primary-style `/events/` URL of `hs`, from `cursor` on, for at most `limit` events.
-fn events_url(hs: &PublicKey, cursor: u64, limit: u16) -> String {
-    format!("https://{}/events/?cursor={cursor}&limit={limit}", hs.z32())
+/// The primary-style `/events/` URL of `hs_pubkey`, from `cursor` on, for at most `limit`
+/// events.
+fn events_url(hs_pubkey: &PublicKey, cursor: u64, limit: u16) -> String {
+    format!(
+        "https://{}/events/?cursor={cursor}&limit={limit}",
+        hs_pubkey.z32()
+    )
 }
 
 /// Turns a `/events/` response into the lines it carries.
@@ -559,10 +570,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::Instant;
 
-    const HS_ID: &str = "1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy";
+    const HS_PUBKEY: &str = "1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy";
 
-    fn hs_id() -> PublicKey {
-        PublicKey::try_from_z32(HS_ID).expect("valid test key")
+    fn hs_pubkey() -> PublicKey {
+        PublicKey::try_from_z32(HS_PUBKEY).expect("valid test key")
     }
 
     fn response(status: u16, body: impl Into<reqwest::Body>) -> reqwest::Response {
@@ -633,31 +644,31 @@ mod tests {
     #[test]
     fn events_url_carries_the_cursor_and_limit() {
         assert_eq!(
-            events_url(&hs_id(), 42, 17),
-            format!("https://{HS_ID}/events/?cursor=42&limit=17")
+            events_url(&hs_pubkey(), 42, 17),
+            format!("https://{HS_PUBKEY}/events/?cursor=42&limit=17")
         );
     }
 
-    // --- poll_events_with ---
+    // --- read_feed_with ---
 
     /// The incident shape: a proxy error page. Before the status check this
     /// read as "events with no cursor line" and was counted as a stalled cursor.
     #[tokio::test]
-    async fn error_page_fails_the_poll_with_status_and_body() {
+    async fn error_page_fails_the_feed_read_with_status_and_body() {
         let html = "<html>\n<head><title>502 Bad Gateway</title></head>\n<body>bad gateway</body>\n</html>";
 
-        let error = poll_events_with(&hs_id(), async { Ok(response(502, html)) })
+        let error = read_feed_with(&hs_pubkey(), async { Ok(response(502, html)) })
             .await
             .unwrap_err();
 
-        assert_eq!(error.hs, HS_ID);
-        assert_eq!(error.op, HsOp::PollEvents);
+        assert_eq!(error.hs, HS_PUBKEY);
+        assert_eq!(error.op, HsOp::ReadFeed);
         assert!(
             matches!(error.kind, HsErrorKind::ServerError(502, _)),
             "{error:?}"
         );
         let message = error.to_string();
-        assert!(message.contains(HS_ID), "names the HS: {message}");
+        assert!(message.contains(HS_PUBKEY), "names the HS: {message}");
         assert!(
             message.contains("HTTP 502"),
             "carries the status: {message}"
@@ -671,13 +682,13 @@ mod tests {
     /// A poll that gets no response is labelled as the homeserver's poll too, as a
     /// transport failure.
     #[tokio::test]
-    async fn unanswered_poll_is_a_transport_failure_of_the_homeserver() {
-        let error = poll_events_with(&hs_id(), async { Err(transport_error().await) })
+    async fn unanswered_feed_read_is_a_transport_failure_of_the_homeserver() {
+        let error = read_feed_with(&hs_pubkey(), async { Err(transport_error().await) })
             .await
             .unwrap_err();
 
-        assert_eq!(error.hs, HS_ID);
-        assert_eq!(error.op, HsOp::PollEvents);
+        assert_eq!(error.hs, HS_PUBKEY);
+        assert_eq!(error.op, HsOp::ReadFeed);
         assert!(matches!(error.kind, HsErrorKind::Transport(_)), "{error:?}");
     }
 
@@ -772,7 +783,7 @@ mod tests {
         assert!(matches!(kind, HsErrorKind::TooLarge { .. }), "{kind:?}");
     }
 
-    // --- read_user_events ---
+    // --- read_stream_events ---
 
     fn stream_event(cursor: u64) -> pubky::Result<pubky::Event> {
         let owner = pubky::Keypair::random().public_key();
@@ -788,14 +799,14 @@ mod tests {
     /// waits fails at once.
     #[tokio::test(start_paused = true)]
     #[tracing_test::traced_test]
-    async fn user_events_read_ends_at_the_limit_without_waiting_for_more() {
+    async fn stream_read_ends_at_the_limit_without_waiting_for_more() {
         let user = pubky::Keypair::random().public_key();
         let mut stream = futures::stream::iter([stream_event(1), stream_event(2)])
             .chain(futures::stream::pending());
 
         let events = tokio::time::timeout(
             Duration::from_secs(1),
-            read_user_events(&mut stream, 2, &hs_id(), &user),
+            read_stream_events(&mut stream, 2, &hs_pubkey(), &user),
         )
         .await
         .expect("the read must end at the limit")
@@ -810,11 +821,11 @@ mod tests {
     /// stream is not logged.
     #[tokio::test]
     #[tracing_test::traced_test]
-    async fn user_events_exactly_at_the_limit_are_not_logged() {
+    async fn stream_events_exactly_at_the_limit_are_not_logged() {
         let user = pubky::Keypair::random().public_key();
         let mut stream = futures::stream::iter([stream_event(1), stream_event(2)]);
 
-        let events = read_user_events(&mut stream, 2, &hs_id(), &user)
+        let events = read_stream_events(&mut stream, 2, &hs_pubkey(), &user)
             .await
             .unwrap();
 
@@ -826,11 +837,11 @@ mod tests {
     /// only the events asked for are returned.
     #[tokio::test]
     #[tracing_test::traced_test]
-    async fn user_events_past_the_limit_are_logged_and_dropped() {
+    async fn stream_events_past_the_limit_are_logged_and_dropped() {
         let user = pubky::Keypair::random().public_key();
         let mut stream = futures::stream::iter([stream_event(1), stream_event(2), stream_event(3)]);
 
-        let events = read_user_events(&mut stream, 2, &hs_id(), &user)
+        let events = read_stream_events(&mut stream, 2, &hs_pubkey(), &user)
             .await
             .unwrap();
 
@@ -842,41 +853,41 @@ mod tests {
     /// A failure after the response headers fails the read as a transport error, which
     /// aborts the homeserver's run.
     #[tokio::test]
-    async fn user_event_stream_error_is_a_transport_failure() {
+    async fn event_stream_error_is_a_transport_failure() {
         let error = pubky::Error::from(pubky::errors::RequestError::Validation {
             message: "SSE stream error: unexpected EOF".into(),
         });
         let user = pubky::Keypair::random().public_key();
         let mut stream = futures::stream::iter([stream_event(1), Err(error)]);
 
-        let kind = read_user_events(&mut stream, 10, &hs_id(), &user)
+        let kind = read_stream_events(&mut stream, 10, &hs_pubkey(), &user)
             .await
             .unwrap_err();
 
         assert!(matches!(kind, HsErrorKind::Transport(_)), "{kind:?}");
     }
 
-    // --- user_events_with ---
+    // --- read_stream_with ---
 
     /// A 5xx or a transport failure on the `/events-stream` request is labelled as that
     /// request's, which is what makes it stop the homeserver's run, unlike the same failure
     /// on a file fetch.
     #[tokio::test]
-    async fn user_event_stream_failures_are_labelled_as_the_stream_request() {
+    async fn event_stream_failures_are_labelled_as_the_stream_request() {
         let user = pubky::Keypair::random().public_key();
         for kind in [
             HsErrorKind::ServerError(530, "".into()),
             HsErrorKind::transport("connection reset"),
         ] {
-            let error = user_events_with(&hs_id(), &user, || {
+            let error = read_stream_with(&hs_pubkey(), &user, || {
                 let kind = kind.clone();
                 async move { Err(kind) }
             })
             .await
             .unwrap_err();
 
-            assert_eq!(error.hs, HS_ID);
-            assert_eq!(error.op, HsOp::UserEvents);
+            assert_eq!(error.hs, HS_PUBKEY);
+            assert_eq!(error.op, HsOp::ReadStream);
             assert!(
                 matches!(
                     error.kind,
@@ -890,7 +901,7 @@ mod tests {
     /// A rate-limited `/events-stream` request is retried, and only a 429 that outlasts the
     /// retries stops the homeserver's run.
     #[tokio::test(start_paused = true)]
-    async fn user_events_retry_a_rate_limited_stream_request() {
+    async fn stream_reads_retry_a_rate_limited_request() {
         let user = pubky::Keypair::random().public_key();
         let fetch_failing = |failures: usize, calls: &AtomicUsize| {
             let call = calls.fetch_add(1, Ordering::SeqCst);
@@ -903,23 +914,23 @@ mod tests {
         };
 
         let calls = AtomicUsize::new(0);
-        let result = user_events_with(&hs_id(), &user, || fetch_failing(2, &calls)).await;
+        let result = read_stream_with(&hs_pubkey(), &user, || fetch_failing(2, &calls)).await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
 
         let calls = AtomicUsize::new(0);
-        let error = user_events_with(&hs_id(), &user, || fetch_failing(usize::MAX, &calls))
+        let error = read_stream_with(&hs_pubkey(), &user, || fetch_failing(usize::MAX, &calls))
             .await
             .unwrap_err();
         assert_eq!(calls.load(Ordering::SeqCst), 4);
-        assert_eq!(error.op, HsOp::UserEvents);
+        assert_eq!(error.op, HsOp::ReadStream);
         assert!(
             matches!(error.kind, HsErrorKind::RateLimited(_)),
             "{error:?}"
         );
     }
 
-    // --- get_resource_with / get_blob_with ---
+    // --- read_resource_with / read_blob_with ---
 
     /// A 5xx or a transport failure fetching a resource or a blob, which any user can point
     /// at any host, is labelled as that fetch's, with the owner's key, which is what keeps it
@@ -941,17 +952,17 @@ mod tests {
         let unused_cap = 1024;
         let mut errors = Vec::new();
         for kind in failures() {
-            errors.push(get_resource_with(&resource, async { Err(kind) }).await);
+            errors.push(read_resource_with(&resource, async { Err(kind) }).await);
         }
         for kind in failures() {
-            errors.push(get_blob_with(&resource, unused_cap, async { Err(kind) }).await);
+            errors.push(read_blob_with(&resource, unused_cap, async { Err(kind) }).await);
         }
 
         let ops = [
-            HsOp::GetResource,
-            HsOp::GetResource,
-            HsOp::GetBlob,
-            HsOp::GetBlob,
+            HsOp::ReadResource,
+            HsOp::ReadResource,
+            HsOp::ReadBlob,
+            HsOp::ReadBlob,
         ];
         for (error, op) in errors.into_iter().zip(ops) {
             let error = error.unwrap_err();
@@ -976,13 +987,13 @@ mod tests {
             .expect("valid resource");
 
         let at_cap = response(200, vec![0u8; MAX_RESOURCE_SIZE]);
-        let body = get_resource_with(&resource, async { Ok(at_cap) })
+        let body = read_resource_with(&resource, async { Ok(at_cap) })
             .await
             .expect("a body at the cap is accepted");
         assert_eq!(body.len(), MAX_RESOURCE_SIZE);
 
         let over_cap = response(200, vec![0u8; MAX_RESOURCE_SIZE + 1]);
-        let error = get_resource_with(&resource, async { Ok(over_cap) })
+        let error = read_resource_with(&resource, async { Ok(over_cap) })
             .await
             .unwrap_err();
         assert!(

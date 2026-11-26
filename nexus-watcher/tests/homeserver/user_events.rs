@@ -1,6 +1,6 @@
 //! The `/events-stream` request the client builds: which homeserver and user it asks, from
 //! which cursor, and that a rate-limited request is retried. The count is capped by the
-//! client itself (`read_user_events`), so it is covered by a unit test instead, and the
+//! client itself (`read_stream_events`), so it is covered by a unit test instead, and the
 //! `/pub/` path filter cannot be observed, because the homeserver accepts writes only under
 //! `/pub/`.
 
@@ -15,7 +15,7 @@ use pubky_social_specs::legacy_v0::PubkyAppUser;
 use pubky_testnet::pubky_homeserver::{
     ConfigToml, GlobPattern, HttpMethod, LimitKeyType, MockDataDir, PathLimit,
 };
-use pubky_watcher::KeyEventSource;
+use pubky_watcher::StreamReader;
 
 fn profile(name: &str) -> PubkyAppUser {
     PubkyAppUser {
@@ -43,14 +43,14 @@ async fn test_user_events_come_from_the_homeserver_after_the_cursor() -> Result<
     let user_pk = user_kp.public_key();
     let hs = test.homeserver_id.to_public_key()?;
 
-    let first = client.user_events(&hs, &user_pk, 0, 1, "/pub/").await?;
+    let first = client.read_stream(&hs, &user_pk, 0, 1, "/pub/").await?;
 
     assert_eq!(first.len(), 1, "{first:?}");
     assert_eq!(first[0].user_pubkey().z32(), user_id);
 
     let cursor = first[0].cursor;
     let rest = client
-        .user_events(&hs, &user_pk, cursor, 100, "/pub/")
+        .read_stream(&hs, &user_pk, cursor, 100, "/pub/")
         .await?;
 
     // The key now names the other homeserver, so the usual cleanup helper would delete the
@@ -106,9 +106,9 @@ async fn test_rate_limited_user_events_are_retried_against_a_homeserver() -> Res
     let client = &test.client;
     let user_pk = user_kp.public_key();
 
-    client.user_events(&hs, &user_pk, 0, 10, "/pub/").await?;
+    client.read_stream(&hs, &user_pk, 0, 10, "/pub/").await?;
     let asked_again = Instant::now();
-    let events = client.user_events(&hs, &user_pk, 0, 10, "/pub/").await?;
+    let events = client.read_stream(&hs, &user_pk, 0, 10, "/pub/").await?;
 
     assert!(events.is_empty(), "{events:?}");
     assert!(

@@ -8,7 +8,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     /// The resource was written; read it with
-    /// [`ResourceReader::get_resource`](crate::ResourceReader::get_resource).
+    /// [`ResourceReader::read_resource`](crate::ResourceReader::read_resource).
     Put,
     /// The resource was deleted when the event was emitted. A later `PUT` can write it again,
     /// so a [`ResourceReader`](crate::ResourceReader) may still find it.
