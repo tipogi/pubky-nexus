@@ -13,7 +13,7 @@
 //!   [`FeedReader`], [`StreamReader`], [`ResourceReader`] and
 //!   [`PkdnsLookup`]. A failure is an [`HsError`].
 //! - [`Run`] is one run over one homeserver, generic over the application's
-//!   event and error types; [`TEventProcessorRunner`] runs one per homeserver.
+//!   event and error types; [`Cycle`] runs one per homeserver.
 //! - Retry is opt-in through [`RetryableError`], [`RetryQueue`] and
 //!   [`dispatch_retryable_error`].
 //!
@@ -23,10 +23,10 @@
 #![warn(missing_docs)]
 
 mod client;
+mod cycle;
 mod feed;
 mod hooks;
 mod run;
-mod runner;
 mod watcher;
 
 pub use client::{
@@ -34,14 +34,11 @@ pub use client::{
     PkdnsLookup, PkdnsLookupError, ResourceReader, StreamEvent, StreamReader, WatcherClient,
     WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };
+pub use cycle::{turn_status_from_run, Cycle, CycleReport, CycleStats, Turn, TurnStatus};
 pub use feed::{FeedBatch, FeedEvent, CURSOR_PREFIX};
 pub use hooks::{EventHandler, EventLineOutcome, FromEventLine, RetryQueue, RetryableError};
 pub use run::{
     dispatch_retryable_error, run_on_own_task, Run, RunError, RunOutcome, SLOW_RUN_THRESHOLD,
-};
-pub use runner::{
-    status_from_run_result, ProcessedStats, ProcessorRunStats, ProcessorRunStatus,
-    RunAllProcessorsStats, TEventProcessorRunner,
 };
 pub use watcher::{
     ConfigError, HomeserverWatcher, HomeserverWatcherBuilder, KeyStreamOutcome, KeyStreamWatcher,

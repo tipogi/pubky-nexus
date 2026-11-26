@@ -4,7 +4,7 @@ use nexus_common::types::DynError;
 use nexus_watcher::errors::EventProcessorError;
 use nexus_watcher::events::Event;
 use nexus_watcher::service::indexer::NexusEventProcessor;
-use nexus_watcher::service::TEventProcessorRunner;
+use nexus_watcher::service::Cycle;
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 
@@ -58,7 +58,7 @@ impl MockEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner<Event, EventProcessorError> for MockEventProcessorRunner {
+impl Cycle<Event, EventProcessorError> for MockEventProcessorRunner {
     type Error = DynError;
 
     fn shutdown_rx(&self) -> Receiver<bool> {
@@ -68,7 +68,7 @@ impl TEventProcessorRunner<Event, EventProcessorError> for MockEventProcessorRun
     /// Returns the event processor for the specified homeserver.
     ///
     /// The mock event processor was pre-built and given to the mock runner on initialization, so this returns a reference to it.
-    async fn build(&self, hs_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
+    async fn build_run(&self, hs_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
         let mock_event_processor = self
             .event_processors
             .iter()
@@ -79,7 +79,7 @@ impl TEventProcessorRunner<Event, EventProcessorError> for MockEventProcessorRun
         Ok(mock_event_processor)
     }
 
-    async fn pre_run(&self) -> Result<Vec<String>, DynError> {
+    async fn homeservers(&self) -> Result<Vec<String>, DynError> {
         let hs_ids = self.hs_by_priority().await?;
         let max_index = std::cmp::min(self.monitored_hs_limit, hs_ids.len());
         Ok(hs_ids[..max_index].to_vec())

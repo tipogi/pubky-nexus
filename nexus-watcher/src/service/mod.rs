@@ -10,7 +10,7 @@ pub use constants::{
     KEY_BASED_RUN_BUDGET, KEY_BASED_SLOW_RUN_MARGIN, SLOW_RUN_THRESHOLD, WATCHER_CONFIG_FILE_NAME,
 };
 pub use indexer::{HsEventProcessor, KeyBasedEventProcessor, Run, RunError, RunOutcome};
-pub use runner::{HsEventProcessorRunner, KeyBasedEventProcessorRunner, TEventProcessorRunner};
+pub use runner::{Cycle, HsEventProcessorRunner, KeyBasedEventProcessorRunner};
 pub(crate) use task_runner::{run_periodic_tasks, PeriodicTask};
 pub use user_hs_resolver::UserHsResolverRunner;
 

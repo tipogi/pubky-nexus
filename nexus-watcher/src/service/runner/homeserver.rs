@@ -1,9 +1,9 @@
-use super::TEventProcessorRunner;
+use super::Cycle;
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::{Event, EventHandler};
 use crate::service::indexer::{HsEventProcessor, NexusEventProcessor};
-use crate::service::stats::{ProcessedStats, RunAllProcessorsStats};
+use crate::service::stats::{CycleReport, CycleStats};
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::user::PkdnsHomeserverResolver;
 use nexus_common::types::DynError;
@@ -60,7 +60,7 @@ impl HsEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner<Event, EventProcessorError> for HsEventProcessorRunner {
+impl Cycle<Event, EventProcessorError> for HsEventProcessorRunner {
     type Error = DynError;
 
     fn shutdown_rx(&self) -> Receiver<bool> {
@@ -68,7 +68,7 @@ impl TEventProcessorRunner<Event, EventProcessorError> for HsEventProcessorRunne
     }
 
     /// Creates and returns a new event processor instance for the specified homeserver
-    async fn build(&self, homeserver_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
+    async fn build_run(&self, homeserver_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(homeserver_id)?;
         let homeserver = Homeserver::get_by_id(homeserver_id)
             .await?
@@ -86,18 +86,18 @@ impl TEventProcessorRunner<Event, EventProcessorError> for HsEventProcessorRunne
         }))
     }
 
-    async fn pre_run(&self) -> Result<Vec<String>, DynError> {
+    async fn homeservers(&self) -> Result<Vec<String>, DynError> {
         Ok(vec![self.primary_homeserver.to_string()])
     }
 
-    async fn post_run(&self, stats: RunAllProcessorsStats) -> ProcessedStats {
-        for individual_run_stat in &stats.stats {
-            let hs_id = &individual_run_stat.hs_id;
+    async fn after_cycle(&self, stats: CycleStats) -> CycleReport {
+        for individual_run_stat in &stats.turns {
+            let hs_id = &individual_run_stat.hs_pubkey;
             let duration = individual_run_stat.duration;
             let status = &individual_run_stat.status;
             debug!(homeserver = %hs_id, ?duration, ?status, "Primary homeserver run completed");
         }
 
-        ProcessedStats(stats)
+        CycleReport(stats)
     }
 }

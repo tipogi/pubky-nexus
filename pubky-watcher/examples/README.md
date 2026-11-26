@@ -27,7 +27,7 @@ cargo run -p pubky-watcher --example poll_key_stream_builder
 
 ## `poll_homeserver`
 
-The low-level path: a `Run` per poll, run by a `TEventProcessorRunner`, the way
+The low-level path: a `Run` per poll, run by a `Cycle`, the way
 Nexus wires the crate.
 
 ```bash

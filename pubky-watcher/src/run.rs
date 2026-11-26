@@ -4,7 +4,7 @@
 //!
 //! Implement it when the [`Watcher`](crate::Watcher) builders are not enough: your own
 //! cursor store, your own event type, retries, or many homeservers under a
-//! [`TEventProcessorRunner`](crate::TEventProcessorRunner).
+//! [`Cycle`](crate::Cycle).
 
 use std::fmt::{Debug, Display};
 use std::{future::Future, sync::Arc, time::Duration};
@@ -108,7 +108,7 @@ where
 /// watches.
 ///
 /// Generic over the application's event type `E` and error type `Err`.
-/// [`TEventProcessorRunner`](crate::TEventProcessorRunner) runs one per homeserver.
+/// [`Cycle`](crate::Cycle) runs one per homeserver.
 #[async_trait::async_trait]
 pub trait Run<E, Err>: Send + Sync + 'static
 where

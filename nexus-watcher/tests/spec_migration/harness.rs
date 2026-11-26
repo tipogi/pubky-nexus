@@ -25,7 +25,7 @@ use nexus_watcher::events::retry::{
 use nexus_watcher::events::{DefaultEventHandler, EventHandler, Moderation};
 use nexus_watcher::service::indexer::{KeyBasedEventProcessor, Run};
 use nexus_watcher::service::runner::{UserNotFoundBackoff, UserResumePoints};
-use nexus_watcher::service::{HsEventProcessorRunner, TEventProcessorRunner, KEY_BASED_RUN_BUDGET};
+use nexus_watcher::service::{Cycle, HsEventProcessorRunner, KEY_BASED_RUN_BUDGET};
 use nexus_watcher::EventProcessorError;
 use pubky::{ClientId, Keypair, PubkySession};
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath, HashId, TimestampId};
@@ -141,7 +141,7 @@ impl SpecMigrationTest {
     /// everything written so far, read once.
     pub async fn index(&self) -> Result<()> {
         self.bulk
-            .build(self.primary.as_ref())
+            .build_run(self.primary.as_ref())
             .await
             .map_err(|e| anyhow!("{e}"))?
             .run()

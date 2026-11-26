@@ -17,9 +17,9 @@ use nexus_watcher::events::retry::{
 };
 use nexus_watcher::events::{DefaultEventHandler, EventHandler};
 use nexus_watcher::events::{Event, ParseResult};
+use nexus_watcher::service::Cycle;
 use nexus_watcher::service::HsEventProcessorRunner;
 use nexus_watcher::service::KeyBasedEventProcessorRunner;
-use nexus_watcher::service::TEventProcessorRunner;
 use pubky::ClientId;
 use pubky::Keypair;
 use pubky::PublicKey;
@@ -209,7 +209,7 @@ impl WatcherTest {
     pub async fn ensure_event_processing_complete(&mut self) -> Result<()> {
         if self.ensure_event_processing {
             self.event_processor_runner
-                .build(self.homeserver_id.as_ref())
+                .build_run(self.homeserver_id.as_ref())
                 .await
                 .map_err(|e| anyhow!(e))?
                 .run()
@@ -231,7 +231,7 @@ impl WatcherTest {
             self.event_processor_runner.shutdown_rx.clone(),
         );
         runner
-            .build(homeserver_id.as_ref())
+            .build_run(homeserver_id.as_ref())
             .await
             .map_err(|e| anyhow!(e))?
             .run()

@@ -10,7 +10,7 @@ pub use key_based_hs_backoff::HomeserverBackoff;
 pub use key_based_user_backoff::UserNotFoundBackoff;
 pub use key_based_user_resume::UserResumePoints;
 
-pub use pubky_watcher::{status_from_run_result, TEventProcessorRunner};
+pub use pubky_watcher::{turn_status_from_run, Cycle};
 
 #[cfg(test)]
 mod tests {
@@ -20,7 +20,7 @@ mod tests {
     use crate::events::{Event, EventHandler};
     use crate::service::indexer::{NexusEventProcessor, RunError};
     use crate::service::indexer::{Run, RunOutcome};
-    use crate::service::stats::{ProcessedStats, ProcessorRunStatus};
+    use crate::service::stats::{CycleReport, TurnStatus};
     use nexus_common::types::DynError;
     use nexus_common::utils::test_utils::random_pubky_id;
     use pubky_social_specs::PubkyId;
@@ -131,28 +131,28 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TEventProcessorRunner<Event, EventProcessorError> for RecordingRunner {
+    impl Cycle<Event, EventProcessorError> for RecordingRunner {
         type Error = DynError;
 
         fn shutdown_rx(&self) -> Receiver<bool> {
             self.shutdown_rx.clone()
         }
 
-        async fn build(&self, hs_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
+        async fn build_run(&self, hs_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
             self.built.lock().await.push(hs_id.to_string());
             let processor = self.processor.clone().ok_or("not built in this test")?;
             Ok(processor)
         }
 
-        async fn pre_run(&self) -> Result<Vec<String>, DynError> {
+        async fn homeservers(&self) -> Result<Vec<String>, DynError> {
             Ok(self.hs_ids.clone())
         }
 
-        fn poll_limit(&self) -> usize {
+        fn run_limit(&self) -> usize {
             self.poll_limit
         }
 
-        async fn backoff_hs_should_skip(&self, hs_id: &str) -> bool {
+        async fn should_skip(&self, hs_id: &str) -> bool {
             self.backoff.should_skip(hs_id)
         }
     }
@@ -172,7 +172,7 @@ mod tests {
         runner.backoff.record_failure("hs1");
         runner.backoff.record_failure("hs2");
 
-        let ProcessedStats(stats) = runner.run().await.unwrap();
+        let CycleReport(stats) = runner.run().await.unwrap();
 
         // The two highest-priority HSs are in backoff, so the next two take their slots
         assert_eq!(*runner.built.lock().await, ["hs3", "hs4"]);
@@ -187,8 +187,8 @@ mod tests {
         let runner = RecordingRunner::new(&["hs1"], usize::MAX)
             .with_processors_taking(Duration::from_millis(300), Duration::from_millis(50));
 
-        let ProcessedStats(first) = runner.run().await.unwrap();
-        let ProcessedStats(second) = runner.run().await.unwrap();
+        let CycleReport(first) = runner.run().await.unwrap();
+        let CycleReport(second) = runner.run().await.unwrap();
 
         let processor = runner.processor.as_ref().expect("set above");
         assert_eq!(processor.peak(), 1, "two runs of hs1 were going at once");
@@ -235,10 +235,7 @@ mod tests {
         let result = processor.run().await;
 
         assert!(matches!(result, Err(RunError::BudgetSpent)), "{result:?}");
-        assert_eq!(
-            status_from_run_result(result),
-            ProcessorRunStatus::BudgetSpent
-        );
+        assert_eq!(turn_status_from_run(result), TurnStatus::BudgetSpent);
     }
 
     /// Pins a known limitation: the tick waits for every run, so a run that never returns

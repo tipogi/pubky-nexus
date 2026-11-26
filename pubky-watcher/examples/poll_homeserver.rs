@@ -1,5 +1,5 @@
 //! Five `/events/` polls of one homeserver through the low-level traits:
-//! a [`Run`] for one poll, run by a [`TEventProcessorRunner`].
+//! a [`Run`] for one poll, run by a [`Cycle`].
 //!
 //! This is the path Nexus takes, with its own cursor store, retry queue and backoff. The
 //! example keeps its cursor in memory and fails fast on any error. From the workspace root:
@@ -14,9 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pubky::PublicKey;
-use pubky_watcher::{
-    FeedBatch, FeedEvent, FeedReader, Run, RunOutcome, TEventProcessorRunner, WatcherClient,
-};
+use pubky_watcher::{Cycle, FeedBatch, FeedEvent, FeedReader, Run, RunOutcome, WatcherClient};
 use tokio::sync::{watch, Mutex};
 
 /// This example's error: any error, boxed. An application would use its own type.
@@ -76,30 +74,33 @@ impl Run<FeedEvent, BoxError> for PrintRun {
 }
 
 /// Runs one [`PrintRun`] per tick, for the staging homeserver only.
-struct PollRunner {
+struct StagingCycle {
     reader: Arc<dyn FeedReader>,
     cursor: Arc<Mutex<u64>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 #[async_trait]
-impl TEventProcessorRunner<FeedEvent, BoxError> for PollRunner {
+impl Cycle<FeedEvent, BoxError> for StagingCycle {
     type Error = BoxError;
 
     fn shutdown_rx(&self) -> watch::Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
-    async fn build(&self, hs_id: &str) -> Result<Arc<dyn Run<FeedEvent, BoxError>>, BoxError> {
+    async fn build_run(
+        &self,
+        hs_pubkey: &str,
+    ) -> Result<Arc<dyn Run<FeedEvent, BoxError>>, BoxError> {
         Ok(Arc::new(PrintRun {
-            hs_pubkey: PublicKey::try_from_z32(hs_id)?,
-            hs_pubkey_z32: hs_id.to_string(),
+            hs_pubkey: PublicKey::try_from_z32(hs_pubkey)?,
+            hs_pubkey_z32: hs_pubkey.to_string(),
             reader: self.reader.clone(),
             cursor: self.cursor.clone(),
         }))
     }
 
-    async fn pre_run(&self) -> Result<Vec<String>, BoxError> {
+    async fn homeservers(&self) -> Result<Vec<String>, BoxError> {
         Ok(vec![STAGING_HOMESERVER.to_string()])
     }
 }
@@ -107,7 +108,7 @@ impl TEventProcessorRunner<FeedEvent, BoxError> for PollRunner {
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let runner = PollRunner {
+    let cycle = StagingCycle {
         reader: Arc::new(WatcherClient::mainnet()?),
         cursor: Arc::new(Mutex::new(0)),
         shutdown_rx,
@@ -115,7 +116,7 @@ async fn main() -> Result<(), BoxError> {
 
     for tick in 1..=POLL_TICKS {
         println!("Tick {tick}/{POLL_TICKS}");
-        let stats = runner.run().await?.0;
+        let stats = cycle.run().await?.0;
         if stats.count_ok() != 1 {
             return Err("the poll failed".into());
         }

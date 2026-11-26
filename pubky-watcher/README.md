@@ -106,7 +106,7 @@ retry queue or backoff implements directly:
 - `Run<E, Err>` is one run over one homeserver. Each run is waited for on its own
   task, logged as slow after a threshold, and reported as failed if it panics. Its
   `handle_error` fails fast by default.
-- `TEventProcessorRunner<E, Err>` runs one processor per homeserver, one after the other, and
+- `Cycle<E, Err>` runs one processor per homeserver, one after the other, and
   reports run statistics (succeeded, failed, panicked, budget spent, skipped). A hook decides
   which homeservers to skip, e.g. those in your backoff.
 - Retry is opt-in: implement `RetryableError` for your error type and `RetryQueue`
@@ -127,8 +127,8 @@ as it was first extracted:
   error type, and the watchers are `HomeserverWatcher<E>` and `KeyStreamWatcher<E>`.
 - `build()` fails with the new `ConfigError`, and a homeserver that breaks the events
   protocol fails a run with the new `ProtocolError`.
-- `BuildError` is removed: `TEventProcessorRunner` has an associated `type Error`, returned
-  by `build`, `pre_run` and `run`.
+- `BuildError` is removed: `Cycle` has an associated `type Error`, returned
+  by `build`, `homeservers` and `run`.
 - `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public.
 - `WatcherClient::mainnet()` and `testnet()` fail with `ClientError` instead of
   `pubky::Error`, and `PkdnsLookup::lookup_homeserver_record` with the crate's `PkdnsLookupError`

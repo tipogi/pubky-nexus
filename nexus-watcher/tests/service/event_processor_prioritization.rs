@@ -15,9 +15,7 @@ use nexus_common::utils::test_utils::{default_ingestor_tests, random_pubky_id};
 use nexus_watcher::events::retry::{InitialBackoff, RedisRetryStore, RetryScheduler, RetryStore};
 use nexus_watcher::events::{DefaultEventHandler, EventHandler};
 use nexus_watcher::service::runner::{HomeserverBackoff, UserNotFoundBackoff, UserResumePoints};
-use nexus_watcher::service::{
-    KeyBasedEventProcessorRunner, TEventProcessorRunner, KEY_BASED_RUN_BUDGET,
-};
+use nexus_watcher::service::{Cycle, KeyBasedEventProcessorRunner, KEY_BASED_RUN_BUDGET};
 use pubky_social_specs::PubkyId;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,7 +63,7 @@ async fn test_event_processor_runner_primary_homeserver_excluded() -> Result<(),
     }
 
     // The primary homeserver should be excluded from the list
-    let hs_ids = runner.pre_run().await?;
+    let hs_ids = runner.homeservers().await?;
     assert!(
         !hs_ids.contains(&HS_IDS[3].to_string()),
         "Primary homeserver should be excluded from pre_run"
@@ -122,7 +120,7 @@ async fn test_event_processor_runner_blacklisted_homeserver_excluded() -> Result
     create_active_user_on_homeserver(&blacklisted_hs).await?;
     create_active_user_on_homeserver(&allowed_hs).await?;
 
-    let hs_ids = runner.pre_run().await?;
+    let hs_ids = runner.homeservers().await?;
     assert!(
         !hs_ids.contains(&blacklisted_hs.to_string()),
         "Blacklisted HS should be excluded from pre_run"

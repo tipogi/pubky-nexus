@@ -3,7 +3,7 @@
 use crate::event_processor::utils::watcher::{HomeserverHashIdPath, HomeserverIdPath, WatcherTest};
 use anyhow::{anyhow, Result};
 use nexus_common::models::user::UserCounts;
-use nexus_watcher::service::TEventProcessorRunner;
+use nexus_watcher::service::Cycle;
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::{
     post_uri_builder, PubkyAppBookmark, PubkyAppFollow, PubkyAppPost, PubkyAppPostKind,
@@ -206,7 +206,7 @@ async fn test_large_network_scenario_counts() -> Result<()> {
             // We do this because earlier, the runner's event processing has been turned off temporarily
             // but at this point we are ready to run the event processing
             test.event_processor_runner
-                .build(test.homeserver_id.as_ref())
+                .build_run(test.homeserver_id.as_ref())
                 .await
                 .map_err(|e| anyhow!(e))?
                 .run()

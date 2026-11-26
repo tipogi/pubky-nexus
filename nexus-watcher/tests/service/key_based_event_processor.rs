@@ -19,10 +19,8 @@ use nexus_watcher::events::Event;
 use nexus_watcher::events::EventHandler;
 use nexus_watcher::service::indexer::{KeyBasedEventProcessor, Run, RunError};
 use nexus_watcher::service::runner::{UserNotFoundBackoff, UserResumePoints};
-use nexus_watcher::service::stats::ProcessorRunStatus;
-use nexus_watcher::service::{
-    KeyBasedEventProcessorRunner, TEventProcessorRunner, KEY_BASED_RUN_BUDGET,
-};
+use nexus_watcher::service::stats::TurnStatus;
+use nexus_watcher::service::{Cycle, KeyBasedEventProcessorRunner, KEY_BASED_RUN_BUDGET};
 use pubky::{Keypair, PubkyResource, PublicKey};
 use pubky_social_specs::PubkyId;
 use pubky_watcher::{
@@ -627,11 +625,11 @@ async fn key_based_runner_backs_off_homeserver_after_spent_budget() -> Result<()
     let stats = runner.run().await?.0;
 
     let run = stats
-        .stats
+        .turns
         .iter()
-        .find(|run| run.hs_id == hs_id)
+        .find(|run| run.hs_pubkey == hs_id)
         .expect("the homeserver was run");
-    assert_eq!(run.status, ProcessorRunStatus::BudgetSpent);
+    assert_eq!(run.status, TurnStatus::BudgetSpent);
     assert!(runner.backoff.should_skip(&hs_id));
 
     Ok(())
