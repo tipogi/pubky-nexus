@@ -17,7 +17,6 @@ use nexus_watcher::events::retry::{
 };
 use nexus_watcher::events::{DefaultEventHandler, EventHandler};
 use nexus_watcher::events::{Event, ParseResult};
-use nexus_watcher::nexus_client::NexusHomeserverClient;
 use nexus_watcher::service::HsEventProcessorRunner;
 use nexus_watcher::service::KeyBasedEventProcessorRunner;
 use nexus_watcher::service::TEventProcessorRunner;
@@ -105,9 +104,8 @@ impl WatcherTest {
     fn create_test_event_processor_runner(
         primary_homeserver: PubkyId,
         files_path: PathBuf,
-        watcher_client: Arc<WatcherClient>,
+        client: Arc<WatcherClient>,
     ) -> HsEventProcessorRunner {
-        let client: Arc<dyn NexusHomeserverClient> = watcher_client;
         // One retry queue: the scheduler enqueues to it and the handler's gate reads it
         let store: Arc<dyn RetryStore> = Arc::new(RedisRetryStore::new());
         let event_handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
@@ -131,7 +129,8 @@ impl WatcherTest {
         HsEventProcessorRunner {
             limit: 1000,
             event_handler,
-            client,
+            client: client.clone(),
+            resolver: client,
             shutdown_rx,
             primary_homeserver,
             retry_scheduler,
@@ -226,7 +225,7 @@ impl WatcherTest {
     pub async fn process_external_homeserver(&self, homeserver_id: &PubkyId) -> Result<()> {
         let runner = KeyBasedEventProcessorRunner::new(
             &WatcherConfig::default(),
-            self.event_processor_runner.client.clone(),
+            self.client.clone(),
             self.event_processor_runner.event_handler.clone(),
             self.event_processor_runner.retry_scheduler.clone(),
             self.event_processor_runner.shutdown_rx.clone(),

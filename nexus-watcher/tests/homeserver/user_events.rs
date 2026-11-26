@@ -15,6 +15,7 @@ use pubky_social_specs::legacy_v0::PubkyAppUser;
 use pubky_testnet::pubky_homeserver::{
     ConfigToml, GlobPattern, HttpMethod, LimitKeyType, MockDataDir, PathLimit,
 };
+use pubky_watcher::KeyEventSource;
 
 fn profile(name: &str) -> PubkyAppUser {
     PubkyAppUser {
@@ -38,7 +39,7 @@ async fn test_user_events_come_from_the_homeserver_after_the_cursor() -> Result<
     // asked finds these events.
     let other_hs = test.testnet.create_random_homeserver().await?.public_key();
     test.register_user_in_hs(&user_kp, &other_hs).await?;
-    let client = &test.event_processor_runner.client;
+    let client = &test.client;
     let user_pk = user_kp.public_key();
     let hs = test.homeserver_id.to_public_key()?;
 
@@ -102,7 +103,7 @@ async fn test_rate_limited_user_events_are_retried_against_a_homeserver() -> Res
     let hs = homeserver_allowing_one_stream_request_a_second(&mut test).await?;
     let user_kp = Keypair::random();
     test.register_user_in_hs(&user_kp, &hs).await?;
-    let client = &test.event_processor_runner.client;
+    let client = &test.client;
     let user_pk = user_kp.public_key();
 
     client.user_events(&hs, &user_pk, 0, 10, "/pub/").await?;

@@ -144,7 +144,8 @@ pub enum EventProcessorError {
 
     /// A homeserver request that could not be built ([`HsErrorKind::Malformed`]). Not
     /// retried: a fetch's event is dropped, and an event-stream request's user is skipped
-    /// for the run, cursor kept. The run goes on.
+    /// for the run, cursor kept. The run goes on. A homeserver whose own ID is no key fails
+    /// its run with this error before any request.
     #[error("{0}")]
     Homeserver(HsError),
 

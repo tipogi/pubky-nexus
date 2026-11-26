@@ -168,7 +168,7 @@ async fn test_resource_tag_from_two_folders_is_one_edge() -> Result<()> {
     );
     let v1_tag_uri = social_v1_tag_uri_builder(user_id.clone(), tag_id.clone());
     let key = resource_key(&user_id, &tag_id)?;
-    let ingestor = UserIngestor::new([], test.event_processor_runner.client.clone());
+    let ingestor = UserIngestor::new([], test.client.clone());
 
     // Each file is deleted first once
     for v1_first in [false, true] {

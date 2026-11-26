@@ -2708,7 +2708,8 @@ async fn primary_runner(
         homeserver,
         limit: 100,
         event_handler: handler,
-        client,
+        client: client.clone(),
+        resolver: client,
         shutdown_rx: watch::channel(false).1,
         retry_scheduler: Arc::new(RetryScheduler::new(
             store,

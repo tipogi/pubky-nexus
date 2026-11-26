@@ -9,14 +9,26 @@ pub use pubky_watcher::{RunOutcome, TEventProcessor};
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::Event;
+use pubky::PublicKey;
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{dispatch_retryable_error, EventRetryScheduler};
+use pubky_watcher::{dispatch_retryable_error, EventRetryScheduler, HsError, HsErrorKind, HsOp};
 
 /// How a run of a Nexus event processor did not complete.
 pub type RunError = pubky_watcher::RunError<EventProcessorError>;
 
 /// The event processors the Nexus runners build and run.
 pub type NexusEventProcessor = dyn TEventProcessor<Event, EventProcessorError>;
+
+/// The key of homeserver `id`, for a call to it. A format-valid ID need not be a curve point;
+/// such an ID fails `op` as a malformed request, labelled with the ID. That never changes,
+/// so a processor converts its homeserver's ID before the calls of a run and stops there.
+pub(crate) fn homeserver_public_key(id: &PubkyId, op: HsOp) -> Result<PublicKey, HsError> {
+    id.to_public_key().map_err(|e| HsError {
+        hs: id.to_string(),
+        op,
+        kind: HsErrorKind::malformed(e),
+    })
+}
 
 /// Handles a failed event the way every Nexus processor does: an error that should not be
 /// retried now stops the batch, one not worth retrying is dropped, and the rest are queued on

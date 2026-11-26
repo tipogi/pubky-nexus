@@ -62,10 +62,7 @@ async fn test_file_ingest_aborts_on_blacklisted_source_homeserver() -> Result<()
     let file_uri = file_uri_builder(user_id.clone(), file_id.clone());
 
     // Ingestor blacklisting the HS that hosts the blob source (the test homeserver)
-    let ingestor = UserIngestor::new(
-        [test.homeserver_id.clone()],
-        test.event_processor_runner.client.clone(),
-    );
+    let ingestor = UserIngestor::new([test.homeserver_id.clone()], test.client.clone());
 
     let key = ResourceKey {
         owner_id: user_pubky_id,
@@ -76,7 +73,7 @@ async fn test_file_ingest_aborts_on_blacklisted_source_homeserver() -> Result<()
         key,
         test.temp_dir.path(),
         &ingestor,
-        test.event_processor_runner.client.as_ref(),
+        test.client.as_ref(),
     )
     .await
     .expect_err("file ingest should be refused for a blacklisted source HS");
@@ -127,10 +124,7 @@ async fn test_file_ingest_aborts_when_source_is_blacklisted_hs_pk_directly() -> 
     let file_uri = file_uri_builder(owner_id.to_string(), file_id.clone());
 
     // Ingestor blacklisting the HS PK used as the direct blob source.
-    let ingestor = UserIngestor::new(
-        [test.homeserver_id.clone()],
-        test.event_processor_runner.client.clone(),
-    );
+    let ingestor = UserIngestor::new([test.homeserver_id.clone()], test.client.clone());
 
     let key = ResourceKey {
         owner_id: owner_id.clone(),
@@ -141,7 +135,7 @@ async fn test_file_ingest_aborts_when_source_is_blacklisted_hs_pk_directly() -> 
         key,
         test.temp_dir.path(),
         &ingestor,
-        test.event_processor_runner.client.as_ref(),
+        test.client.as_ref(),
     )
     .await
     .expect_err("file ingest should be refused when src addresses a blacklisted HS PK directly");
@@ -181,10 +175,7 @@ async fn test_file_ingest_proceeds_when_source_homeserver_not_blacklisted() -> R
     let file_uri = file_uri_builder(user_id.clone(), file_id.clone());
 
     // Ingestor blacklisting an unrelated HS; the source HS is not in the list
-    let ingestor = UserIngestor::new(
-        [random_pubky_id()],
-        test.event_processor_runner.client.clone(),
-    );
+    let ingestor = UserIngestor::new([random_pubky_id()], test.client.clone());
 
     let key = ResourceKey {
         owner_id: user_pubky_id,
@@ -195,7 +186,7 @@ async fn test_file_ingest_proceeds_when_source_homeserver_not_blacklisted() -> R
         key,
         test.temp_dir.path(),
         &ingestor,
-        test.event_processor_runner.client.as_ref(),
+        test.client.as_ref(),
     )
     .await
     .expect("file ingest should proceed when the source HS is not blacklisted");

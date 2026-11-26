@@ -1,17 +1,16 @@
-use super::{event_span, handle_error, RunOutcome, TEventProcessor};
+use super::{event_span, handle_error, homeserver_public_key, RunOutcome, TEventProcessor};
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::{Event, EventHandler};
-use crate::nexus_client::{hs_key, NexusHomeserverClient};
 use nexus_common::db::kv::RedisError;
 use nexus_common::db::{fetch_row_from_graph, queries, GraphResult};
 use nexus_common::models::error::ModelError;
 use nexus_common::models::homeserver::Homeserver;
+use nexus_common::models::user::PkdnsHomeserverResolver;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky_social_specs::PubkyId;
-use pubky_watcher::EventBatch;
-use pubky_watcher::{HsErrorKind, HsOp};
+use pubky_watcher::{EventBatch, HomeserverEventSource, HsErrorKind, HsOp};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::watch::Receiver;
@@ -129,7 +128,10 @@ pub struct HsEventProcessor {
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
     pub event_handler: Arc<dyn EventHandler>,
-    pub client: Arc<dyn NexusHomeserverClient>,
+    /// Client the homeserver's events are polled through
+    pub client: Arc<dyn HomeserverEventSource>,
+    /// PKDNS lookup for the homeserver of a user without a `HOSTED_BY` edge
+    pub resolver: Arc<dyn PkdnsHomeserverResolver>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Scheduler used to enqueue failed events onto the retry queue
@@ -265,7 +267,7 @@ impl HsEventProcessor {
         let Ok(user_pk) = user_id.to_public_key() else {
             return HsMapping::Unresolved;
         };
-        let published = match self.client.resolve_own_record(&user_pk).await {
+        let published = match self.resolver.resolve_own_record(&user_pk).await {
             Ok(record) => record.homeserver(),
             Err(e) => {
                 warn!(%user_id, error = %e, "PKDNS lookup failed; treating the user as publishing no homeserver");
@@ -291,7 +293,7 @@ impl HsEventProcessor {
     async fn poll_events(&self) -> Result<Vec<String>, EventProcessorError> {
         debug!(cursor = %self.homeserver.cursor, "Polling events");
 
-        let hs = hs_key(&self.homeserver.id, HsOp::PollEvents)?;
+        let hs = homeserver_public_key(&self.homeserver.id, HsOp::PollEvents)?;
         let lines = self
             .client
             .poll_events(&hs, self.homeserver.cursor, self.limit)

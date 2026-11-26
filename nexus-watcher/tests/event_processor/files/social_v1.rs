@@ -388,10 +388,7 @@ async fn test_v1_file_of_a_blacklisted_homeserver_is_refused() -> Result<()> {
     file.upload(&mut test, &user_kp).await?;
 
     // An ingestor blacklisting the homeserver that hosts the owner: the test homeserver.
-    let ingestor = UserIngestor::new(
-        [test.homeserver_id.clone()],
-        test.event_processor_runner.client.clone(),
-    );
+    let ingestor = UserIngestor::new([test.homeserver_id.clone()], test.client.clone());
     let key = ResourceKey {
         owner_id: PubkyId::from(user_kp.public_key()),
         resource_id: file.filename.clone(),
@@ -401,7 +398,7 @@ async fn test_v1_file_of_a_blacklisted_homeserver_is_refused() -> Result<()> {
         file.hash(),
         test.temp_dir.path(),
         &ingestor,
-        test.event_processor_runner.client.as_ref(),
+        test.client.as_ref(),
     )
     .await
     .expect_err("a v1 file of a blacklisted homeserver must be refused");

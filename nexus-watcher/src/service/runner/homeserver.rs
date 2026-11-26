@@ -2,13 +2,14 @@ use super::TEventProcessorRunner;
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::{Event, EventHandler};
-use crate::nexus_client::NexusHomeserverClient;
 use crate::service::indexer::{HsEventProcessor, NexusEventProcessor};
 use crate::service::stats::{ProcessedStats, RunAllProcessorsStats};
 use nexus_common::models::homeserver::Homeserver;
+use nexus_common::models::user::PkdnsHomeserverResolver;
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
 use pubky_social_specs::PubkyId;
+use pubky_watcher::HomeserverEventSource;
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
 use tracing::debug;
@@ -18,7 +19,10 @@ pub struct HsEventProcessorRunner {
     pub limit: u16,
 
     pub event_handler: Arc<dyn EventHandler>,
-    pub client: Arc<dyn NexusHomeserverClient>,
+    /// Client the processors this runner builds poll events through
+    pub client: Arc<dyn HomeserverEventSource>,
+    /// PKDNS lookup the processors this runner builds resolve users' homeservers through
+    pub resolver: Arc<dyn PkdnsHomeserverResolver>,
     pub shutdown_rx: Receiver<bool>,
 
     /// See [WatcherConfig::homeserver]
@@ -29,10 +33,12 @@ pub struct HsEventProcessorRunner {
 }
 
 impl HsEventProcessorRunner {
-    /// Creates a runner configured by `config`, sharing the given client, handler and scheduler
+    /// Creates a runner configured by `config`, sharing the given client, resolver, handler
+    /// and scheduler
     pub fn new(
         config: &WatcherConfig,
-        client: Arc<dyn NexusHomeserverClient>,
+        client: Arc<dyn HomeserverEventSource>,
+        resolver: Arc<dyn PkdnsHomeserverResolver>,
         event_handler: Arc<dyn EventHandler>,
         retry_scheduler: Arc<RetryScheduler>,
         shutdown_rx: Receiver<bool>,
@@ -41,6 +47,7 @@ impl HsEventProcessorRunner {
             limit: config.events_limit,
             event_handler,
             client,
+            resolver,
             shutdown_rx,
             primary_homeserver: config.homeserver.clone(),
             retry_scheduler,
@@ -72,6 +79,7 @@ impl TEventProcessorRunner<Event, EventProcessorError> for HsEventProcessorRunne
             limit: self.limit,
             event_handler: self.event_handler.clone(),
             client: self.client.clone(),
+            resolver: self.resolver.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             retry_scheduler: self.retry_scheduler.clone(),
             hs_mapping_cache: Default::default(),

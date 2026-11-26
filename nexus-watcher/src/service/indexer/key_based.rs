@@ -13,7 +13,7 @@ use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::{EventCursor, PublicKey};
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{HsStreamEvent, KeyEventSource};
+use pubky_watcher::{HsOp, HsStreamEvent, KeyEventSource};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
@@ -21,7 +21,7 @@ use super::homeserver::HsMapping;
 
 /// The paths a user's stream is read under: everything they publish.
 const USER_EVENTS_PATH: &str = "/pub/";
-use super::{event_span, handle_error, RunOutcome, TEventProcessor};
+use super::{event_span, handle_error, homeserver_public_key, RunOutcome, TEventProcessor};
 use crate::events::retry::RetryScheduler;
 use crate::events::EventHandler;
 use crate::service::runner::{UserNotFoundBackoff, UserResumePoints};
@@ -119,9 +119,7 @@ impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
 
         // A format-valid id need not be a curve point, and then no user's stream on it can
         // be read. That never changes, so the run stops here instead of failing every user.
-        let hs_pk = self.homeserver_id.to_public_key().map_err(|e| {
-            EventProcessorError::SpecValidation(format!("{hs_id} is not a valid public key: {e}"))
-        })?;
+        let hs_pk = homeserver_public_key(&self.homeserver_id, HsOp::UserEvents)?;
         let deadline = Instant::now() + self.budget;
 
         let mut users = self

@@ -302,7 +302,7 @@ async fn test_social_v1_tag_on_a_foreign_target_reaches_the_resource_flow() -> R
     let input = TagInput::from_v1(tag, tag_uri);
     assert_eq!(input.tagged.target, ReferenceTarget::Foreign);
     let key = resource_key(&user_id, &tag_id)?;
-    let ingestor = UserIngestor::new([], test.event_processor_runner.client.clone());
+    let ingestor = UserIngestor::new([], test.client.clone());
 
     put_tag(input, key.clone(), &ingestor).await?;
 

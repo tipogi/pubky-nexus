@@ -2,7 +2,6 @@ use super::{HomeserverBackoff, TEventProcessorRunner, UserNotFoundBackoff, UserR
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::{Event, EventHandler};
-use crate::nexus_client::NexusHomeserverClient;
 use crate::service::indexer::{KeyBasedEventProcessor, NexusEventProcessor};
 use crate::service::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats};
 use crate::service::KEY_BASED_RUN_BUDGET;
@@ -13,6 +12,7 @@ use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
 use pubky_social_specs::PubkyId;
+use pubky_watcher::KeyEventSource;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
@@ -73,8 +73,8 @@ pub struct KeyBasedEventProcessorRunner {
     pub monitored_hs_limit: usize,
 
     pub event_handler: Arc<dyn EventHandler>,
-    /// Client the processors this runner builds fetch through
-    pub client: Arc<dyn NexusHomeserverClient>,
+    /// Client the processors this runner builds read users' event streams through
+    pub client: Arc<dyn KeyEventSource>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Primary homeserver ID, excluded from the external targets list
@@ -103,7 +103,7 @@ impl KeyBasedEventProcessorRunner {
     /// Creates a runner configured by `config`, sharing the given client, handler and scheduler
     pub fn new(
         config: &WatcherConfig,
-        client: Arc<dyn NexusHomeserverClient>,
+        client: Arc<dyn KeyEventSource>,
         event_handler: Arc<dyn EventHandler>,
         retry_scheduler: Arc<RetryScheduler>,
         shutdown_rx: Receiver<bool>,

@@ -23,7 +23,6 @@ use nexus_watcher::events::retry::{
     RetryStore,
 };
 use nexus_watcher::events::{DefaultEventHandler, EventHandler, Moderation};
-use nexus_watcher::nexus_client::NexusHomeserverClient;
 use nexus_watcher::service::indexer::{KeyBasedEventProcessor, TEventProcessor};
 use nexus_watcher::service::runner::{UserNotFoundBackoff, UserResumePoints};
 use nexus_watcher::service::{HsEventProcessorRunner, TEventProcessorRunner, KEY_BASED_RUN_BUDGET};
@@ -55,7 +54,7 @@ pub struct SpecMigrationTest {
     /// Read per user.
     pub external: PubkyId,
     bulk: HsEventProcessorRunner,
-    client: Arc<dyn NexusHomeserverClient>,
+    client: Arc<WatcherClient>,
     handler: Arc<dyn EventHandler>,
     ingestor: Arc<UserIngestor>,
     retry_queue: Arc<RetryQueue>,
@@ -82,7 +81,7 @@ impl SpecMigrationTest {
             .map_err(|e| anyhow!("persisting the primary: {e}"))?;
 
         // Nexus's own client, bound to this testnet
-        let client: Arc<dyn NexusHomeserverClient> = Arc::new(
+        let client = Arc::new(
             WatcherClient::from_pubky(testnet.sdk()?).with_max_file_size(DEFAULT_MAX_FILE_SIZE),
         );
 
@@ -113,6 +112,7 @@ impl SpecMigrationTest {
             limit: 1000,
             event_handler: handler.clone(),
             client: client.clone(),
+            resolver: client.clone(),
             shutdown_rx: shutdown_rx.clone(),
             primary_homeserver: primary.clone(),
             retry_scheduler: retry.clone(),
