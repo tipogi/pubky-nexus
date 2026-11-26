@@ -3,10 +3,10 @@ use std::fmt;
 /// What a homeserver event did to its resource: written (`PUT`) or deleted (`DEL`).
 ///
 /// Neither carries a body: for a `PUT` the resource is fetched separately.
-/// Carried by [`HomeserverEvent`](crate::HomeserverEvent) and
-/// [`HsStreamEvent`](crate::HsStreamEvent).
+/// Carried by [`FeedEvent`](crate::FeedEvent) and
+/// [`StreamEvent`](crate::StreamEvent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EventMethod {
+pub enum EventType {
     /// The resource was written; read it with
     /// [`ResourceReader::get_resource`](crate::ResourceReader::get_resource).
     Put,
@@ -15,7 +15,7 @@ pub enum EventMethod {
     Del,
 }
 
-impl From<pubky::EventType> for EventMethod {
+impl From<pubky::EventType> for EventType {
     fn from(value: pubky::EventType) -> Self {
         match value {
             pubky::EventType::Put { .. } => Self::Put,
@@ -25,7 +25,7 @@ impl From<pubky::EventType> for EventMethod {
 }
 
 /// `PUT` or `DEL`, as on an `/events/` line.
-impl fmt::Display for EventMethod {
+impl fmt::Display for EventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Put => "PUT",

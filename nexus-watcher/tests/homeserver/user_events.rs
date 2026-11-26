@@ -46,7 +46,7 @@ async fn test_user_events_come_from_the_homeserver_after_the_cursor() -> Result<
     let first = client.user_events(&hs, &user_pk, 0, 1, "/pub/").await?;
 
     assert_eq!(first.len(), 1, "{first:?}");
-    assert_eq!(first[0].owner().z32(), user_id);
+    assert_eq!(first[0].user_pubkey().z32(), user_id);
 
     let cursor = first[0].cursor;
     let rest = client
@@ -65,7 +65,7 @@ async fn test_user_events_come_from_the_homeserver_after_the_cursor() -> Result<
 
     assert_eq!(rest.len(), 1, "{rest:?}");
     assert!(rest[0].cursor > cursor, "{rest:?}");
-    assert_eq!(rest[0].owner().z32(), user_id);
+    assert_eq!(rest[0].user_pubkey().z32(), user_id);
 
     Ok(())
 }

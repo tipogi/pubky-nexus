@@ -7,11 +7,11 @@ use nexus_common::utils::test_utils::signed_packet_naming;
 use pubky::{Keypair, PubkyResource, PublicKey};
 use pubky_social_specs::PubkyId;
 use pubky_watcher::{
-    HomeserverEventSource, HsError, HsErrorKind, HsOp, HsStreamEvent, KeyEventSource, ResolveError,
-    ResourceReader,
+    HomeserverEventSource, HsError, HsErrorKind, HsOp, KeyEventSource, ResolveError,
+    ResourceReader, StreamEvent,
 };
 
-type UserEventsResult = Result<Vec<HsStreamEvent>, HsErrorKind>;
+type UserEventsResult = Result<Vec<StreamEvent>, HsErrorKind>;
 
 /// Homeserver client that serves scripted answers, without a network: every capability
 /// the watcher uses, and the PKDNS lookup.
@@ -68,7 +68,7 @@ impl MockHomeserverClient {
         self
     }
 
-    pub fn with_events(mut self, events: Vec<Vec<HsStreamEvent>>) -> Self {
+    pub fn with_events(mut self, events: Vec<Vec<StreamEvent>>) -> Self {
         *self.events.get_mut() = events.into_iter().map(Ok).collect();
         self
     }
@@ -78,7 +78,7 @@ impl MockHomeserverClient {
         self
     }
 
-    pub fn with_user_events(mut self, events: Vec<(String, Vec<HsStreamEvent>)>) -> Self {
+    pub fn with_user_events(mut self, events: Vec<(String, Vec<StreamEvent>)>) -> Self {
         *self.user_events.get_mut() = events
             .into_iter()
             .map(|(user_id, events)| (user_id, Ok(events)))
@@ -192,7 +192,7 @@ impl KeyEventSource for MockHomeserverClient {
         cursor: u64,
         limit: u16,
         _path: &str,
-    ) -> Result<Vec<HsStreamEvent>, HsError> {
+    ) -> Result<Vec<StreamEvent>, HsError> {
         let user_id = user.z32();
         self.calls
             .lock()

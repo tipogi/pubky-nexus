@@ -12,9 +12,7 @@
 
 use async_trait::async_trait;
 use pubky::{EventCursor, PubkyResource, PublicKey};
-use pubky_watcher::{
-    EventHandler, EventMethod, HomeserverEvent, ResourceReader, Watcher, WatcherClient,
-};
+use pubky_watcher::{EventHandler, EventType, FeedEvent, ResourceReader, Watcher, WatcherClient};
 use tokio::sync::watch;
 
 /// This example's error: any error, boxed. An application would use its own type.
@@ -32,10 +30,10 @@ struct ResourcePrintingHandler {
 }
 
 #[async_trait]
-impl EventHandler<HomeserverEvent, BoxError> for ResourcePrintingHandler {
-    async fn handle(&self, event: &HomeserverEvent) -> Result<(), BoxError> {
-        println!("{} {}", event.method, event.uri);
-        if event.method != EventMethod::Put {
+impl EventHandler<FeedEvent, BoxError> for ResourcePrintingHandler {
+    async fn handle(&self, event: &FeedEvent) -> Result<(), BoxError> {
+        println!("{} {}", event.event_type, event.uri);
+        if event.event_type != EventType::Put {
             return Ok(());
         }
 

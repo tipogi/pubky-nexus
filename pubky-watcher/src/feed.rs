@@ -1,19 +1,19 @@
 //! The `/events/` line protocol: a `text/plain` body with one event per line
 //! (`PUT <uri>` / `DEL <uri>`), closed by a `cursor: <value>` line.
 //!
-//! Use [`EventBatch::split`] when you poll `/events/` yourself, through
+//! Use [`FeedBatch::split`] when you poll `/events/` yourself, through
 //! [`HomeserverEventSource`](crate::HomeserverEventSource) in your own
-//! [`TEventProcessor`](crate::TEventProcessor), and [`HomeserverEvent`] when the method and
+//! [`TEventProcessor`](crate::TEventProcessor), and [`FeedEvent`] when the method and
 //! URI are all your handler needs. [`Watcher::homeserver`](crate::Watcher::homeserver) does
 //! both for you.
 
 use std::convert::Infallible;
 
-use crate::client::EventMethod;
+use crate::client::EventType;
 use crate::traits::{LineParseOutcome, ParseFromLine};
 
 /// Prefix of the line closing a homeserver `/events/` response with its cursor.
-/// [`EventBatch::split`] reads it.
+/// [`FeedBatch::split`] reads it.
 pub const CURSOR_PREFIX: &str = "cursor: ";
 
 /// An event line of a homeserver's `/events/` feed: `PUT <uri>` or `DEL <uri>`.
@@ -22,9 +22,9 @@ pub const CURSOR_PREFIX: &str = "cursor: ";
 /// An application that needs richer parsing defines its own type and implements
 /// [`ParseFromLine`] for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HomeserverEvent {
-    /// `PUT` or `DEL`, as an [`EventMethod`].
-    pub method: EventMethod,
+pub struct FeedEvent {
+    /// `PUT` or `DEL`, as an [`EventType`].
+    pub event_type: EventType,
     /// The resource's `pubky://` URI, as the line carries it.
     /// A `PUT`'s resource is read with
     /// [`ResourceReader::get_resource`](crate::ResourceReader::get_resource).
@@ -35,7 +35,7 @@ pub struct HomeserverEvent {
 /// not `PUT <uri>` or `DEL <uri>` is [`LineParseOutcome::Unrecognized`]. Only the first space
 /// separates the method from the URI: homeservers write a stored file's name unencoded, and
 /// a name may contain spaces.
-impl ParseFromLine for HomeserverEvent {
+impl ParseFromLine for FeedEvent {
     type Error = Infallible;
 
     fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error> {
@@ -43,15 +43,15 @@ impl ParseFromLine for HomeserverEvent {
             return Ok(LineParseOutcome::Skipped);
         }
 
-        let Some((method, uri)) = line.split_once(' ') else {
+        let Some((event_type, uri)) = line.split_once(' ') else {
             return Ok(LineParseOutcome::Unrecognized {
                 reason: format!("expected `<METHOD> <uri>`, got: {line}"),
             });
         };
 
-        let method = match method {
-            "PUT" => EventMethod::Put,
-            "DEL" => EventMethod::Del,
+        let event_type = match event_type {
+            "PUT" => EventType::Put,
+            "DEL" => EventType::Del,
             other => {
                 return Ok(LineParseOutcome::Unrecognized {
                     reason: format!("unknown event method: {other}"),
@@ -66,7 +66,7 @@ impl ParseFromLine for HomeserverEvent {
         }
 
         Ok(LineParseOutcome::Parsed(Self {
-            method,
+            event_type,
             uri: uri.to_string(),
         }))
     }
@@ -78,9 +78,9 @@ impl ParseFromLine for HomeserverEvent {
 /// rather than something we can rely on from an untrusted peer: the split is
 /// order-independent, and if a batch carries several cursor lines the last one
 /// wins, being the position the homeserver ends the batch at.
-/// Built by [`EventBatch::split`].
+/// Built by [`FeedBatch::split`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventBatch<'a> {
+pub struct FeedBatch<'a> {
     /// The event lines, in the order the homeserver sent them, for
     /// [`ParseFromLine::parse_line`](crate::ParseFromLine::parse_line).
     pub event_lines: Vec<&'a str>,
@@ -89,7 +89,7 @@ pub struct EventBatch<'a> {
     pub cursor: Option<&'a str>,
 }
 
-impl<'a> EventBatch<'a> {
+impl<'a> FeedBatch<'a> {
     /// Splits the lines of a `/events/` response.
     /// A line starting with [`CURSOR_PREFIX`] is a cursor line; any other is an event line.
     pub fn split(lines: &'a [String]) -> Self {
@@ -123,11 +123,11 @@ impl<'a> EventBatch<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventBatch, HomeserverEvent};
-    use crate::{EventMethod, LineParseOutcome, ParseFromLine};
+    use super::{FeedBatch, FeedEvent};
+    use crate::{EventType, LineParseOutcome, ParseFromLine};
 
-    fn parsed(line: &str) -> HomeserverEvent {
-        match HomeserverEvent::parse_line(line).unwrap() {
+    fn parsed(line: &str) -> FeedEvent {
+        match FeedEvent::parse_line(line).unwrap() {
             LineParseOutcome::Parsed(event) => event,
             other => panic!("{line:?} did not parse: {other:?}"),
         }
@@ -135,23 +135,23 @@ mod tests {
 
     fn unrecognized(line: &str) -> bool {
         matches!(
-            HomeserverEvent::parse_line(line).unwrap(),
+            FeedEvent::parse_line(line).unwrap(),
             LineParseOutcome::Unrecognized { .. }
         )
     }
 
-    // --- HomeserverEvent::parse_line ---
+    // --- FeedEvent::parse_line ---
 
     #[test]
     fn put_and_del_lines_parse() {
         assert_eq!(
             parsed("PUT pubky://a/pub/x"),
-            HomeserverEvent {
-                method: EventMethod::Put,
+            FeedEvent {
+                event_type: EventType::Put,
                 uri: "pubky://a/pub/x".into()
             }
         );
-        assert_eq!(parsed("DEL pubky://a/pub/x").method, EventMethod::Del);
+        assert_eq!(parsed("DEL pubky://a/pub/x").event_type, EventType::Del);
     }
 
     /// Only the first space separates the method from the URI, so a file name with spaces
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn empty_lines_are_skipped() {
         assert!(matches!(
-            HomeserverEvent::parse_line("").unwrap(),
+            FeedEvent::parse_line("").unwrap(),
             LineParseOutcome::Skipped
         ));
     }
@@ -190,13 +190,13 @@ mod tests {
         raw.iter().map(|l| l.to_string()).collect()
     }
 
-    // --- EventBatch::split ---
+    // --- FeedBatch::split ---
 
     /// The usual shape: events followed by the cursor that closes the batch.
     #[test]
     fn splits_events_from_the_trailing_cursor() {
         let lines = lines(&["PUT pubky://a/pub/x", "DEL pubky://b/pub/y", "cursor: 42"]);
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
         assert_eq!(
             batch.event_lines,
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn cursor_only_batch_has_no_events() {
         let lines = lines(&["cursor: 42"]);
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
         assert!(batch.event_lines.is_empty());
         assert_eq!(batch.cursor, Some("42"));
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn cursor_is_found_out_of_position() {
         let lines = lines(&["cursor: 42", "PUT pubky://a/pub/x"]);
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
         assert_eq!(batch.event_lines, vec!["PUT pubky://a/pub/x"]);
         assert_eq!(batch.cursor, Some("42"));
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn last_cursor_line_wins() {
         let lines = lines(&["cursor: 41", "PUT pubky://a/pub/x", "cursor: 42"]);
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
         assert_eq!(batch.event_lines, vec!["PUT pubky://a/pub/x"]);
         assert_eq!(batch.cursor, Some("42"));
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn batch_without_cursor_line() {
         let lines = lines(&["PUT pubky://a/pub/x"]);
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
         assert_eq!(batch.event_lines, vec!["PUT pubky://a/pub/x"]);
         assert_eq!(batch.cursor, None);
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn unrecognized_lines_count_as_events() {
         let lines = lines(&["garbage", "cursor: 42"]);
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
         assert_eq!(batch.event_lines, vec!["garbage"]);
         assert!(batch.has_events());

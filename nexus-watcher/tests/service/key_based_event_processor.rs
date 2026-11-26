@@ -26,8 +26,8 @@ use nexus_watcher::service::{
 use pubky::{Keypair, PubkyResource, PublicKey};
 use pubky_social_specs::PubkyId;
 use pubky_watcher::{
-    EventMethod, HomeserverEventSource, HsError, HsErrorKind, HsStreamEvent, KeyEventSource,
-    ResourceReader,
+    EventType, HomeserverEventSource, HsError, HsErrorKind, KeyEventSource, ResourceReader,
+    StreamEvent,
 };
 use tokio::sync::watch;
 
@@ -492,7 +492,7 @@ async fn key_based_processor_stops_at_its_budget() -> Result<(), DynError> {
     let hs_id = homeserver.id.to_string();
     let user_a_id = create_user_on_homeserver(&homeserver).await?;
     let user_b_id = create_user_on_homeserver(&homeserver).await?;
-    let batch = |user_id: &str| -> Result<Vec<HsStreamEvent>, DynError> {
+    let batch = |user_id: &str| -> Result<Vec<StreamEvent>, DynError> {
         (1..=10)
             .map(|cursor| stream_event(cursor, user_id, "/pub/pubky.app/profile.json"))
             .collect()
@@ -1093,7 +1093,7 @@ impl KeyEventSource for MappingChangesDuringFetch {
         cursor: u64,
         limit: u16,
         path: &str,
-    ) -> Result<Vec<HsStreamEvent>, HsError> {
+    ) -> Result<Vec<StreamEvent>, HsError> {
         let user_id = user.z32();
         match self.change {
             MappingChange::MarkedStale => set_user_homeserver_stale(&user_id, true, None).await,
@@ -1232,11 +1232,11 @@ async fn user_cursor(user_id: &str, hs_id: &str) -> Result<Option<isize>, DynErr
     Ok(UserHsCursor::check_sorted_set_member(None, &user_hs_cursor_key(user_id), &[hs_id]).await?)
 }
 
-fn stream_event(cursor: u64, user_id: &str, path: &str) -> Result<HsStreamEvent, DynError> {
+fn stream_event(cursor: u64, user_id: &str, path: &str) -> Result<StreamEvent, DynError> {
     let user_pk: PublicKey = user_id.parse()?;
 
-    Ok(HsStreamEvent::new(
-        EventMethod::Del,
+    Ok(StreamEvent::new(
+        EventType::Del,
         &PubkyResource::new(user_pk, path)?,
         cursor,
     ))

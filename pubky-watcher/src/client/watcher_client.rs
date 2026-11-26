@@ -11,9 +11,7 @@ use tracing::{error, trace, warn};
 use super::fetch::{
     fetch_capped, read_stream_capped, MAX_ERROR_BODY, MAX_EVENTS_BODY, MAX_RESOURCE_SIZE,
 };
-use super::{
-    ClientError, EventMethod, HomeserverResolver, HsError, HsErrorKind, HsOp, ResolveError,
-};
+use super::{ClientError, EventType, HomeserverResolver, HsError, HsErrorKind, HsOp, ResolveError};
 
 /// The blob cap of a client that sets none ([`WatcherClient::with_max_file_size`]): 100 MiB,
 /// the homeserver's own limit.
@@ -31,41 +29,41 @@ const USER_EVENTS_429_BACKOFF_SECS: [u64; 3] = [1, 2, 3];
 /// processor needs from it.
 /// Returned by [`KeyEventSource::user_events`].
 #[derive(Debug, Clone)]
-pub struct HsStreamEvent {
-    /// Whether the event wrote or deleted the resource ([`EventMethod`]).
-    pub event_type: EventMethod,
+pub struct StreamEvent {
+    /// Whether the event wrote or deleted the resource ([`EventType`]).
+    pub event_type: EventType,
     /// The event's position in the user's stream; the next read starts after it.
     /// Persist it as an [`EventCursor`](pubky::EventCursor).
     pub cursor: u64,
-    owner: PublicKey,
+    user_pubkey: PublicKey,
     uri: String,
 }
 
-impl HsStreamEvent {
-    /// The event `event_type` on `resource` at `cursor`; [`Self::owner`] is the resource's
+impl StreamEvent {
+    /// The event `event_type` on `resource` at `cursor`; [`Self::user_pubkey`] is the resource's
     /// owner.
-    pub fn new(event_type: EventMethod, resource: &PubkyResource, cursor: u64) -> Self {
+    pub fn new(event_type: EventType, resource: &PubkyResource, cursor: u64) -> Self {
         Self {
             event_type,
             cursor,
-            owner: resource.owner.clone(),
+            user_pubkey: resource.owner.clone(),
             uri: resource.to_pubky_url(),
         }
     }
 
     /// Owner of [`Self::uri`], checked against the user whose stream the event is on.
     /// Both come from one resource, so they cannot disagree.
-    pub fn owner(&self) -> &PublicKey {
-        &self.owner
+    pub fn user_pubkey(&self) -> &PublicKey {
+        &self.user_pubkey
     }
 
-    /// The resource's `pubky://` URI, whose owner is [`Self::owner`].
+    /// The resource's `pubky://` URI, whose owner is [`Self::user_pubkey`].
     pub fn uri(&self) -> &str {
         &self.uri
     }
 }
 
-impl From<pubky::Event> for HsStreamEvent {
+impl From<pubky::Event> for StreamEvent {
     fn from(event: pubky::Event) -> Self {
         Self::new(event.event_type.into(), &event.resource, event.cursor.id())
     }
@@ -98,7 +96,7 @@ pub trait HomeserverEventSource: Send + Sync + 'static {
 pub trait KeyEventSource: Send + Sync + 'static {
     /// Per-user `GET /events-stream?user=<pk>:<cursor>&limit=&path=<path>`, not live: the
     /// user's events after `cursor` whose resource path starts with `path` (e.g. `/pub/`).
-    /// At most `limit` events are returned, each an [`HsStreamEvent`]. A rate-limited request
+    /// At most `limit` events are returned, each a [`StreamEvent`]. A rate-limited request
     /// is retried.
     async fn user_events(
         &self,
@@ -107,7 +105,7 @@ pub trait KeyEventSource: Send + Sync + 'static {
         cursor: u64,
         limit: u16,
         path: &str,
-    ) -> Result<Vec<HsStreamEvent>, HsError>;
+    ) -> Result<Vec<StreamEvent>, HsError>;
 }
 
 /// The resources and blobs a `PUT` event names, read under a size cap so that one large
@@ -299,7 +297,7 @@ impl WatcherClient {
         cursor: u64,
         limit: u16,
         path: &str,
-    ) -> Result<Vec<HsStreamEvent>, HsErrorKind> {
+    ) -> Result<Vec<StreamEvent>, HsErrorKind> {
         // We are building the stream without the live flag, so it performs an HTTP GET and closes.
         // See rustdoc of EventStreamBuilder::live()
         let mut stream = self
@@ -328,7 +326,7 @@ async fn read_user_events<S>(
     limit: u16,
     hs: &PublicKey,
     user: &PublicKey,
-) -> Result<Vec<HsStreamEvent>, HsErrorKind>
+) -> Result<Vec<StreamEvent>, HsErrorKind>
 where
     S: Stream<Item = pubky::Result<pubky::Event>> + Unpin,
 {
@@ -339,7 +337,7 @@ where
             break;
         };
         let event = result.map_err(HsErrorKind::transport)?;
-        events.push(HsStreamEvent::from(event));
+        events.push(StreamEvent::from(event));
     }
 
     // Polled once, never awaited: only an event that has already arrived counts.
@@ -404,7 +402,7 @@ impl KeyEventSource for WatcherClient {
         cursor: u64,
         limit: u16,
         path: &str,
-    ) -> Result<Vec<HsStreamEvent>, HsError> {
+    ) -> Result<Vec<StreamEvent>, HsError> {
         user_events_with(hs, user, || {
             self.fetch_user_events(hs, user, cursor, limit, path)
         })
@@ -441,10 +439,10 @@ async fn user_events_with<F, Fut>(
     hs: &PublicKey,
     user: &PublicKey,
     fetch: F,
-) -> Result<Vec<HsStreamEvent>, HsError>
+) -> Result<Vec<StreamEvent>, HsError>
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = Result<Vec<HsStreamEvent>, HsErrorKind>>,
+    Fut: Future<Output = Result<Vec<StreamEvent>, HsErrorKind>>,
 {
     retry_rate_limited(user, fetch)
         .await

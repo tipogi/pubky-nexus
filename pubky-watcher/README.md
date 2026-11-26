@@ -15,7 +15,7 @@ Status: `0.1.0`, not published. The boundary and the names are still under discu
 
 ```rust,ignore
 use pubky::EventCursor;
-use pubky_watcher::{EventHandler, HomeserverEvent, Watcher, WatcherClient};
+use pubky_watcher::{EventHandler, FeedEvent, Watcher, WatcherClient};
 
 struct Print;
 
@@ -25,9 +25,9 @@ struct Print;
 struct PrintError;
 
 #[async_trait::async_trait]
-impl EventHandler<HomeserverEvent, PrintError> for Print {
-    async fn handle(&self, event: &HomeserverEvent) -> Result<(), PrintError> {
-        println!("{} {}", event.method, event.uri);
+impl EventHandler<FeedEvent, PrintError> for Print {
+    async fn handle(&self, event: &FeedEvent) -> Result<(), PrintError> {
+        println!("{} {}", event.event_type, event.uri);
         Ok(())
     }
 }

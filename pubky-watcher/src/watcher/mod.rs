@@ -101,7 +101,7 @@ pub enum ProtocolError {
         /// The cursor the run asked from.
         requested: u64,
         /// The cursor the homeserver sent.
-        /// The batch's cursor line ([`EventBatch::cursor`](crate::EventBatch::cursor)).
+        /// The batch's cursor line ([`FeedBatch::cursor`](crate::FeedBatch::cursor)).
         got: u64,
     },
     /// A user's stream held more events than the run asked for.
@@ -123,7 +123,7 @@ pub enum ProtocolError {
     ForeignEvent {
         /// The user whose stream it was.
         user: PublicKey,
-        /// The owner of the event ([`HsStreamEvent::owner`](crate::HsStreamEvent::owner)).
+        /// The owner of the event ([`StreamEvent::user_pubkey`](crate::StreamEvent::user_pubkey)).
         owner: PublicKey,
     },
 }
@@ -220,7 +220,7 @@ pub struct Watcher;
 
 impl Watcher {
     /// Watches `homeserver`'s `/events/` feed, which covers every user it hosts under one
-    /// cursor. The handler gets each [`HomeserverEvent`](crate::HomeserverEvent).
+    /// cursor. The handler gets each [`FeedEvent`](crate::FeedEvent).
     pub fn homeserver<C>(client: C, homeserver: PublicKey) -> HomeserverWatcherBuilder<Missing>
     where
         C: HomeserverEventSource,
@@ -229,7 +229,7 @@ impl Watcher {
     }
 
     /// Watches the `/events-stream` of each of `users` on `homeserver`, from the cursor given
-    /// with it. The handler gets each [`HsStreamEvent`](crate::HsStreamEvent).
+    /// with it. The handler gets each [`StreamEvent`](crate::StreamEvent).
     pub fn key_stream<C>(
         client: C,
         homeserver: PublicKey,

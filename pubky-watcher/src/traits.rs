@@ -31,14 +31,14 @@ pub enum LineParseOutcome<E> {
 /// Parses a homeserver event line (`PUT <uri>` / `DEL <uri>`) into the application's event
 /// type. A line that cannot be parsed at all is an error; the processor logs it and moves on,
 /// since event lines come from untrusted homeservers.
-/// [`HomeserverEvent`](crate::HomeserverEvent) implements it.
+/// [`FeedEvent`](crate::FeedEvent) implements it.
 pub trait ParseFromLine: Sized {
     /// Why a line could not be parsed at all. Logged by
     /// [`TEventProcessor::process_event_line`](crate::TEventProcessor::process_event_line),
     /// never returned to the caller.
     type Error: std::fmt::Display;
 
-    /// Parses `line`, one of a batch's [`EventBatch::event_lines`](crate::EventBatch).
+    /// Parses `line`, one of a batch's [`FeedBatch::event_lines`](crate::FeedBatch).
     fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error>;
 }
 

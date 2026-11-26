@@ -9,7 +9,7 @@ use super::{
     run_watcher, validate_limit, ConfigError, Missing, ProtocolError, WatchOutcome, WatcherError,
     DEFAULT_EVENTS_LIMIT,
 };
-use crate::events::{EventBatch, HomeserverEvent};
+use crate::feed::{FeedBatch, FeedEvent};
 use crate::processor::{RunOutcome, TEventProcessor};
 use crate::traits::{EventHandler, LineParseOutcome, ParseFromLine};
 use crate::HomeserverEventSource;
@@ -44,7 +44,7 @@ impl<H> HomeserverWatcherBuilder<H> {
         self
     }
 
-    /// The handler each event goes to: an [`EventHandler`] of [`HomeserverEvent`]s, whose
+    /// The handler each event goes to: an [`EventHandler`] of [`FeedEvent`]s, whose
     /// error a failed run gives back as [`WatcherError::Handler`].
     pub fn handler<NewH>(self, handler: NewH) -> HomeserverWatcherBuilder<NewH> {
         HomeserverWatcherBuilder {
@@ -63,7 +63,7 @@ impl<H> HomeserverWatcherBuilder<H> {
         shutdown_rx: Receiver<bool>,
     ) -> Result<HomeserverWatcher<Err>, ConfigError>
     where
-        H: EventHandler<HomeserverEvent, Err> + 'static,
+        H: EventHandler<FeedEvent, Err> + 'static,
         Err: Display + Debug + Send + Sync + 'static,
     {
         validate_limit(self.events_limit)?;
@@ -83,7 +83,7 @@ impl<H> HomeserverWatcherBuilder<H> {
 struct Config<Err> {
     homeserver: PublicKey,
     homeserver_id: String,
-    handler: Arc<dyn EventHandler<HomeserverEvent, Err>>,
+    handler: Arc<dyn EventHandler<FeedEvent, Err>>,
     events_limit: u16,
     source: Arc<dyn HomeserverEventSource>,
     shutdown_rx: Receiver<bool>,
@@ -127,7 +127,7 @@ struct Run<Err> {
 }
 
 #[async_trait::async_trait]
-impl<Err> TEventProcessor<HomeserverEvent, WatcherError<Err>> for Run<Err>
+impl<Err> TEventProcessor<FeedEvent, WatcherError<Err>> for Run<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
@@ -139,7 +139,7 @@ where
         &self.config.homeserver_id
     }
 
-    async fn handle(&self, event: &HomeserverEvent) -> Result<(), WatcherError<Err>> {
+    async fn handle(&self, event: &FeedEvent) -> Result<(), WatcherError<Err>> {
         self.config
             .handler
             .handle(event)
@@ -177,7 +177,7 @@ where
             return Ok(WatchOutcome::completed(self.cursor, 0));
         }
 
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
         let next_cursor = next_cursor(self.cursor, &batch)?;
 
         let mut processed_events = 0;
@@ -190,7 +190,7 @@ where
                 return Ok(WatchOutcome::interrupted(self.cursor, processed_events));
             }
 
-            match HomeserverEvent::parse_line(line) {
+            match FeedEvent::parse_line(line) {
                 Ok(LineParseOutcome::Parsed(event)) => {
                     self.handle_event(&event).await?;
                     processed_events += 1;
@@ -213,7 +213,7 @@ where
 /// same batch again.
 fn next_cursor(
     requested: EventCursor,
-    batch: &EventBatch<'_>,
+    batch: &FeedBatch<'_>,
 ) -> Result<EventCursor, ProtocolError> {
     let Some(raw) = batch.cursor else {
         return Err(ProtocolError::MissingCursor);
@@ -247,7 +247,7 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::{
-        ConfigError, EventHandler, EventMethod, HomeserverEvent, HomeserverEventSource, HsError,
+        ConfigError, EventHandler, EventType, FeedEvent, HomeserverEventSource, HsError,
         HsErrorKind, HsOp, ProtocolError, Watcher, WatcherError,
     };
 
@@ -312,14 +312,14 @@ mod tests {
     /// fails the one numbered `fail_at`.
     #[derive(Default)]
     struct Recorder {
-        events: Mutex<Vec<HomeserverEvent>>,
+        events: Mutex<Vec<FeedEvent>>,
         shutdown_after: Option<(usize, watch::Sender<bool>)>,
         fail_at: Option<usize>,
     }
 
     #[async_trait::async_trait]
-    impl EventHandler<HomeserverEvent, HandlerFailed> for &'static Recorder {
-        async fn handle(&self, event: &HomeserverEvent) -> Result<(), HandlerFailed> {
+    impl EventHandler<FeedEvent, HandlerFailed> for &'static Recorder {
+        async fn handle(&self, event: &FeedEvent) -> Result<(), HandlerFailed> {
             let mut events = self.events.lock().unwrap();
             if self.fail_at == Some(events.len()) {
                 return Err(HandlerFailed(events.len()));
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(outcome.processed_events, 2);
         assert!(outcome.completed);
         let events = handler.events.lock().unwrap();
-        assert_eq!(events[0].method, EventMethod::Put);
+        assert_eq!(events[0].event_type, EventType::Put);
         assert_eq!(events[1].uri, "pubky://a/pub/y");
     }
 

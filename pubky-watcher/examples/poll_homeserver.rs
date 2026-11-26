@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pubky::PublicKey;
 use pubky_watcher::{
-    EventBatch, HomeserverEvent, HomeserverEventSource, RunOutcome, TEventProcessor,
+    FeedBatch, FeedEvent, HomeserverEventSource, RunOutcome, TEventProcessor,
     TEventProcessorRunner, WatcherClient,
 };
 use tokio::sync::{watch, Mutex};
@@ -37,7 +37,7 @@ struct PollProcessor {
 }
 
 #[async_trait]
-impl TEventProcessor<HomeserverEvent, BoxError> for PollProcessor {
+impl TEventProcessor<FeedEvent, BoxError> for PollProcessor {
     fn instance_name(&self) -> &'static str {
         "poll_homeserver"
     }
@@ -46,8 +46,8 @@ impl TEventProcessor<HomeserverEvent, BoxError> for PollProcessor {
         &self.homeserver_id
     }
 
-    async fn handle(&self, event: &HomeserverEvent) -> Result<(), BoxError> {
-        println!("{} {}", event.method, event.uri);
+    async fn handle(&self, event: &FeedEvent) -> Result<(), BoxError> {
+        println!("{} {}", event.event_type, event.uri);
         Ok(())
     }
 
@@ -57,12 +57,12 @@ impl TEventProcessor<HomeserverEvent, BoxError> for PollProcessor {
             .source
             .poll_events(&self.homeserver, cursor, EVENTS_PER_TICK)
             .await?;
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
         if !batch.has_events() {
             println!("No new events");
         }
 
-        // `process_event_line` parses each line with `HomeserverEvent`'s `ParseFromLine`,
+        // `process_event_line` parses each line with `FeedEvent`'s `ParseFromLine`,
         // skips what it does not recognise, and hands the rest to `handle`.
         for line in &batch.event_lines {
             self.process_event_line(line).await?;
@@ -84,7 +84,7 @@ struct PollRunner {
 }
 
 #[async_trait]
-impl TEventProcessorRunner<HomeserverEvent, BoxError> for PollRunner {
+impl TEventProcessorRunner<FeedEvent, BoxError> for PollRunner {
     type Error = BoxError;
 
     fn shutdown_rx(&self) -> watch::Receiver<bool> {
@@ -94,7 +94,7 @@ impl TEventProcessorRunner<HomeserverEvent, BoxError> for PollRunner {
     async fn build(
         &self,
         hs_id: &str,
-    ) -> Result<Arc<dyn TEventProcessor<HomeserverEvent, BoxError>>, BoxError> {
+    ) -> Result<Arc<dyn TEventProcessor<FeedEvent, BoxError>>, BoxError> {
         Ok(Arc::new(PollProcessor {
             homeserver: PublicKey::try_from_z32(hs_id)?,
             homeserver_id: hs_id.to_string(),

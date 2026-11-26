@@ -10,7 +10,7 @@ use nexus_common::models::user::PkdnsHomeserverResolver;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{EventBatch, HomeserverEventSource, HsErrorKind, HsOp};
+use pubky_watcher::{FeedBatch, HomeserverEventSource, HsErrorKind, HsOp};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::watch::Receiver;
@@ -325,7 +325,7 @@ impl HsEventProcessor {
     /// - `lines`: A vector of strings representing event lines retrieved from the homeserver.
     #[tracing::instrument(name = "event_batch.process", skip_all, fields(batch.size = lines.len()))]
     pub async fn process_event_lines(&self, lines: Vec<String>) -> Result<(), EventProcessorError> {
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
         let next_cursor = match batch.cursor {
             Some(raw_cursor) => {

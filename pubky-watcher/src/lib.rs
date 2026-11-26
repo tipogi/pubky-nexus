@@ -23,18 +23,18 @@
 #![warn(missing_docs)]
 
 mod client;
-mod events;
+mod feed;
 mod processor;
 mod runner;
 mod traits;
 mod watcher;
 
 pub use client::{
-    published_homeserver, ClientError, EventMethod, HomeserverEventSource, HomeserverResolver,
-    HsError, HsErrorKind, HsOp, HsStreamEvent, KeyEventSource, ResolveError, ResourceReader,
+    published_homeserver, ClientError, EventType, HomeserverEventSource, HomeserverResolver,
+    HsError, HsErrorKind, HsOp, KeyEventSource, ResolveError, ResourceReader, StreamEvent,
     WatcherClient, WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };
-pub use events::{EventBatch, HomeserverEvent, CURSOR_PREFIX};
+pub use feed::{FeedBatch, FeedEvent, CURSOR_PREFIX};
 pub use processor::{
     dispatch_retryable_error, run_on_own_task, RunError, RunOutcome, TEventProcessor,
     SLOW_RUN_THRESHOLD,

@@ -11,7 +11,7 @@ use super::{
 };
 use crate::processor::{RunOutcome, TEventProcessor};
 use crate::traits::EventHandler;
-use crate::{HsStreamEvent, KeyEventSource};
+use crate::{KeyEventSource, StreamEvent};
 
 /// The paths a user's stream is read under when the builder sets none: everything they
 /// publish.
@@ -64,7 +64,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
         self
     }
 
-    /// The handler each event goes to: an [`EventHandler`] of [`HsStreamEvent`]s, whose
+    /// The handler each event goes to: an [`EventHandler`] of [`StreamEvent`]s, whose
     /// error a failed run gives back as [`WatcherError::Handler`].
     pub fn handler<NewH>(self, handler: NewH) -> KeyStreamWatcherBuilder<NewH> {
         KeyStreamWatcherBuilder {
@@ -88,7 +88,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
         shutdown_rx: Receiver<bool>,
     ) -> Result<KeyStreamWatcher<Err>, ConfigError>
     where
-        H: EventHandler<HsStreamEvent, Err> + 'static,
+        H: EventHandler<StreamEvent, Err> + 'static,
         Err: Display + Debug + Send + Sync + 'static,
     {
         validate_limit(self.events_limit)?;
@@ -116,7 +116,7 @@ struct Config<Err> {
     homeserver: PublicKey,
     homeserver_id: String,
     users: Vec<(PublicKey, EventCursor)>,
-    handler: Arc<dyn EventHandler<HsStreamEvent, Err>>,
+    handler: Arc<dyn EventHandler<StreamEvent, Err>>,
     events_limit: u16,
     path: String,
     source: Arc<dyn KeyEventSource>,
@@ -175,7 +175,7 @@ struct Run<Err> {
 }
 
 #[async_trait::async_trait]
-impl<Err> TEventProcessor<HsStreamEvent, WatcherError<Err>> for Run<Err>
+impl<Err> TEventProcessor<StreamEvent, WatcherError<Err>> for Run<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
@@ -187,7 +187,7 @@ where
         &self.config.homeserver_id
     }
 
-    async fn handle(&self, event: &HsStreamEvent) -> Result<(), WatcherError<Err>> {
+    async fn handle(&self, event: &StreamEvent) -> Result<(), WatcherError<Err>> {
         self.config
             .handler
             .handle(event)
@@ -288,7 +288,7 @@ fn validate_events(
     user: &PublicKey,
     requested: EventCursor,
     limit: u16,
-    events: &[HsStreamEvent],
+    events: &[StreamEvent],
 ) -> Result<(), ProtocolError> {
     if events.len() > limit as usize {
         return Err(ProtocolError::TooManyEvents {
@@ -300,10 +300,10 @@ fn validate_events(
 
     let mut floor = requested.id();
     for event in events {
-        if event.owner() != user {
+        if event.user_pubkey() != user {
             return Err(ProtocolError::ForeignEvent {
                 user: user.clone(),
-                owner: event.owner().clone(),
+                owner: event.user_pubkey().clone(),
             });
         }
         if event.cursor <= floor {
@@ -327,8 +327,8 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::{
-        ConfigError, EventHandler, EventMethod, HsError, HsErrorKind, HsOp, HsStreamEvent,
-        KeyEventSource, ProtocolError, Watcher, WatcherError,
+        ConfigError, EventHandler, EventType, HsError, HsErrorKind, HsOp, KeyEventSource,
+        ProtocolError, StreamEvent, Watcher, WatcherError,
     };
 
     fn key() -> PublicKey {
@@ -336,20 +336,20 @@ mod tests {
     }
 
     /// An event of `owner`'s at `cursor`.
-    fn event(owner: &PublicKey, cursor: u64) -> HsStreamEvent {
+    fn event(owner: &PublicKey, cursor: u64) -> StreamEvent {
         let resource = PubkyResource::new(owner.clone(), "/pub/app/item").expect("valid path");
-        HsStreamEvent::new(EventMethod::Put, &resource, cursor)
+        StreamEvent::new(EventType::Put, &resource, cursor)
     }
 
     /// Answers each user with their scripted events, recording the requests.
     #[derive(Default)]
     struct Streams {
-        events: HashMap<PublicKey, Vec<HsStreamEvent>>,
+        events: HashMap<PublicKey, Vec<StreamEvent>>,
         requests: Mutex<Vec<(PublicKey, u64, u16, String)>>,
     }
 
     impl Streams {
-        fn new(events: Vec<(&PublicKey, Vec<HsStreamEvent>)>) -> &'static Self {
+        fn new(events: Vec<(&PublicKey, Vec<StreamEvent>)>) -> &'static Self {
             Box::leak(Box::new(Self {
                 events: events
                     .into_iter()
@@ -369,7 +369,7 @@ mod tests {
             cursor: u64,
             limit: u16,
             path: &str,
-        ) -> Result<Vec<HsStreamEvent>, HsError> {
+        ) -> Result<Vec<StreamEvent>, HsError> {
             self.requests
                 .lock()
                 .unwrap()
@@ -387,8 +387,8 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl EventHandler<HsStreamEvent, String> for &'static Recorder {
-        async fn handle(&self, event: &HsStreamEvent) -> Result<(), String> {
+    impl EventHandler<StreamEvent, String> for &'static Recorder {
+        async fn handle(&self, event: &StreamEvent) -> Result<(), String> {
             let mut cursors = self.cursors.lock().unwrap();
             cursors.push(event.cursor);
             if let Some((after, shutdown)) = &self.shutdown_after {
@@ -565,7 +565,7 @@ mod tests {
             _cursor: u64,
             _limit: u16,
             _path: &str,
-        ) -> Result<Vec<HsStreamEvent>, HsError> {
+        ) -> Result<Vec<StreamEvent>, HsError> {
             Err(HsError::new(
                 hs,
                 HsOp::UserEvents,
@@ -591,8 +591,8 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl EventHandler<HsStreamEvent, FailedAt> for &'static FailingAt {
-        async fn handle(&self, event: &HsStreamEvent) -> Result<(), FailedAt> {
+    impl EventHandler<StreamEvent, FailedAt> for &'static FailingAt {
+        async fn handle(&self, event: &StreamEvent) -> Result<(), FailedAt> {
             if event.cursor == self.fail_at {
                 return Err(FailedAt(event.cursor));
             }

@@ -13,7 +13,7 @@ use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::{EventCursor, PublicKey};
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{HsOp, HsStreamEvent, KeyEventSource};
+use pubky_watcher::{HsOp, KeyEventSource, StreamEvent};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
@@ -301,7 +301,7 @@ impl KeyBasedEventProcessor {
         hs_id: &str,
         user_id: &str,
         persisted_cursor: u64,
-        stream_events: Vec<HsStreamEvent>,
+        stream_events: Vec<StreamEvent>,
         deadline: Instant,
     ) -> (Option<u64>, Result<(), EventProcessorError>) {
         if *self.shutdown_rx.borrow() {
@@ -381,10 +381,10 @@ impl KeyBasedEventProcessor {
 
     fn validate_user_id(
         hs_id: &str,
-        stream_event: &HsStreamEvent,
+        stream_event: &StreamEvent,
         expected_user_id: &str,
     ) -> Result<(), EventProcessorError> {
-        let event_user_id = stream_event.owner().z32();
+        let event_user_id = stream_event.user_pubkey().z32();
         if event_user_id != expected_user_id {
             return Err(EventProcessorError::UserIdMismatch {
                 hs_id: hs_id.into(),

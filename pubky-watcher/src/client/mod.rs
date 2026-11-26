@@ -18,9 +18,9 @@ mod resolver;
 mod watcher_client;
 
 pub use error::{ClientError, HsError, HsErrorKind, HsOp};
-pub use event::EventMethod;
+pub use event::EventType;
 pub use resolver::{published_homeserver, HomeserverResolver, ResolveError};
 pub use watcher_client::{
-    HomeserverEventSource, HsStreamEvent, KeyEventSource, ResourceReader, WatcherClient,
+    HomeserverEventSource, KeyEventSource, ResourceReader, StreamEvent, WatcherClient,
     WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };

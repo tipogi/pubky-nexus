@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use pubky::{EventCursor, PublicKey};
-use pubky_watcher::{EventHandler, HsStreamEvent, Watcher, WatcherClient};
+use pubky_watcher::{EventHandler, StreamEvent, Watcher, WatcherClient};
 use tokio::sync::watch;
 
 /// This example's error: any error, boxed. An application would use its own type.
@@ -26,8 +26,8 @@ const USER_KEYS: [&str; 3] = [
 struct PrintingHandler;
 
 #[async_trait]
-impl EventHandler<HsStreamEvent, BoxError> for PrintingHandler {
-    async fn handle(&self, event: &HsStreamEvent) -> Result<(), BoxError> {
+impl EventHandler<StreamEvent, BoxError> for PrintingHandler {
+    async fn handle(&self, event: &StreamEvent) -> Result<(), BoxError> {
         println!(
             "{} {} cursor={}",
             event.event_type,

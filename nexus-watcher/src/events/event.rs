@@ -5,7 +5,7 @@ use super::target::EventTarget;
 use crate::errors::EventProcessorError;
 use nexus_common::models::event::EventLine;
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{EventMethod, HsStreamEvent};
+use pubky_watcher::StreamEvent;
 use pubky_watcher::{LineParseOutcome, ParseFromLine};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -17,11 +17,11 @@ pub enum EventType {
     Del,
 }
 
-impl From<EventMethod> for EventType {
-    fn from(value: EventMethod) -> Self {
+impl From<pubky_watcher::EventType> for EventType {
+    fn from(value: pubky_watcher::EventType) -> Self {
         match value {
-            EventMethod::Put => Self::Put,
-            EventMethod::Del => Self::Del,
+            pubky_watcher::EventType::Put => Self::Put,
+            pubky_watcher::EventType::Del => Self::Del,
         }
     }
 }
@@ -118,10 +118,10 @@ impl Event {
         Self::parse_event_parts(event_type, uri, event_line)
     }
 
-    /// Constructs a nexus [`Event`] directly from a [`HsStreamEvent`], avoiding
+    /// Constructs a nexus [`Event`] directly from a [`StreamEvent`], avoiding
     /// the string round-trip through [`Self::parse_event`].
     pub fn from_stream_event(
-        stream_event: &HsStreamEvent,
+        stream_event: &StreamEvent,
     ) -> Result<Option<Self>, EventProcessorError> {
         let event_type = EventType::from(stream_event.event_type);
 
