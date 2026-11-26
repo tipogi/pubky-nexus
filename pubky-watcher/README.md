@@ -103,7 +103,7 @@ The builders are built on lower-level traits, which an application with its own 
 retry queue or backoff implements directly:
 
 - `FromEventLine` parses an event line into your event type.
-- `TEventProcessor<E, Err>` is one run over one homeserver. Each run is waited for on its own
+- `Run<E, Err>` is one run over one homeserver. Each run is waited for on its own
   task, logged as slow after a threshold, and reported as failed if it panics. Its
   `handle_error` fails fast by default.
 - `TEventProcessorRunner<E, Err>` runs one processor per homeserver, one after the other, and

@@ -12,7 +12,7 @@
 //! - [`WatcherClient`] makes every homeserver call, split into narrow capability traits:
 //!   [`FeedReader`], [`StreamReader`], [`ResourceReader`] and
 //!   [`PkdnsLookup`]. A failure is an [`HsError`].
-//! - [`TEventProcessor`] is one run over one homeserver, generic over the application's
+//! - [`Run`] is one run over one homeserver, generic over the application's
 //!   event and error types; [`TEventProcessorRunner`] runs one per homeserver.
 //! - Retry is opt-in through [`RetryableError`], [`RetryQueue`] and
 //!   [`dispatch_retryable_error`].
@@ -25,7 +25,7 @@
 mod client;
 mod feed;
 mod hooks;
-mod processor;
+mod run;
 mod runner;
 mod watcher;
 
@@ -36,9 +36,8 @@ pub use client::{
 };
 pub use feed::{FeedBatch, FeedEvent, CURSOR_PREFIX};
 pub use hooks::{EventHandler, EventLineOutcome, FromEventLine, RetryQueue, RetryableError};
-pub use processor::{
-    dispatch_retryable_error, run_on_own_task, RunError, RunOutcome, TEventProcessor,
-    SLOW_RUN_THRESHOLD,
+pub use run::{
+    dispatch_retryable_error, run_on_own_task, Run, RunError, RunOutcome, SLOW_RUN_THRESHOLD,
 };
 pub use runner::{
     status_from_run_result, ProcessedStats, ProcessorRunStats, ProcessorRunStatus,

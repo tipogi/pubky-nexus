@@ -24,7 +24,7 @@ const RETRY_BATCH_SIZE: usize = 100;
 
 /// Processor for retrying events that failed due to missing dependencies.
 ///
-/// Not a [`TEventProcessor`](crate::service::indexer::TEventProcessor): one of those reads a
+/// Not a [`Run`](crate::service::indexer::Run): one of those reads a
 /// homeserver, while this retries the entries of every homeserver, each handled as read from
 /// its own origin homeserver.
 pub struct RetryProcessor {

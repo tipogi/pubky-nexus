@@ -31,7 +31,7 @@ use nexus_watcher::events::retry::{
 };
 use nexus_watcher::events::EventType;
 use nexus_watcher::events::{handlers, DefaultEventHandler, EventHandler};
-use nexus_watcher::service::{HsEventProcessor, RunOutcome, TEventProcessor};
+use nexus_watcher::service::{HsEventProcessor, Run, RunOutcome};
 use pubky_social_specs::legacy_v0::traits::{HashId as _, TimestampId};
 use pubky_social_specs::legacy_v0::{
     blob_uri_builder, file_uri_builder as v0_file_uri_builder, post_uri_builder,

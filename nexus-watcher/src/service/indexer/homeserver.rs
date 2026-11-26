@@ -1,4 +1,4 @@
-use super::{event_span, handle_error, homeserver_public_key, RunOutcome, TEventProcessor};
+use super::{event_span, handle_error, homeserver_public_key, Run, RunOutcome};
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::{Event, EventHandler};
@@ -148,12 +148,12 @@ pub struct HsEventProcessor {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor<Event, EventProcessorError> for HsEventProcessor {
+impl Run<Event, EventProcessorError> for HsEventProcessor {
     fn instance_name(&self) -> &'static str {
         "HsEventProcessor"
     }
 
-    fn homeserver_id(&self) -> &str {
+    fn hs_pubkey(&self) -> &str {
         self.homeserver.id.as_ref()
     }
 
@@ -193,7 +193,7 @@ impl TEventProcessor<Event, EventProcessorError> for HsEventProcessor {
     /// - A stale edge to this homeserver (the user's published homeserver has
     ///   diverged): log a warning and skip until the resolver realigns it.
     /// - An edge to a different homeserver: log a warning and skip.
-    async fn should_process_event(&self, event: &Event) -> Result<bool, EventProcessorError> {
+    async fn should_handle_event(&self, event: &Event) -> Result<bool, EventProcessorError> {
         let user_id = event.target.user_id();
 
         match self.user_hs_mapping(user_id).await? {
@@ -367,7 +367,7 @@ impl HsEventProcessor {
                 return Ok(());
             }
 
-            self.process_event_line(line).await?;
+            self.handle_event_line(line).await?;
         }
 
         if let Some(homeserver) = next_cursor {

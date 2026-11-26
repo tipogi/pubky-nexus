@@ -17,7 +17,7 @@ use nexus_watcher::errors::{EventProcessorError, HsRequestError};
 use nexus_watcher::events::retry::{InitialBackoff, RetryScheduler};
 use nexus_watcher::events::Event;
 use nexus_watcher::events::EventHandler;
-use nexus_watcher::service::indexer::{KeyBasedEventProcessor, RunError, TEventProcessor};
+use nexus_watcher::service::indexer::{KeyBasedEventProcessor, Run, RunError};
 use nexus_watcher::service::runner::{UserNotFoundBackoff, UserResumePoints};
 use nexus_watcher::service::stats::ProcessorRunStatus;
 use nexus_watcher::service::{

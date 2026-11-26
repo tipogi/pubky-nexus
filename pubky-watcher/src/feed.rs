@@ -3,7 +3,7 @@
 //!
 //! Use [`FeedBatch::split`] when you poll `/events/` yourself, through
 //! [`FeedReader`](crate::FeedReader) in your own
-//! [`TEventProcessor`](crate::TEventProcessor), and [`FeedEvent`] when the method and
+//! [`Run`](crate::Run), and [`FeedEvent`] when the method and
 //! URI are all your handler needs. [`Watcher::homeserver`](crate::Watcher::homeserver) does
 //! both for you.
 

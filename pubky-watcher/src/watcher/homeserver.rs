@@ -11,7 +11,7 @@ use super::{
 };
 use crate::feed::{FeedBatch, FeedEvent};
 use crate::hooks::{EventHandler, EventLineOutcome, FromEventLine};
-use crate::processor::{RunOutcome, TEventProcessor};
+use crate::run::{Run, RunOutcome};
 use crate::FeedReader;
 
 /// Builds a [`HomeserverWatcher`]: see [`Watcher::homeserver`](super::Watcher::homeserver).
@@ -69,7 +69,7 @@ impl<H> HomeserverWatcherBuilder<H> {
         validate_limit(self.events_limit)?;
         Ok(HomeserverWatcher {
             config: Arc::new(Config {
-                homeserver_id: self.homeserver.z32(),
+                hs_pubkey_z32: self.homeserver.z32(),
                 homeserver: self.homeserver,
                 handler: Arc::new(self.handler),
                 events_limit: self.events_limit,
@@ -82,7 +82,7 @@ impl<H> HomeserverWatcherBuilder<H> {
 
 struct Config<Err> {
     homeserver: PublicKey,
-    homeserver_id: String,
+    hs_pubkey_z32: String,
     handler: Arc<dyn EventHandler<FeedEvent, Err>>,
     events_limit: u16,
     reader: Arc<dyn FeedReader>,
@@ -107,12 +107,12 @@ where
     /// homeserver answers no events, and the cursor stays where it was. A handler error fails
     /// the run.
     pub async fn run(&self, cursor: EventCursor) -> Result<WatchOutcome, WatcherError<Err>> {
-        let run = Arc::new(Run {
+        let run = Arc::new(FeedRun {
             config: self.config.clone(),
             cursor,
         });
         let read_run = run.clone();
-        run_watcher(run.instance_name(), run.homeserver_id(), async move {
+        run_watcher(run.instance_name(), run.hs_pubkey(), async move {
             read_run.read().await
         })
         .await
@@ -120,14 +120,14 @@ where
 }
 
 /// One run of a [`HomeserverWatcher`], as a processor, so each event is handled in its
-/// [`TEventProcessor::event_span`].
-struct Run<Err> {
+/// [`Run::event_span`].
+struct FeedRun<Err> {
     config: Arc<Config<Err>>,
     cursor: EventCursor,
 }
 
 #[async_trait::async_trait]
-impl<Err> TEventProcessor<FeedEvent, WatcherError<Err>> for Run<Err>
+impl<Err> Run<FeedEvent, WatcherError<Err>> for FeedRun<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
@@ -135,8 +135,8 @@ where
         "HomeserverWatcher"
     }
 
-    fn homeserver_id(&self) -> &str {
-        &self.config.homeserver_id
+    fn hs_pubkey(&self) -> &str {
+        &self.config.hs_pubkey_z32
     }
 
     async fn handle(&self, event: &FeedEvent) -> Result<(), WatcherError<Err>> {
@@ -153,7 +153,7 @@ where
     }
 }
 
-impl<Err> Run<Err>
+impl<Err> FeedRun<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {

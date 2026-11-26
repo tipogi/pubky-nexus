@@ -1,5 +1,5 @@
 //! Five `/events/` polls of one homeserver through the low-level traits:
-//! a [`TEventProcessor`] for one poll, run by a [`TEventProcessorRunner`].
+//! a [`Run`] for one poll, run by a [`TEventProcessorRunner`].
 //!
 //! This is the path Nexus takes, with its own cursor store, retry queue and backoff. The
 //! example keeps its cursor in memory and fails fast on any error. From the workspace root:
@@ -15,8 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pubky::PublicKey;
 use pubky_watcher::{
-    FeedBatch, FeedEvent, FeedReader, RunOutcome, TEventProcessor, TEventProcessorRunner,
-    WatcherClient,
+    FeedBatch, FeedEvent, FeedReader, Run, RunOutcome, TEventProcessorRunner, WatcherClient,
 };
 use tokio::sync::{watch, Mutex};
 
@@ -29,21 +28,21 @@ const EVENTS_PER_TICK: u16 = 8;
 
 /// One poll of the homeserver: reads the batch after the cursor, prints each event, and
 /// moves the cursor once the batch is done.
-struct PollProcessor {
-    homeserver: PublicKey,
-    homeserver_id: String,
+struct PrintRun {
+    hs_pubkey: PublicKey,
+    hs_pubkey_z32: String,
     reader: Arc<dyn FeedReader>,
     cursor: Arc<Mutex<u64>>,
 }
 
 #[async_trait]
-impl TEventProcessor<FeedEvent, BoxError> for PollProcessor {
+impl Run<FeedEvent, BoxError> for PrintRun {
     fn instance_name(&self) -> &'static str {
         "poll_homeserver"
     }
 
-    fn homeserver_id(&self) -> &str {
-        &self.homeserver_id
+    fn hs_pubkey(&self) -> &str {
+        &self.hs_pubkey_z32
     }
 
     async fn handle(&self, event: &FeedEvent) -> Result<(), BoxError> {
@@ -55,17 +54,17 @@ impl TEventProcessor<FeedEvent, BoxError> for PollProcessor {
         let cursor = *self.cursor.lock().await;
         let lines = self
             .reader
-            .read_feed(&self.homeserver, cursor, EVENTS_PER_TICK)
+            .read_feed(&self.hs_pubkey, cursor, EVENTS_PER_TICK)
             .await?;
         let batch = FeedBatch::split(&lines);
         if !batch.has_events() {
             println!("No new events");
         }
 
-        // `process_event_line` parses each line with `FeedEvent`'s `FromEventLine`,
+        // `handle_event_line` parses each line with `FeedEvent`'s `FromEventLine`,
         // skips what it does not recognise, and hands the rest to `handle`.
         for line in &batch.event_lines {
-            self.process_event_line(line).await?;
+            self.handle_event_line(line).await?;
         }
 
         if let Some(next) = batch.cursor {
@@ -76,7 +75,7 @@ impl TEventProcessor<FeedEvent, BoxError> for PollProcessor {
     }
 }
 
-/// Runs one [`PollProcessor`] per tick, for the staging homeserver only.
+/// Runs one [`PrintRun`] per tick, for the staging homeserver only.
 struct PollRunner {
     reader: Arc<dyn FeedReader>,
     cursor: Arc<Mutex<u64>>,
@@ -91,13 +90,10 @@ impl TEventProcessorRunner<FeedEvent, BoxError> for PollRunner {
         self.shutdown_rx.clone()
     }
 
-    async fn build(
-        &self,
-        hs_id: &str,
-    ) -> Result<Arc<dyn TEventProcessor<FeedEvent, BoxError>>, BoxError> {
-        Ok(Arc::new(PollProcessor {
-            homeserver: PublicKey::try_from_z32(hs_id)?,
-            homeserver_id: hs_id.to_string(),
+    async fn build(&self, hs_id: &str) -> Result<Arc<dyn Run<FeedEvent, BoxError>>, BoxError> {
+        Ok(Arc::new(PrintRun {
+            hs_pubkey: PublicKey::try_from_z32(hs_id)?,
+            hs_pubkey_z32: hs_id.to_string(),
             reader: self.reader.clone(),
             cursor: self.cursor.clone(),
         }))

@@ -23,7 +23,7 @@ use nexus_watcher::events::retry::{
     RetryStore,
 };
 use nexus_watcher::events::{DefaultEventHandler, EventHandler, Moderation};
-use nexus_watcher::service::indexer::{KeyBasedEventProcessor, TEventProcessor};
+use nexus_watcher::service::indexer::{KeyBasedEventProcessor, Run};
 use nexus_watcher::service::runner::{UserNotFoundBackoff, UserResumePoints};
 use nexus_watcher::service::{HsEventProcessorRunner, TEventProcessorRunner, KEY_BASED_RUN_BUDGET};
 use nexus_watcher::EventProcessorError;

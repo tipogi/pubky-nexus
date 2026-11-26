@@ -10,7 +10,7 @@ use super::{
     DEFAULT_EVENTS_LIMIT,
 };
 use crate::hooks::EventHandler;
-use crate::processor::{RunOutcome, TEventProcessor};
+use crate::run::{Run, RunOutcome};
 use crate::{StreamEvent, StreamReader};
 
 /// The paths a user's stream is read under when the builder sets none: everything they
@@ -99,7 +99,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
 
         Ok(KeyStreamWatcher {
             config: Arc::new(Config {
-                homeserver_id: self.homeserver.z32(),
+                hs_pubkey_z32: self.homeserver.z32(),
                 homeserver: self.homeserver,
                 users: self.users,
                 handler: Arc::new(self.handler),
@@ -114,7 +114,7 @@ impl<H> KeyStreamWatcherBuilder<H> {
 
 struct Config<Err> {
     homeserver: PublicKey,
-    homeserver_id: String,
+    hs_pubkey_z32: String,
     users: Vec<(PublicKey, EventCursor)>,
     handler: Arc<dyn EventHandler<StreamEvent, Err>>,
     events_limit: u16,
@@ -157,11 +157,11 @@ where
     /// ([`ProtocolError`] otherwise). A stream that breaks this, or a handler error, fails
     /// the run.
     pub async fn run(&self) -> Result<KeyStreamOutcome, WatcherError<Err>> {
-        let run = Arc::new(Run {
+        let run = Arc::new(StreamRun {
             config: self.config.clone(),
         });
         let read_run = run.clone();
-        run_watcher(run.instance_name(), run.homeserver_id(), async move {
+        run_watcher(run.instance_name(), run.hs_pubkey(), async move {
             read_run.read().await
         })
         .await
@@ -169,13 +169,13 @@ where
 }
 
 /// One run of a [`KeyStreamWatcher`], as a processor, so each event is handled in its
-/// [`TEventProcessor::event_span`].
-struct Run<Err> {
+/// [`Run::event_span`].
+struct StreamRun<Err> {
     config: Arc<Config<Err>>,
 }
 
 #[async_trait::async_trait]
-impl<Err> TEventProcessor<StreamEvent, WatcherError<Err>> for Run<Err>
+impl<Err> Run<StreamEvent, WatcherError<Err>> for StreamRun<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {
@@ -183,8 +183,8 @@ where
         "KeyStreamWatcher"
     }
 
-    fn homeserver_id(&self) -> &str {
-        &self.config.homeserver_id
+    fn hs_pubkey(&self) -> &str {
+        &self.config.hs_pubkey_z32
     }
 
     async fn handle(&self, event: &StreamEvent) -> Result<(), WatcherError<Err>> {
@@ -201,7 +201,7 @@ where
     }
 }
 
-impl<Err> Run<Err>
+impl<Err> StreamRun<Err>
 where
     Err: Display + Debug + Send + Sync + 'static,
 {

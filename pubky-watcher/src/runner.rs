@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info};
 
-use super::processor::{RunError, TEventProcessor};
+use super::run::{Run, RunError};
 
 /// How one homeserver's turn in a runner cycle ended.
 /// Recorded in [`ProcessorRunStats::status`].
@@ -153,11 +153,11 @@ where
     ///
     /// # Returns
     /// A reference to the event processor instance, ready to be executed with its
-    /// [`TEventProcessor::run`] method.
+    /// [`Run::run`] method.
     ///
     /// # Errors
     /// Returns an error if the event processor couldn't be built.
-    async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor<E, Err>>, Self::Error>;
+    async fn build(&self, hs_id: &str) -> Result<Arc<dyn Run<E, Err>>, Self::Error>;
 
     /// Pre-processing step before the main run loop.
     ///

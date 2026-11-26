@@ -4,7 +4,7 @@ mod key_based;
 pub use homeserver::HsEventProcessor;
 pub use key_based::KeyBasedEventProcessor;
 
-pub use pubky_watcher::{RunOutcome, TEventProcessor};
+pub use pubky_watcher::{Run, RunOutcome};
 
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
@@ -17,7 +17,7 @@ use pubky_watcher::{dispatch_retryable_error, HsError, HsErrorKind, HsOp, RetryQ
 pub type RunError = pubky_watcher::RunError<EventProcessorError>;
 
 /// The event processors the Nexus runners build and run.
-pub type NexusEventProcessor = dyn TEventProcessor<Event, EventProcessorError>;
+pub type NexusEventProcessor = dyn Run<Event, EventProcessorError>;
 
 /// The key of homeserver `id`, for a call to it. A format-valid ID need not be a curve point;
 /// such an ID fails `op` as a malformed request, labelled with the ID. That never changes,

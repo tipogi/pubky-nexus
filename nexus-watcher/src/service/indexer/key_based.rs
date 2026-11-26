@@ -21,7 +21,7 @@ use super::homeserver::HsMapping;
 
 /// The paths a user's stream is read under: everything they publish.
 const USER_EVENTS_PATH: &str = "/pub/";
-use super::{event_span, handle_error, homeserver_public_key, RunOutcome, TEventProcessor};
+use super::{event_span, handle_error, homeserver_public_key, Run, RunOutcome};
 use crate::events::retry::RetryScheduler;
 use crate::events::EventHandler;
 use crate::service::runner::{UserNotFoundBackoff, UserResumePoints};
@@ -75,12 +75,12 @@ pub struct KeyBasedEventProcessor {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor<Event, EventProcessorError> for KeyBasedEventProcessor {
+impl Run<Event, EventProcessorError> for KeyBasedEventProcessor {
     fn instance_name(&self) -> &'static str {
         "KeyBasedEventProcessor"
     }
 
-    fn homeserver_id(&self) -> &str {
+    fn hs_pubkey(&self) -> &str {
         self.homeserver_id.as_ref()
     }
 

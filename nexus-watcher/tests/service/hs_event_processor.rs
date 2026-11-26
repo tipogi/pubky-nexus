@@ -11,7 +11,7 @@ use nexus_common::WatcherConfig;
 use nexus_watcher::errors::{EventProcessorError, HsRequestError};
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};
 use nexus_watcher::events::{DefaultEventHandler, Event, EventHandler, ParseResult};
-use nexus_watcher::service::{HsEventProcessor, RunError, TEventProcessor};
+use nexus_watcher::service::{HsEventProcessor, Run, RunError};
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::traits::{HashId, TimestampId};
 use pubky_social_specs::legacy_v0::{

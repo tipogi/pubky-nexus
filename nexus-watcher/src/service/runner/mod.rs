@@ -19,7 +19,7 @@ mod tests {
     use crate::errors::EventProcessorError;
     use crate::events::{Event, EventHandler};
     use crate::service::indexer::{NexusEventProcessor, RunError};
-    use crate::service::indexer::{RunOutcome, TEventProcessor};
+    use crate::service::indexer::{Run, RunOutcome};
     use crate::service::stats::{ProcessedStats, ProcessorRunStatus};
     use nexus_common::types::DynError;
     use nexus_common::utils::test_utils::random_pubky_id;
@@ -73,7 +73,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TEventProcessor<Event, EventProcessorError> for SlowProcessor {
+    impl Run<Event, EventProcessorError> for SlowProcessor {
         async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
             self.handler.handle(event, &self.homeserver_id).await
         }
@@ -82,7 +82,7 @@ mod tests {
             "SlowProcessor"
         }
 
-        fn homeserver_id(&self) -> &str {
+        fn hs_pubkey(&self) -> &str {
             self.homeserver_id.as_ref()
         }
 
@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TEventProcessor<Event, EventProcessorError> for BudgetProcessor {
+    impl Run<Event, EventProcessorError> for BudgetProcessor {
         async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
             self.handler.handle(event, &self.homeserver_id).await
         }
@@ -215,7 +215,7 @@ mod tests {
             "BudgetProcessor"
         }
 
-        fn homeserver_id(&self) -> &str {
+        fn hs_pubkey(&self) -> &str {
             self.homeserver_id.as_ref()
         }
 

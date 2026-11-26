@@ -1,7 +1,7 @@
 //! Traits an application implements to plug into the watcher.
 //!
 //! Implement [`EventHandler`] to hand events to a [`Watcher`](crate::Watcher) builder.
-//! Implement [`FromEventLine`] when a [`TEventProcessor`](crate::TEventProcessor) reads
+//! Implement [`FromEventLine`] when a [`Run`](crate::Run) reads
 //! `/events/` lines into your own event type, and [`RetryableError`] with
 //! [`RetryQueue`] when it should queue failed events for a retry instead of
 //! failing the run.
@@ -11,19 +11,19 @@
 #[derive(Debug)]
 pub enum EventLineOutcome<E> {
     /// A line the application handles.
-    /// Handed to [`TEventProcessor::handle_event`](crate::TEventProcessor::handle_event).
+    /// Handed to [`Run::handle_event`](crate::Run::handle_event).
     Parsed(E),
     /// A well-formed line the application ignores.
     /// Dropped silently by
-    /// [`TEventProcessor::process_event_line`](crate::TEventProcessor::process_event_line).
+    /// [`Run::handle_event_line`](crate::Run::handle_event_line).
     Skipped,
     /// A line naming a resource the application does not recognise.
     /// Logged and skipped by
-    /// [`TEventProcessor::process_event_line`](crate::TEventProcessor::process_event_line).
+    /// [`Run::handle_event_line`](crate::Run::handle_event_line).
     Unrecognized {
         /// Why the resource was not recognised, for the log.
         /// Logged by
-        /// [`TEventProcessor::process_event_line`](crate::TEventProcessor::process_event_line).
+        /// [`Run::handle_event_line`](crate::Run::handle_event_line).
         reason: String,
     },
 }
@@ -34,7 +34,7 @@ pub enum EventLineOutcome<E> {
 /// [`FeedEvent`](crate::FeedEvent) implements it.
 pub trait FromEventLine: Sized {
     /// Why a line could not be parsed at all. Logged by
-    /// [`TEventProcessor::process_event_line`](crate::TEventProcessor::process_event_line),
+    /// [`Run::handle_event_line`](crate::Run::handle_event_line),
     /// never returned to the caller.
     type Error: std::fmt::Display;
 
@@ -55,10 +55,10 @@ pub trait EventHandler<E, Err>: Send + Sync {
 
 /// Classifies a failed event for [`dispatch_retryable_error`](super::dispatch_retryable_error).
 ///
-/// Opt-in: [`TEventProcessor`](super::TEventProcessor) does not require it. A processor that
+/// Opt-in: [`Run`](super::Run) does not require it. A processor that
 /// wants to queue failures implements it for its error type and calls
 /// `dispatch_retryable_error` from an overridden
-/// [`handle_error`](super::TEventProcessor::handle_error).
+/// [`handle_error`](super::Run::handle_error).
 pub trait RetryableError: std::fmt::Display + Send + Sync {
     /// Whether processing should stop, and the error be returned to the caller, instead of
     /// being handled as one event's failure.

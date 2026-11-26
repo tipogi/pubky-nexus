@@ -21,7 +21,7 @@ use std::future::Future;
 use pubky::{EventCursor, PublicKey};
 use thiserror::Error;
 
-use crate::processor::{wait_on_own_task, Panicked, SLOW_RUN_THRESHOLD};
+use crate::run::{wait_on_own_task, Panicked, SLOW_RUN_THRESHOLD};
 use crate::{FeedReader, HsError, StreamReader};
 
 pub use homeserver::{HomeserverWatcher, HomeserverWatcherBuilder};
