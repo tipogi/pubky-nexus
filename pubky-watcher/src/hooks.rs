@@ -1,15 +1,15 @@
 //! Traits an application implements to plug into the watcher.
 //!
 //! Implement [`EventHandler`] to hand events to a [`Watcher`](crate::Watcher) builder.
-//! Implement [`ParseFromLine`] when a [`TEventProcessor`](crate::TEventProcessor) reads
+//! Implement [`FromEventLine`] when a [`TEventProcessor`](crate::TEventProcessor) reads
 //! `/events/` lines into your own event type, and [`RetryableError`] with
-//! [`EventRetryScheduler`] when it should queue failed events for a retry instead of
+//! [`RetryQueue`] when it should queue failed events for a retry instead of
 //! failing the run.
 
 /// How a single homeserver event line parsed.
-/// Returned by [`ParseFromLine::parse_line`].
+/// Returned by [`FromEventLine::from_event_line`].
 #[derive(Debug)]
-pub enum LineParseOutcome<E> {
+pub enum EventLineOutcome<E> {
     /// A line the application handles.
     /// Handed to [`TEventProcessor::handle_event`](crate::TEventProcessor::handle_event).
     Parsed(E),
@@ -32,14 +32,14 @@ pub enum LineParseOutcome<E> {
 /// type. A line that cannot be parsed at all is an error; the processor logs it and moves on,
 /// since event lines come from untrusted homeservers.
 /// [`FeedEvent`](crate::FeedEvent) implements it.
-pub trait ParseFromLine: Sized {
+pub trait FromEventLine: Sized {
     /// Why a line could not be parsed at all. Logged by
     /// [`TEventProcessor::process_event_line`](crate::TEventProcessor::process_event_line),
     /// never returned to the caller.
     type Error: std::fmt::Display;
 
     /// Parses `line`, one of a batch's [`FeedBatch::event_lines`](crate::FeedBatch).
-    fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error>;
+    fn from_event_line(line: &str) -> Result<EventLineOutcome<Self>, Self::Error>;
 }
 
 /// Handles one parsed event: the application's meaning of it, e.g. indexing or storing it.
@@ -66,12 +66,12 @@ pub trait RetryableError: std::fmt::Display + Send + Sync {
     fn should_not_retry_now(&self) -> bool;
 
     /// Whether the event failed because something it depends on is not indexed yet. Such an
-    /// event goes to [`EventRetryScheduler::queue_missing_dep`], any other to
-    /// [`EventRetryScheduler::queue_transient`].
+    /// event goes to [`RetryQueue::queue_missing_dependency`], any other to
+    /// [`RetryQueue::queue_transient_failure`].
     fn is_missing_dependency(&self) -> bool;
 
     /// Whether the event is worth retrying later. One that is not is dropped instead of
-    /// reaching the [`EventRetryScheduler`].
+    /// reaching the [`RetryQueue`].
     fn should_enqueue_for_retry(&self) -> bool;
 }
 
@@ -82,12 +82,12 @@ pub trait RetryableError: std::fmt::Display + Send + Sync {
 /// classified as worth retrying. The two methods let an implementation schedule a missing
 /// dependency and another transient failure differently.
 #[async_trait::async_trait]
-pub trait EventRetryScheduler<E, Err>: Send + Sync {
+pub trait RetryQueue<E, Err>: Send + Sync {
     /// Queues an event that failed because of a missing dependency
     /// ([`RetryableError::is_missing_dependency`]).
-    async fn queue_missing_dep(&self, event: &E) -> Result<(), Err>;
+    async fn queue_missing_dependency(&self, event: &E) -> Result<(), Err>;
 
     /// Queues an event that failed with another error worth retrying
     /// ([`RetryableError::should_enqueue_for_retry`]).
-    async fn queue_transient(&self, event: &E) -> Result<(), Err>;
+    async fn queue_transient_failure(&self, event: &E) -> Result<(), Err>;
 }

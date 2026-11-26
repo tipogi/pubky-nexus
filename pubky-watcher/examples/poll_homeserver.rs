@@ -62,7 +62,7 @@ impl TEventProcessor<FeedEvent, BoxError> for PollProcessor {
             println!("No new events");
         }
 
-        // `process_event_line` parses each line with `FeedEvent`'s `ParseFromLine`,
+        // `process_event_line` parses each line with `FeedEvent`'s `FromEventLine`,
         // skips what it does not recognise, and hands the rest to `handle`.
         for line in &batch.event_lines {
             self.process_event_line(line).await?;

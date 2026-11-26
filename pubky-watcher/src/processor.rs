@@ -11,7 +11,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use tracing::{debug, error, trace, warn, Instrument};
 
-use super::traits::{EventRetryScheduler, LineParseOutcome, ParseFromLine, RetryableError};
+use super::hooks::{EventLineOutcome, FromEventLine, RetryQueue, RetryableError};
 
 /// How long a processor run may take before it is logged as slow, unless the processor sets
 /// its own ([`TEventProcessor::slow_run_threshold`]).
@@ -75,7 +75,7 @@ impl<Err: Display> Display for RunError<Err> {
 pub async fn dispatch_retryable_error<E, Err>(
     event: &E,
     error: Err,
-    scheduler: Option<&dyn EventRetryScheduler<E, Err>>,
+    scheduler: Option<&dyn RetryQueue<E, Err>>,
 ) -> Result<(), Err>
 where
     E: Sync,
@@ -96,10 +96,10 @@ where
     };
 
     if error.is_missing_dependency() {
-        scheduler.queue_missing_dep(event).await
+        scheduler.queue_missing_dependency(event).await
     } else {
         warn!(error = %error, "Transient error, queuing event for retry");
-        scheduler.queue_transient(event).await
+        scheduler.queue_transient_failure(event).await
     }
 }
 
@@ -159,9 +159,9 @@ where
     /// skipped: event lines come from untrusted homeservers.
     async fn process_event_line(&self, line: &str) -> Result<(), Err>
     where
-        E: ParseFromLine + Debug,
+        E: FromEventLine + Debug,
     {
-        let outcome = match E::parse_line(line) {
+        let outcome = match E::from_event_line(line) {
             Ok(outcome) => outcome,
             // Invalid event lines come from untrusted homeservers; treat as bad peer data, not
             // application errors.
@@ -171,11 +171,11 @@ where
             }
         };
         match outcome {
-            LineParseOutcome::Skipped => {}
-            LineParseOutcome::Unrecognized { reason } => {
+            EventLineOutcome::Skipped => {}
+            EventLineOutcome::Unrecognized { reason } => {
                 warn!(%reason, "Unrecognized event URI");
             }
-            LineParseOutcome::Parsed(event) => {
+            EventLineOutcome::Parsed(event) => {
                 trace!(?event, "Processing event");
                 self.handle_event(&event).await?;
             }

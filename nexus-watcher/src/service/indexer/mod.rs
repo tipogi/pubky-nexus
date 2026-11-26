@@ -11,7 +11,7 @@ use crate::events::retry::RetryScheduler;
 use crate::events::Event;
 use pubky::PublicKey;
 use pubky_social_specs::PubkyId;
-use pubky_watcher::{dispatch_retryable_error, EventRetryScheduler, HsError, HsErrorKind, HsOp};
+use pubky_watcher::{dispatch_retryable_error, HsError, HsErrorKind, HsOp, RetryQueue};
 
 /// How a run of a Nexus event processor did not complete.
 pub type RunError = pubky_watcher::RunError<EventProcessorError>;
@@ -52,7 +52,7 @@ pub(crate) async fn handle_error(
         error,
         scheduler
             .as_ref()
-            .map(|s| s as &dyn EventRetryScheduler<Event, EventProcessorError>),
+            .map(|s| s as &dyn RetryQueue<Event, EventProcessorError>),
     )
     .await
 }
@@ -79,12 +79,12 @@ struct QueueFrom<'a> {
 }
 
 #[async_trait::async_trait]
-impl EventRetryScheduler<Event, EventProcessorError> for QueueFrom<'_> {
-    async fn queue_missing_dep(&self, event: &Event) -> Result<(), EventProcessorError> {
+impl RetryQueue<Event, EventProcessorError> for QueueFrom<'_> {
+    async fn queue_missing_dependency(&self, event: &Event) -> Result<(), EventProcessorError> {
         self.scheduler.queue_missing_dep(event, self.origin).await
     }
 
-    async fn queue_transient(&self, event: &Event) -> Result<(), EventProcessorError> {
+    async fn queue_transient_failure(&self, event: &Event) -> Result<(), EventProcessorError> {
         self.scheduler.queue_transient(event, self.origin).await
     }
 }

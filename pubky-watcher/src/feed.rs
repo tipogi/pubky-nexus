@@ -10,7 +10,7 @@
 use std::convert::Infallible;
 
 use crate::client::EventType;
-use crate::traits::{LineParseOutcome, ParseFromLine};
+use crate::hooks::{EventLineOutcome, FromEventLine};
 
 /// Prefix of the line closing a homeserver `/events/` response with its cursor.
 /// [`FeedBatch::split`] reads it.
@@ -20,7 +20,7 @@ pub const CURSOR_PREFIX: &str = "cursor: ";
 ///
 /// The event type [`Watcher::homeserver`](crate::Watcher::homeserver) hands to its handler.
 /// An application that needs richer parsing defines its own type and implements
-/// [`ParseFromLine`] for it.
+/// [`FromEventLine`] for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedEvent {
     /// `PUT` or `DEL`, as an [`EventType`].
@@ -31,20 +31,20 @@ pub struct FeedEvent {
     pub uri: String,
 }
 
-/// Parsing never fails: an empty line is [`LineParseOutcome::Skipped`], and a line that is
-/// not `PUT <uri>` or `DEL <uri>` is [`LineParseOutcome::Unrecognized`]. Only the first space
+/// Parsing never fails: an empty line is [`EventLineOutcome::Skipped`], and a line that is
+/// not `PUT <uri>` or `DEL <uri>` is [`EventLineOutcome::Unrecognized`]. Only the first space
 /// separates the method from the URI: homeservers write a stored file's name unencoded, and
 /// a name may contain spaces.
-impl ParseFromLine for FeedEvent {
+impl FromEventLine for FeedEvent {
     type Error = Infallible;
 
-    fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error> {
+    fn from_event_line(line: &str) -> Result<EventLineOutcome<Self>, Self::Error> {
         if line.trim().is_empty() {
-            return Ok(LineParseOutcome::Skipped);
+            return Ok(EventLineOutcome::Skipped);
         }
 
         let Some((event_type, uri)) = line.split_once(' ') else {
-            return Ok(LineParseOutcome::Unrecognized {
+            return Ok(EventLineOutcome::Unrecognized {
                 reason: format!("expected `<METHOD> <uri>`, got: {line}"),
             });
         };
@@ -53,19 +53,19 @@ impl ParseFromLine for FeedEvent {
             "PUT" => EventType::Put,
             "DEL" => EventType::Del,
             other => {
-                return Ok(LineParseOutcome::Unrecognized {
+                return Ok(EventLineOutcome::Unrecognized {
                     reason: format!("unknown event method: {other}"),
                 });
             }
         };
 
         if uri.trim().is_empty() {
-            return Ok(LineParseOutcome::Unrecognized {
+            return Ok(EventLineOutcome::Unrecognized {
                 reason: format!("missing uri in event line: {line}"),
             });
         }
 
-        Ok(LineParseOutcome::Parsed(Self {
+        Ok(EventLineOutcome::Parsed(Self {
             event_type,
             uri: uri.to_string(),
         }))
@@ -82,7 +82,7 @@ impl ParseFromLine for FeedEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedBatch<'a> {
     /// The event lines, in the order the homeserver sent them, for
-    /// [`ParseFromLine::parse_line`](crate::ParseFromLine::parse_line).
+    /// [`FromEventLine::from_event_line`](crate::FromEventLine::from_event_line).
     pub event_lines: Vec<&'a str>,
     /// Raw, still unparsed value of the batch's cursor line, if it carried one.
     /// It is what follows [`CURSOR_PREFIX`].
@@ -124,23 +124,23 @@ impl<'a> FeedBatch<'a> {
 #[cfg(test)]
 mod tests {
     use super::{FeedBatch, FeedEvent};
-    use crate::{EventType, LineParseOutcome, ParseFromLine};
+    use crate::{EventLineOutcome, EventType, FromEventLine};
 
     fn parsed(line: &str) -> FeedEvent {
-        match FeedEvent::parse_line(line).unwrap() {
-            LineParseOutcome::Parsed(event) => event,
+        match FeedEvent::from_event_line(line).unwrap() {
+            EventLineOutcome::Parsed(event) => event,
             other => panic!("{line:?} did not parse: {other:?}"),
         }
     }
 
     fn unrecognized(line: &str) -> bool {
         matches!(
-            FeedEvent::parse_line(line).unwrap(),
-            LineParseOutcome::Unrecognized { .. }
+            FeedEvent::from_event_line(line).unwrap(),
+            EventLineOutcome::Unrecognized { .. }
         )
     }
 
-    // --- FeedEvent::parse_line ---
+    // --- FeedEvent::from_event_line ---
 
     #[test]
     fn put_and_del_lines_parse() {
@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn empty_lines_are_skipped() {
         assert!(matches!(
-            FeedEvent::parse_line("").unwrap(),
-            LineParseOutcome::Skipped
+            FeedEvent::from_event_line("").unwrap(),
+            EventLineOutcome::Skipped
         ));
     }
 

@@ -14,7 +14,7 @@
 //!   [`PkdnsLookup`]. A failure is an [`HsError`].
 //! - [`TEventProcessor`] is one run over one homeserver, generic over the application's
 //!   event and error types; [`TEventProcessorRunner`] runs one per homeserver.
-//! - Retry is opt-in through [`RetryableError`], [`EventRetryScheduler`] and
+//! - Retry is opt-in through [`RetryableError`], [`RetryQueue`] and
 //!   [`dispatch_retryable_error`].
 //!
 //! Homeservers and users are [`pubky::PublicKey`]s in the client. The crate brings no
@@ -24,9 +24,9 @@
 
 mod client;
 mod feed;
+mod hooks;
 mod processor;
 mod runner;
-mod traits;
 mod watcher;
 
 pub use client::{
@@ -35,6 +35,7 @@ pub use client::{
     WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };
 pub use feed::{FeedBatch, FeedEvent, CURSOR_PREFIX};
+pub use hooks::{EventHandler, EventLineOutcome, FromEventLine, RetryQueue, RetryableError};
 pub use processor::{
     dispatch_retryable_error, run_on_own_task, RunError, RunOutcome, TEventProcessor,
     SLOW_RUN_THRESHOLD,
@@ -42,9 +43,6 @@ pub use processor::{
 pub use runner::{
     status_from_run_result, ProcessedStats, ProcessorRunStats, ProcessorRunStatus,
     RunAllProcessorsStats, TEventProcessorRunner,
-};
-pub use traits::{
-    EventHandler, EventRetryScheduler, LineParseOutcome, ParseFromLine, RetryableError,
 };
 pub use watcher::{
     ConfigError, HomeserverWatcher, HomeserverWatcherBuilder, KeyStreamOutcome, KeyStreamWatcher,

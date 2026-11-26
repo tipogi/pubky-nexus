@@ -6,7 +6,7 @@ use crate::errors::EventProcessorError;
 use nexus_common::models::event::EventLine;
 use pubky_social_specs::PubkyId;
 use pubky_watcher::StreamEvent;
-use pubky_watcher::{LineParseOutcome, ParseFromLine};
+use pubky_watcher::{EventLineOutcome, FromEventLine};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use tracing::{debug, warn};
@@ -64,15 +64,15 @@ impl ParseResult {
 }
 
 /// Parses a primary homeserver's `/events/` line with [`Event::parse_event`].
-impl ParseFromLine for Event {
+impl FromEventLine for Event {
     type Error = EventProcessorError;
 
-    fn parse_line(line: &str) -> Result<LineParseOutcome<Self>, Self::Error> {
+    fn from_event_line(line: &str) -> Result<EventLineOutcome<Self>, Self::Error> {
         Ok(match Self::parse_event(line)? {
-            ParseResult::Parsed(event) => LineParseOutcome::Parsed(event),
-            ParseResult::Skipped(_) => LineParseOutcome::Skipped,
+            ParseResult::Parsed(event) => EventLineOutcome::Parsed(event),
+            ParseResult::Skipped(_) => EventLineOutcome::Skipped,
             ParseResult::UnrecognizedUri { reason, .. } => {
-                LineParseOutcome::Unrecognized { reason }
+                EventLineOutcome::Unrecognized { reason }
             }
         })
     }

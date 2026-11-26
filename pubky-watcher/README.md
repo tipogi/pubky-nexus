@@ -102,14 +102,14 @@ large, SDK, malformed), so that you can choose your own retry policy.
 The builders are built on lower-level traits, which an application with its own cursor store,
 retry queue or backoff implements directly:
 
-- `ParseFromLine` parses an event line into your event type.
+- `FromEventLine` parses an event line into your event type.
 - `TEventProcessor<E, Err>` is one run over one homeserver. Each run is waited for on its own
   task, logged as slow after a threshold, and reported as failed if it panics. Its
   `handle_error` fails fast by default.
 - `TEventProcessorRunner<E, Err>` runs one processor per homeserver, one after the other, and
   reports run statistics (succeeded, failed, panicked, budget spent, skipped). A hook decides
   which homeservers to skip, e.g. those in your backoff.
-- Retry is opt-in: implement `RetryableError` for your error type and `EventRetryScheduler`
+- Retry is opt-in: implement `RetryableError` for your error type and `RetryQueue`
   for your queue, and call `dispatch_retryable_error` from `handle_error`.
 
 ## Examples

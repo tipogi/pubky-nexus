@@ -10,8 +10,8 @@ use super::{
     DEFAULT_EVENTS_LIMIT,
 };
 use crate::feed::{FeedBatch, FeedEvent};
+use crate::hooks::{EventHandler, EventLineOutcome, FromEventLine};
 use crate::processor::{RunOutcome, TEventProcessor};
-use crate::traits::{EventHandler, LineParseOutcome, ParseFromLine};
 use crate::FeedReader;
 
 /// Builds a [`HomeserverWatcher`]: see [`Watcher::homeserver`](super::Watcher::homeserver).
@@ -190,13 +190,13 @@ where
                 return Ok(WatchOutcome::interrupted(self.cursor, processed_events));
             }
 
-            match FeedEvent::parse_line(line) {
-                Ok(LineParseOutcome::Parsed(event)) => {
+            match FeedEvent::from_event_line(line) {
+                Ok(EventLineOutcome::Parsed(event)) => {
                     self.handle_event(&event).await?;
                     processed_events += 1;
                 }
-                Ok(LineParseOutcome::Skipped) => {}
-                Ok(LineParseOutcome::Unrecognized { reason }) => {
+                Ok(EventLineOutcome::Skipped) => {}
+                Ok(EventLineOutcome::Unrecognized { reason }) => {
                     warn!(%reason, "Skipping an unrecognized event line");
                 }
                 Err(never) => match never {},

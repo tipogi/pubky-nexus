@@ -9,8 +9,8 @@ use super::{
     run_watcher, validate_limit, ConfigError, Missing, ProtocolError, WatchOutcome, WatcherError,
     DEFAULT_EVENTS_LIMIT,
 };
+use crate::hooks::EventHandler;
 use crate::processor::{RunOutcome, TEventProcessor};
-use crate::traits::EventHandler;
 use crate::{StreamEvent, StreamReader};
 
 /// The paths a user's stream is read under when the builder sets none: everything they
