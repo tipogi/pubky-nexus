@@ -2,6 +2,7 @@ mod homeserver;
 mod key_based;
 
 pub use homeserver::HsEventProcessor;
+pub(crate) use homeserver::HsMapping;
 pub use key_based::KeyBasedEventProcessor;
 
 pub use pubky_watcher::{Run, RunOutcome};
