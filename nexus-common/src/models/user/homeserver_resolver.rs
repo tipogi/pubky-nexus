@@ -1,4 +1,3 @@
-use pubky::pkarr::dns::rdata::RData;
 use pubky::pkarr::SignedPacket;
 use pubky::PublicKey;
 use pubky_social_specs::PubkyId;
@@ -157,18 +156,9 @@ fn pkdns_record(
     }
 }
 
-/// The homeserver a PKDNS record names: the target of its `_pubky` SVCB/HTTPS
-/// record, if that is a public key. Mirrors `Pubky::get_homeserver_of`, whose
-/// parsing the SDK does not export.
+/// The homeserver a PKDNS record names, as `pubky-watcher` reads it, as a `PubkyId`.
 fn published_homeserver(packet: &SignedPacket) -> Option<PubkyId> {
-    let target = packet
-        .resource_records("_pubky")
-        .find_map(|rr| match &rr.rdata {
-            RData::SVCB(svcb) => Some(svcb.target.to_string()),
-            RData::HTTPS(https) => Some(https.0.target.to_string()),
-            _ => None,
-        })?;
-    PublicKey::try_from_z32(&target).ok().map(PubkyId::from)
+    pubky_watcher::published_homeserver(packet).map(PubkyId::from)
 }
 
 #[cfg(test)]

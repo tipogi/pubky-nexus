@@ -1,3 +1,3 @@
-//! The statistics of a runner cycle, from the toolkit.
+//! The statistics of a Cycle, from `pubky-watcher`.
 
 pub use pubky_watcher::{CycleReport, CycleStats, Turn, TurnStatus};

@@ -339,7 +339,9 @@ as it was first extracted:
   `StopReason` says why a Run stopped.
 - `BuildError` is removed: `Cycle` has an associated `type Error`, returned by `build_run`,
   `homeservers` and `run`.
-- `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public.
+- `HsErrorKind::from_sdk` and `HsErrorKind::from_reqwest` are no longer public, and
+  `HsErrorKind::from_status` takes the status as a `u16` instead of `reqwest::StatusCode`, so
+  no public signature names a `reqwest` type.
 - `WatcherClient::mainnet()` and `testnet()` fail with `ClientError` instead of
   `pubky::Error`, and `PkdnsLookup::lookup_homeserver_record` with the crate's
   `PkdnsLookupError` instead of pkarr's. Neither names an SDK type: the SDK's error is

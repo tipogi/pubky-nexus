@@ -542,7 +542,7 @@ async fn event_lines_from_response(
         let (body, _) = read_stream_capped(response.bytes_stream(), MAX_ERROR_BODY)
             .await
             .unwrap_or_default();
-        return Err(HsErrorKind::from_status(status, &body));
+        return Err(HsErrorKind::from_status(status.as_u16(), &body));
     }
 
     let (buf, exceeded) = read_stream_capped(response.bytes_stream(), MAX_EVENTS_BODY)

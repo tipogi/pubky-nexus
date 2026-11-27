@@ -2,7 +2,6 @@ use std::fmt::Display;
 
 use pubky::errors::RequestError;
 use pubky::PublicKey;
-use reqwest::StatusCode;
 
 use super::fetch::{format_error_body, MAX_ERROR_BODY};
 
@@ -135,13 +134,13 @@ impl HsErrorKind {
     /// Classifies a non-2xx status, keeping at most 4 KiB of its body.
     /// Gives [`HsErrorKind::NotFound`], [`HsErrorKind::RateLimited`],
     /// [`HsErrorKind::ServerError`] or [`HsErrorKind::Rejected`].
-    pub fn from_status(status: StatusCode, body: &[u8]) -> Self {
+    pub fn from_status(status: u16, body: &[u8]) -> Self {
         let body = format_error_body(body, MAX_ERROR_BODY);
         match status {
-            StatusCode::NOT_FOUND => Self::NotFound(body),
-            StatusCode::TOO_MANY_REQUESTS => Self::RateLimited(body),
-            s if s.is_server_error() => Self::ServerError(s.as_u16(), body),
-            s => Self::Rejected(s.as_u16(), body),
+            404 => Self::NotFound(body),
+            429 => Self::RateLimited(body),
+            500..=599 => Self::ServerError(status, body),
+            _ => Self::Rejected(status, body),
         }
     }
 
@@ -175,7 +174,7 @@ impl HsErrorKind {
     pub(crate) fn from_sdk(error: pubky::Error) -> Self {
         match error {
             pubky::Error::Request(RequestError::Server { status, message }) => {
-                Self::from_status(status, message.as_bytes())
+                Self::from_status(status.as_u16(), message.as_bytes())
             }
             pubky::Error::Request(RequestError::Transport(e)) => Self::from_reqwest(&e),
             pubky::Error::Request(
@@ -213,6 +212,7 @@ mod tests {
     use super::*;
     use pubky::errors::{AuthError, PkarrError};
     use pubky::CredentialRefreshError;
+    use reqwest::StatusCode;
     use std::error::Error;
 
     /// A failed client build says what failed, and gives the SDK's error only as its source,
@@ -286,8 +286,7 @@ mod tests {
 
     #[test]
     fn statuses_are_classified() {
-        let kind =
-            |status: u16| HsErrorKind::from_status(StatusCode::from_u16(status).unwrap(), b"");
+        let kind = |status: u16| HsErrorKind::from_status(status, b"");
         assert!(matches!(kind(404), HsErrorKind::NotFound(_)));
         assert!(matches!(kind(429), HsErrorKind::RateLimited(_)));
         assert!(matches!(kind(503), HsErrorKind::ServerError(503, _)));
@@ -301,7 +300,7 @@ mod tests {
     fn homeserver_text_is_capped() {
         let huge = "x".repeat(MAX_ERROR_BODY * 4);
 
-        let status = HsErrorKind::from_status(StatusCode::BAD_GATEWAY, huge.as_bytes());
+        let status = HsErrorKind::from_status(502, huge.as_bytes());
         let sdk_status = HsErrorKind::from_sdk(pubky::Error::from(RequestError::Server {
             status: StatusCode::BAD_GATEWAY,
             message: huge.clone(),

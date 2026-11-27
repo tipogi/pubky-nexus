@@ -34,13 +34,16 @@ pub enum RunOutcome {
 
 /// Why a Run did not complete.
 /// Returned by [`Run::run`] and [`run_on_own_task`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RunError<Err> {
     /// [`Run::run_internal`] failed with the Run's own error.
+    #[error("Internal error: {0}")]
     Internal(Err),
     /// The Run's task panicked: see [`run_on_own_task`].
+    #[error("Execution panicked")]
     Panicked,
     /// The Run reached its Budget: see [`RunOutcome::BudgetSpent`].
+    #[error("Run budget spent")]
     BudgetSpent,
 }
 
@@ -48,18 +51,6 @@ impl<Err> RunError<Err> {
     /// Whether the Run panicked ([`RunError::Panicked`]).
     pub fn is_panic(&self) -> bool {
         matches!(self, RunError::Panicked)
-    }
-}
-
-impl<Err: Debug + Display> std::error::Error for RunError<Err> {}
-
-impl<Err: Display> Display for RunError<Err> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunError::Internal(err) => write!(f, "Internal error: {err}"),
-            RunError::Panicked => write!(f, "Execution panicked"),
-            RunError::BudgetSpent => write!(f, "Run budget spent"),
-        }
     }
 }
 
