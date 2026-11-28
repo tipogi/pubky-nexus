@@ -1,15 +1,18 @@
 //! The line protocol of an Events feed (`/events/`): a `text/plain` body with one Event line
 //! per Event (`PUT <uri>` / `DEL <uri>`), closed by a `cursor: <value>` line.
 //!
-//! Use [`FeedBatch::split`] when you read an Events feed yourself, through
-//! [`FeedReader`](crate::FeedReader) in your own [`Run`](crate::Run), and [`FeedEvent`] when
-//! the Event type and the URI are all your Handler needs. A Feed consumer
-//! ([`Watcher::feed`](crate::Watcher::feed)) does both for you.
+//! Use [`FeedBatch::split`] and the Protocol check [`FeedBatch::closing_cursor`] when you read
+//! an Events feed yourself, through [`FeedReader`](crate::FeedReader) in your own
+//! [`Run`](crate::Run), and [`FeedEvent`] when the Event type and the URI are all your Handler
+//! needs. A Feed consumer ([`Watcher::feed`](crate::Watcher::feed)) does all of it for you.
 
 use std::convert::Infallible;
 
+use pubky::EventCursor;
+
 use crate::client::EventType;
 use crate::hooks::{EventLineOutcome, FromEventLine};
+use crate::ProtocolViolation;
 
 /// Prefix of the line closing an Events feed's Batch with the Cursor to resume from.
 /// [`FeedBatch::split`] reads it.
@@ -119,12 +122,60 @@ impl<'a> FeedBatch<'a> {
     pub fn has_events(&self) -> bool {
         !self.event_lines.is_empty()
     }
+
+    /// The Protocol check of an Events feed's Batch: the Cursor that closes this Batch, read
+    /// after `requested`, the Cursor the Batch was read from. Call it before any Event of the
+    /// Batch is handled, and store the Cursor it returns once they are.
+    ///
+    /// The Batch's cursor line must be a number. With Events, it must move past `requested`;
+    /// without Events, it must be `requested` itself. A Batch with no Events and no cursor
+    /// line, which is what an idle Homeserver sends, closes with `requested`.
+    ///
+    /// Returns only `MissingCursor`, `MalformedCursor`, `CursorNotAdvanced` (with
+    /// `user_pubkey` `None`) or `CursorMovedWithoutEvents` of [`ProtocolViolation`]. It
+    /// only reports: what follows is the caller's.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the errors carry the keys involved (a `PublicKey` is about 200 bytes); a run holds at most one per user"
+    )]
+    pub fn closing_cursor(&self, requested: EventCursor) -> Result<EventCursor, ProtocolViolation> {
+        let got = self
+            .cursor
+            .map(|raw| {
+                raw.parse::<u64>()
+                    .map_err(|_| ProtocolViolation::MalformedCursor {
+                        raw: raw.to_string(),
+                    })
+            })
+            .transpose()?;
+
+        match (self.has_events(), got) {
+            (false, None) => Ok(requested),
+            (true, None) => Err(ProtocolViolation::MissingCursor),
+            (true, Some(got)) if got <= requested.id() => {
+                Err(ProtocolViolation::CursorNotAdvanced {
+                    user_pubkey: None,
+                    requested: requested.id(),
+                    got,
+                })
+            }
+            (false, Some(got)) if got != requested.id() => {
+                Err(ProtocolViolation::CursorMovedWithoutEvents {
+                    requested: requested.id(),
+                    got,
+                })
+            }
+            (_, Some(got)) => Ok(EventCursor::new(got)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use pubky::EventCursor;
+
     use super::{FeedBatch, FeedEvent};
-    use crate::{EventLineOutcome, EventType, FromEventLine};
+    use crate::{EventLineOutcome, EventType, FromEventLine, ProtocolViolation};
 
     fn parsed(line: &str) -> FeedEvent {
         match FeedEvent::from_event_line(line).unwrap() {
@@ -259,5 +310,105 @@ mod tests {
 
         assert_eq!(batch.event_lines, vec!["garbage"]);
         assert!(batch.has_events());
+    }
+
+    // --- FeedBatch::closing_cursor ---
+
+    /// The Protocol check of the Homeserver's answer `raw`, read after `requested`.
+    #[allow(
+        clippy::result_large_err,
+        reason = "it returns what `FeedBatch::closing_cursor` returns"
+    )]
+    fn closing_cursor(raw: &[&str], requested: u64) -> Result<EventCursor, ProtocolViolation> {
+        let lines = lines(raw);
+        FeedBatch::split(&lines).closing_cursor(EventCursor::new(requested))
+    }
+
+    fn not_advanced(requested: u64, got: u64) -> ProtocolViolation {
+        ProtocolViolation::CursorNotAdvanced {
+            user_pubkey: None,
+            requested,
+            got,
+        }
+    }
+
+    /// A Batch of Events closes with the Cursor its cursor line carries.
+    #[test]
+    fn a_batch_of_events_closes_with_its_cursor() {
+        assert_eq!(
+            closing_cursor(
+                &["PUT pubky://a/pub/x", "DEL pubky://a/pub/y", "cursor: 12"],
+                10
+            ),
+            Ok(EventCursor::new(12))
+        );
+    }
+
+    /// An idle Homeserver may repeat the Cursor it was read from, with no Events.
+    #[test]
+    fn an_idle_batch_repeating_the_cursor_closes_with_it() {
+        assert_eq!(
+            closing_cursor(&["cursor: 10"], 10),
+            Ok(EventCursor::new(10))
+        );
+    }
+
+    /// An idle Homeserver may send nothing at all: the Batch closes with the Cursor it was
+    /// read from.
+    #[test]
+    fn an_empty_answer_closes_with_the_requested_cursor() {
+        assert_eq!(closing_cursor(&[], 10), Ok(EventCursor::new(10)));
+    }
+
+    /// Events without a cursor line would have the next Read ask for the same Batch again.
+    #[test]
+    fn events_without_a_cursor_line_are_a_missing_cursor() {
+        assert_eq!(
+            closing_cursor(&["PUT pubky://a/pub/x"], 10),
+            Err(ProtocolViolation::MissingCursor)
+        );
+    }
+
+    /// A Cursor that is no number is reported with the text the Homeserver sent.
+    #[test]
+    fn a_cursor_that_is_no_number_is_malformed() {
+        for (raw, sent) in [
+            (vec!["PUT pubky://a/pub/x", "cursor: nope"], "nope"),
+            (vec!["PUT pubky://a/pub/x", "cursor: -1"], "-1"),
+            (vec!["cursor: 18446744073709551616"], "18446744073709551616"),
+            (vec!["cursor: "], ""),
+        ] {
+            assert_eq!(
+                closing_cursor(&raw, 10),
+                Err(ProtocolViolation::MalformedCursor { raw: sent.into() }),
+                "{raw:?}"
+            );
+        }
+    }
+
+    /// Events whose Cursor holds or goes back would have the next Read ask for them again.
+    #[test]
+    fn events_whose_cursor_does_not_move_past_the_requested_one_are_reported() {
+        assert_eq!(
+            closing_cursor(&["PUT pubky://a/pub/x", "cursor: 10"], 10),
+            Err(not_advanced(10, 10))
+        );
+        assert_eq!(
+            closing_cursor(&["PUT pubky://a/pub/x", "cursor: 3"], 10),
+            Err(not_advanced(10, 3))
+        );
+    }
+
+    /// A Batch with no Events that moves the Cursor, forward or back, would skip or replay
+    /// whatever lies between.
+    #[test]
+    fn a_batch_without_events_that_moves_the_cursor_is_reported() {
+        for got in [11, 9] {
+            assert_eq!(
+                closing_cursor(&[&format!("cursor: {got}")], 10),
+                Err(ProtocolViolation::CursorMovedWithoutEvents { requested: 10, got }),
+                "{got}"
+            );
+        }
     }
 }

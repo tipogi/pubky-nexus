@@ -6,8 +6,8 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, warn};
 
 use super::{
-    run_consumer, validate_limit, ConfigError, FeedOutcome, Missing, ProtocolViolation,
-    WatcherError, DEFAULT_EVENTS_LIMIT,
+    run_consumer, validate_limit, ConfigError, FeedOutcome, Missing, WatcherError,
+    DEFAULT_EVENTS_LIMIT,
 };
 use crate::feed::{FeedBatch, FeedEvent};
 use crate::hooks::{EventHandler, EventLineOutcome, FromEventLine};
@@ -99,10 +99,11 @@ where
     /// Makes one Run: reads the Batch after `cursor`, hands each Event to the Handler in
     /// order, and returns the Checkpoint to start the next Run from.
     ///
-    /// The Batch's Cursor is checked before any Event is handled: it must be a number, and
-    /// move past `cursor` when the Batch has Events ([`ProtocolViolation`] otherwise). An idle
-    /// Homeserver answers no Events, and the Cursor stays where it was. A Handler error fails
-    /// the Run.
+    /// The Batch's Cursor is checked before any Event is handled, with the Protocol check
+    /// [`FeedBatch::closing_cursor`]: it must be a number, and move past `cursor` when the
+    /// Batch has Events. A Protocol violation fails the Run
+    /// with [`WatcherError::Protocol`]. An idle Homeserver answers no Events, and the Cursor
+    /// stays where it was. A Handler error fails the Run.
     pub async fn run(&self, cursor: EventCursor) -> Result<FeedOutcome, WatcherError<Err>> {
         let run = Arc::new(FeedRun {
             config: self.config.clone(),
@@ -175,7 +176,7 @@ where
         }
 
         let batch = FeedBatch::split(&lines);
-        let closing_cursor = closing_cursor(self.cursor, &batch)?;
+        let closing_cursor = batch.closing_cursor(self.cursor)?;
 
         let mut handled_events = 0;
         for line in &batch.event_lines {
@@ -202,40 +203,6 @@ where
 
         Ok(FeedOutcome::completed(closing_cursor, handled_events))
     }
-}
-
-/// The Cursor closing `batch`, read after `requested`: a number, past `requested` when the
-/// Batch has Events, and `requested` itself when it has none. A Homeserver that sent Events
-/// without a Cursor, or one that would hold the Cursor, would have the next Run read the
-/// same Batch again.
-fn closing_cursor(
-    requested: EventCursor,
-    batch: &FeedBatch<'_>,
-) -> Result<EventCursor, ProtocolViolation> {
-    let Some(raw) = batch.cursor else {
-        return Err(ProtocolViolation::MissingCursor);
-    };
-    let got: u64 = raw
-        .parse()
-        .map_err(|_| ProtocolViolation::MalformedCursor {
-            raw: raw.to_string(),
-        })?;
-
-    if batch.has_events() && got <= requested.id() {
-        return Err(ProtocolViolation::CursorNotAdvanced {
-            user_pubkey: None,
-            requested: requested.id(),
-            got,
-        });
-    }
-    if !batch.has_events() && got != requested.id() {
-        return Err(ProtocolViolation::CursorMovedWithoutEvents {
-            requested: requested.id(),
-            got,
-        });
-    }
-
-    Ok(EventCursor::new(got))
 }
 
 #[cfg(test)]

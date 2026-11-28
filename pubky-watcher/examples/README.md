@@ -30,8 +30,9 @@ cargo run -p pubky-watcher --example stream_consumer
 
 ## `run_under_cycle`
 
-The low-level path: an Indexer's own `Run`, built and run by a `Cycle` once per Turn, the way
-Nexus uses the crate.
+The low-level path: an Indexer's own `Run`, built and run by a `Cycle` once per Turn. The Run
+checks each Batch with the Protocol check `FeedBatch::closing_cursor` before it handles any
+Event, and fails on a Protocol violation.
 
 ```bash
 cargo run -p pubky-watcher --example run_under_cycle

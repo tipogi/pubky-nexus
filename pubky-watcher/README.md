@@ -294,6 +294,14 @@ Retry queue or backoff implements directly:
   failure into a Missing dependency or a Transient failure; the queue and its limits are
   yours.
 
+The rules a Consumer applies to a Homeserver's answer are public, as Protocol checks:
+`FeedBatch::closing_cursor` for an Events feed's Batch, and `check_stream_limit`,
+`check_stream_cursors` and `check_event_user_pubkey` for an Event stream's. Each returns the
+`ProtocolViolation` it finds and does nothing else: it handles, logs, skips and stops nothing.
+What a Consumer does about a violation is a default. Your own `Run` calls the same checks and
+reacts in its own way, for instance by handling the Events before a foreign one and going on
+to the next user.
+
 ## Examples
 
 See [`examples/`](examples/README.md): one per Consumer and one for your own `Run` under a

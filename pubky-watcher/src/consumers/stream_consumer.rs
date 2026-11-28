@@ -7,12 +7,14 @@ use tokio::sync::watch::Receiver;
 use tracing::{debug, warn};
 
 use super::{
-    run_consumer, validate_limit, ConfigError, Missing, ProtocolViolation, WatcherError,
-    DEFAULT_EVENTS_LIMIT,
+    run_consumer, validate_limit, ConfigError, Missing, WatcherError, DEFAULT_EVENTS_LIMIT,
 };
 use crate::hooks::EventHandler;
 use crate::run::{Run, RunOutcome};
-use crate::{HsError, HsErrorKind, StreamEvent, StreamReader};
+use crate::{
+    check_event_user_pubkey, check_stream_cursors, check_stream_limit, HsError, HsErrorKind,
+    ProtocolViolation, StreamEvent, StreamReader,
+};
 
 /// The path an Event stream is read under when the builder sets none: everything its User
 /// pubkey publishes.
@@ -200,10 +202,12 @@ where
     ///   [`StreamOutcome::stopped`] says why, as a [`StopReason`], as it does for the
     ///   shutdown signal given to [`StreamConsumerBuilder::build`].
     ///
-    /// An Event stream's Batch is checked whole before any of its Events is handled: no more
-    /// Events than asked for, every Event its own User pubkey's, and Cursors that only move
-    /// forward. A Batch that breaks this is a Protocol violation ([`ProtocolViolation`]):
-    /// none of its Events is handled, and the Run reads nothing more from that Homeserver.
+    /// An Event stream's Batch is checked whole before any of its Events is handled, by the
+    /// Protocol checks in this order: [`check_stream_limit`] (no more Events than asked for),
+    /// [`check_stream_cursors`] (Cursors that only move forward), then
+    /// [`check_event_user_pubkey`] on every Event (each its own User pubkey's). The first
+    /// Protocol violation found ([`ProtocolViolation`]) is the one reported: none of the
+    /// Batch's Events is handled, and the Run reads nothing more from that Homeserver.
     ///
     /// The Run's own error means only that the Run could not be made: a User pubkey listed
     /// twice, rejected before any Read with [`WatcherError::DuplicateUser`], or a task that
@@ -333,8 +337,12 @@ where
             )
             .await
             .map_err(sort_failed_read)?;
-        validate_events(user_pubkey, cursor, config.events_limit, &events)
-            .map_err(|violation| BatchEnd::Stopped(StopReason::Protocol(violation)))?;
+        let stopped = |violation| BatchEnd::Stopped(StopReason::Protocol(violation));
+        check_stream_limit(user_pubkey, config.events_limit, &events).map_err(stopped)?;
+        check_stream_cursors(user_pubkey, cursor, &events).map_err(stopped)?;
+        for event in &events {
+            check_event_user_pubkey(user_pubkey, event).map_err(stopped)?;
+        }
 
         for event in &events {
             if *config.shutdown_rx.borrow() {
@@ -411,66 +419,19 @@ fn listed_twice(users: &[(PublicKey, EventCursor)]) -> Option<&PublicKey> {
         .find(|user_pubkey| !seen.insert(*user_pubkey))
 }
 
-/// Checks the Batch of `user_pubkey`'s Event stream, read after `requested` with `limit`: no
-/// more Events than asked for, every Event `user_pubkey`'s own, so that one user's Event
-/// stream cannot inject another's Events, and Cursors that only move forward.
-fn validate_events(
-    user_pubkey: &PublicKey,
-    requested: EventCursor,
-    limit: u16,
-    events: &[StreamEvent],
-) -> Result<(), ProtocolViolation> {
-    if events.len() > limit as usize {
-        return Err(ProtocolViolation::TooManyEvents {
-            user_pubkey: user_pubkey.clone(),
-            got: events.len(),
-            limit,
-        });
-    }
-
-    let mut floor = requested.id();
-    for event in events {
-        if event.user_pubkey() != user_pubkey {
-            return Err(ProtocolViolation::ForeignEvent {
-                user_pubkey: user_pubkey.clone(),
-                event_user_pubkey: event.user_pubkey().clone(),
-            });
-        }
-        if event.cursor <= floor {
-            return Err(ProtocolViolation::CursorNotAdvanced {
-                user_pubkey: Some(user_pubkey.clone()),
-                requested: floor,
-                got: event.cursor,
-            });
-        }
-        floor = event.cursor;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
-    use pubky::{EventCursor, Keypair, PubkyResource, PublicKey};
+    use pubky::{EventCursor, PublicKey};
     use tokio::sync::watch;
 
+    use crate::fixtures::{event, key};
     use crate::{
-        ConfigError, EventHandler, EventType, HsError, HsErrorKind, HsOp, ProtocolViolation,
-        StopReason, StreamEvent, StreamOutcome, StreamReader, Watcher, WatcherError,
+        ConfigError, EventHandler, HsError, HsErrorKind, HsOp, ProtocolViolation, StopReason,
+        StreamEvent, StreamOutcome, StreamReader, Watcher, WatcherError,
     };
-
-    fn key() -> PublicKey {
-        Keypair::random().public_key()
-    }
-
-    /// An Event of `user_pubkey`'s at `cursor`.
-    fn event(user_pubkey: &PublicKey, cursor: u64) -> StreamEvent {
-        let resource =
-            PubkyResource::new(user_pubkey.clone(), "/pub/app/item").expect("valid path");
-        StreamEvent::new(EventType::Put, &resource, cursor)
-    }
 
     /// What a scripted Read of a User pubkey's Event stream answers: a Batch, or why the
     /// Read failed.
@@ -870,6 +831,47 @@ mod tests {
             assert_eq!(reader.reads(), [(alice.clone(), 10), (bob.clone(), 30)]);
             assert_eq!(*handler.cursors.lock().unwrap(), [11, 12]);
         }
+    }
+
+    /// A Batch that breaks two rules reports the one checked first: its Cursors are checked
+    /// before whose Events they are, so an Event of another User pubkey followed by an
+    /// out-of-order Cursor stops the Run on the Cursor. None of the Batch is handled.
+    #[tokio::test]
+    async fn a_batch_with_a_foreign_event_and_an_out_of_order_cursor_stops_on_the_cursor() {
+        let (bob, carol, mallory) = (key(), key(), key());
+        let reader = Streams::new(vec![
+            (&bob, vec![event(&mallory, 31), event(&bob, 30)]),
+            (&carol, vec![event(&carol, 51)]),
+        ]);
+        let handler = recorder();
+        let users = vec![
+            (bob.clone(), EventCursor::new(30)),
+            (carol.clone(), EventCursor::new(50)),
+        ];
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let outcome = Watcher::stream(reader, key())
+            .handler(handler)
+            .build(shutdown_rx)
+            .unwrap()
+            .run(users.clone())
+            .await
+            .unwrap();
+
+        let expected = ProtocolViolation::CursorNotAdvanced {
+            user_pubkey: Some(bob.clone()),
+            requested: 31,
+            got: 30,
+        };
+        assert!(
+            matches!(&outcome.stopped, Some(StopReason::Protocol(got)) if *got == expected),
+            "{:?}",
+            outcome.stopped
+        );
+        assert_eq!(outcome.checkpoints, users);
+        assert_eq!(outcome.handled_events, 0);
+        assert!(handler.cursors.lock().unwrap().is_empty());
+        assert_eq!(reader.reads(), [(bob.clone(), 30)]);
     }
 
     /// A Run stopped by shutdown is not an error: the Checkpoint of the User pubkey in

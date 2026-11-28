@@ -23,7 +23,7 @@ use pubky::{EventCursor, PublicKey};
 use thiserror::Error;
 
 use crate::run::{wait_on_own_task, Panicked, SLOW_RUN_THRESHOLD};
-use crate::{FeedReader, HsError, StreamReader};
+use crate::{FeedReader, HsError, ProtocolViolation, StreamReader};
 
 pub use feed_consumer::{FeedConsumer, FeedConsumerBuilder};
 pub use stream_consumer::{
@@ -50,96 +50,6 @@ pub enum ConfigError {
         /// The path given to [`StreamConsumerBuilder::path`].
         path: String,
     },
-}
-
-/// A Protocol violation: an answer from a Homeserver that breaks the rules of its Events
-/// feed or Event stream. None of its Events is handled, and the Run reads nothing more from
-/// that Homeserver, so the Cursor the answer was read from is still the Checkpoint.
-/// A [`FeedConsumer`]'s Run returns it as [`WatcherError::Protocol`]; a [`StreamConsumer`]'s
-/// Run stops and gives it as [`StopReason::Protocol`].
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[non_exhaustive]
-pub enum ProtocolViolation {
-    /// An Events feed's Batch had Events but no `cursor:` line.
-    /// Checked by [`FeedConsumer::run`].
-    #[error("the homeserver sent events without a cursor line")]
-    MissingCursor,
-    /// The Cursor closing an Events feed's Batch is not a number.
-    /// Checked by [`FeedConsumer::run`].
-    #[error("the homeserver sent a cursor that is no number: {raw:?}")]
-    MalformedCursor {
-        /// The Cursor as the Homeserver sent it.
-        /// Without its [`CURSOR_PREFIX`](crate::CURSOR_PREFIX).
-        raw: String,
-    },
-    /// Events came with a Cursor that does not move past the one they had to: the one the
-    /// Run read from, or on an Event stream, the previous Event's.
-    /// Checked by [`FeedConsumer::run`] and [`StreamConsumer::run`].
-    #[error("{}", cursor_not_advanced(.user_pubkey.as_ref(), *.requested, *.got))]
-    CursorNotAdvanced {
-        /// The User pubkey whose Event stream it was, on a [`StreamConsumer`]; `None` on a
-        /// [`FeedConsumer`].
-        user_pubkey: Option<PublicKey>,
-        /// The Cursor the Events had to move past.
-        /// On a [`StreamConsumer`], the previous Event's Cursor after the first Event.
-        requested: u64,
-        /// The Cursor the Homeserver sent.
-        /// The Batch's Cursor on a [`FeedConsumer`], the Event's on a [`StreamConsumer`].
-        got: u64,
-    },
-    /// An Events feed's Batch had no Events but moved the Cursor, which would skip whatever
-    /// lies between.
-    /// Checked by [`FeedConsumer::run`].
-    #[error("the homeserver sent no events but moved the cursor from {requested} to {got}")]
-    CursorMovedWithoutEvents {
-        /// The Cursor the Run read from.
-        requested: u64,
-        /// The Cursor the Homeserver sent.
-        /// The Batch's cursor line ([`FeedBatch::cursor`](crate::FeedBatch::cursor)).
-        got: u64,
-    },
-    /// An Event stream's Batch held more Events than the Run asked for.
-    /// Checked by [`StreamConsumer::run`].
-    #[error(
-        "the stream of {} returned {got} events, more than the {limit} requested",
-        .user_pubkey.z32()
-    )]
-    TooManyEvents {
-        /// The User pubkey whose Event stream it was.
-        user_pubkey: PublicKey,
-        /// The Events the Batch held.
-        got: usize,
-        /// The Events the Run asked for.
-        /// Set by [`StreamConsumerBuilder::events_limit`].
-        limit: u16,
-    },
-    /// A User pubkey's Event stream held an Event of another User pubkey, which would let
-    /// one user's Event stream inject another's Events.
-    /// Checked by [`StreamConsumer::run`].
-    #[error(
-        "the stream of {} returned an event of {}",
-        .user_pubkey.z32(),
-        .event_user_pubkey.z32()
-    )]
-    ForeignEvent {
-        /// The User pubkey whose Event stream it was.
-        user_pubkey: PublicKey,
-        /// The User pubkey of the Event
-        /// ([`StreamEvent::user_pubkey`](crate::StreamEvent::user_pubkey)).
-        event_user_pubkey: PublicKey,
-    },
-}
-
-fn cursor_not_advanced(user_pubkey: Option<&PublicKey>, requested: u64, got: u64) -> String {
-    match user_pubkey {
-        None => format!(
-            "the homeserver sent events with cursor {got}, which does not move past {requested}"
-        ),
-        Some(user_pubkey) => format!(
-            "the stream of {} returned cursor {got}, which does not move past {requested}",
-            user_pubkey.z32()
-        ),
-    }
 }
 
 /// An error of a Consumer's Run. `Err` is the Handler's own error, given back as it was

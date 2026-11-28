@@ -18,6 +18,11 @@
 //!   Event streams of chosen User pubkeys. Each is given an [`EventHandler`]; each call makes
 //!   one Run and returns its Checkpoint, or one per User pubkey: the Cursor an Indexer may
 //!   store.
+//! - **The Protocol checks.** The rules of an Events feed and an Event stream, which the
+//!   Consumers apply, for an Indexer's own Run to apply too: [`FeedBatch::closing_cursor`],
+//!   [`check_stream_cursors`], [`check_event_user_pubkey`] and [`check_stream_limit`]. Each
+//!   reports the [`ProtocolViolation`] in a Homeserver's answer, and the caller chooses what
+//!   follows.
 //! - **[`Run`].** One pass over one Homeserver, for an Indexer that writes its own: its own
 //!   Cursor store, its own Event type ([`FromEventLine`]), a Budget.
 //! - **[`Cycle`].** One round over the Homeservers an Indexer follows, one Turn each, reported
@@ -35,7 +40,10 @@ mod client;
 mod consumers;
 mod cycle;
 mod feed;
+#[cfg(test)]
+mod fixtures;
 mod hooks;
+mod protocol;
 mod run;
 
 pub use client::{
@@ -44,13 +52,16 @@ pub use client::{
     WatcherClientBuilder, DEFAULT_MAX_FILE_SIZE, DEFAULT_REQUEST_TIMEOUT,
 };
 pub use consumers::{
-    ConfigError, FeedConsumer, FeedConsumerBuilder, FeedOutcome, Missing, ProtocolViolation,
-    StopReason, StreamConsumer, StreamConsumerBuilder, StreamOutcome, Watcher, WatcherError,
+    ConfigError, FeedConsumer, FeedConsumerBuilder, FeedOutcome, Missing, StopReason,
+    StreamConsumer, StreamConsumerBuilder, StreamOutcome, Watcher, WatcherError,
     DEFAULT_EVENTS_LIMIT, DEFAULT_STREAM_PATH,
 };
 pub use cycle::{turn_status_from_run, Cycle, CycleReport, CycleStats, Turn, TurnStatus};
 pub use feed::{FeedBatch, FeedEvent, CURSOR_PREFIX};
 pub use hooks::{EventHandler, EventLineOutcome, FromEventLine, RetryQueue, RetryableError};
+pub use protocol::{
+    check_event_user_pubkey, check_stream_cursors, check_stream_limit, ProtocolViolation,
+};
 pub use run::{
     dispatch_retryable_error, run_on_own_task, Run, RunError, RunOutcome, SLOW_RUN_THRESHOLD,
 };

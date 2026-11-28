@@ -1,8 +1,10 @@
 //! An Indexer's own [`Run`] under a [`Cycle`]: five Cycles over one Homeserver, each giving
 //! it one Turn, in which the Run reads one Batch of its Events feed.
 //!
-//! This is the path Nexus takes, with its own Cursor store, Retry queue and backoff. The
-//! example keeps its Cursor in memory and fails fast on any error. From the workspace root:
+//! An Indexer takes this path when it brings its own Cursor store, Retry queue or backoff.
+//! The example keeps its Cursor in memory, checks each Batch with the Protocol check
+//! [`FeedBatch::closing_cursor`] before handling any Event, and fails fast on any error,
+//! a Protocol violation included. From the workspace root:
 //!
 //! ```bash
 //! cargo run -p pubky-watcher --example run_under_cycle
@@ -13,7 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pubky::PublicKey;
+use pubky::{EventCursor, PublicKey};
 use pubky_watcher::{Cycle, FeedBatch, FeedEvent, FeedReader, Run, RunOutcome, WatcherClient};
 use tokio::sync::{watch, Mutex};
 
@@ -24,8 +26,8 @@ const STAGING_HOMESERVER: &str = "ufibwbmed6jeq9k4p583go95wofakh9fwpp4k734trq79p
 const CYCLES: usize = 5;
 const EVENTS_PER_RUN: u16 = 8;
 
-/// One Run over the Homeserver: reads the Batch after the Cursor, prints each Event, and
-/// moves the Cursor once the Batch is handled.
+/// One Run over the Homeserver: reads the Batch after the Cursor, checks it, prints each
+/// Event, and moves the Cursor once the Batch is handled.
 struct PrintRun {
     hs_pubkey: PublicKey,
     hs_pubkey_z32: String,
@@ -55,6 +57,9 @@ impl Run<FeedEvent, BoxError> for PrintRun {
             .read_feed(&self.hs_pubkey, cursor, EVENTS_PER_RUN)
             .await?;
         let batch = FeedBatch::split(&lines);
+        // Checked before the loop, so that a Batch with a Protocol violation reaches no
+        // Handler and leaves the stored Cursor where it was.
+        let next = batch.closing_cursor(EventCursor::new(cursor))?.id();
         if !batch.has_events() {
             println!("No new events");
         }
@@ -65,10 +70,8 @@ impl Run<FeedEvent, BoxError> for PrintRun {
             self.handle_event_line(line).await?;
         }
 
-        if let Some(next) = batch.cursor {
-            *self.cursor.lock().await = next.parse()?;
-            println!("cursor: {next}");
-        }
+        *self.cursor.lock().await = next;
+        println!("cursor: {next}");
         Ok(RunOutcome::Completed)
     }
 }
