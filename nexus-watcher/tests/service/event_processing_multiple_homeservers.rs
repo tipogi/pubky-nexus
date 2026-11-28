@@ -3,7 +3,7 @@ use crate::service::utils::{
     MockEventProcessorRunner,
 };
 use anyhow::Result;
-use nexus_watcher::service::TEventProcessorRunner;
+use nexus_watcher::service::Cycle;
 use std::time::Duration;
 
 #[tokio_shared_rt::test(shared)]
@@ -106,12 +106,12 @@ async fn test_multi_hs_event_processing_with_homeserver_limit_one() -> Result<()
 
     // Check that, when the limit is 1, only one external homeserver is considered
     let runner_one = MockEventProcessorRunner::new(event_processor_list, 1, shutdown_rx);
-    let hs_list = runner_one.pre_run().await.unwrap();
+    let hs_list = runner_one.homeservers().await.unwrap();
     assert_eq!(hs_list.len(), 1);
     assert_ne!(
         hs_list.first().unwrap(),
         &runner_one.primary_homeserver(),
-        "Primary homeserver should be excluded from pre_run"
+        "Primary homeserver should be excluded from homeservers()"
     );
 
     let stats_one = runner_one.run().await.unwrap().0;

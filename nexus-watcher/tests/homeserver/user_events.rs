@@ -1,6 +1,6 @@
 //! The `/events-stream` request the client builds: which homeserver and user it asks, from
 //! which cursor, and that a rate-limited request is retried. The count is capped by the
-//! client itself (`read_user_events`), so it is covered by a unit test instead, and the
+//! client itself (`read_stream_events`), so it is covered by a unit test instead, and the
 //! `/pub/` path filter cannot be observed, because the homeserver accepts writes only under
 //! `/pub/`.
 
@@ -12,10 +12,10 @@ use crate::event_processor::utils::watcher::{
 use nexus_common::types::DynError;
 use pubky::{Keypair, PublicKey};
 use pubky_social_specs::legacy_v0::PubkyAppUser;
-use pubky_social_specs::PubkyId;
 use pubky_testnet::pubky_homeserver::{
     ConfigToml, GlobPattern, HttpMethod, LimitKeyType, MockDataDir, PathLimit,
 };
+use pubky_watcher::StreamReader;
 
 fn profile(name: &str) -> PubkyAppUser {
     PubkyAppUser {
@@ -39,19 +39,18 @@ async fn test_user_events_come_from_the_homeserver_after_the_cursor() -> Result<
     // asked finds these events.
     let other_hs = test.testnet.create_random_homeserver().await?.public_key();
     test.register_user_in_hs(&user_kp, &other_hs).await?;
-    let client = &test.event_processor_runner.client;
+    let client = &test.client;
     let user_pk = user_kp.public_key();
+    let hs = test.homeserver_id.to_public_key()?;
 
-    let first = client
-        .user_events(&test.homeserver_id, &user_pk, 0, 1)
-        .await?;
+    let first = client.read_stream(&hs, &user_pk, 0, 1, "/pub/").await?;
 
     assert_eq!(first.len(), 1, "{first:?}");
-    assert_eq!(first[0].owner().z32(), user_id);
+    assert_eq!(first[0].user_pubkey().z32(), user_id);
 
     let cursor = first[0].cursor;
     let rest = client
-        .user_events(&test.homeserver_id, &user_pk, cursor, 100)
+        .read_stream(&hs, &user_pk, cursor, 100, "/pub/")
         .await?;
 
     // The key now names the other homeserver, so the usual cleanup helper would delete the
@@ -66,7 +65,7 @@ async fn test_user_events_come_from_the_homeserver_after_the_cursor() -> Result<
 
     assert_eq!(rest.len(), 1, "{rest:?}");
     assert!(rest[0].cursor > cursor, "{rest:?}");
-    assert_eq!(rest[0].owner().z32(), user_id);
+    assert_eq!(rest[0].user_pubkey().z32(), user_id);
 
     Ok(())
 }
@@ -104,13 +103,12 @@ async fn test_rate_limited_user_events_are_retried_against_a_homeserver() -> Res
     let hs = homeserver_allowing_one_stream_request_a_second(&mut test).await?;
     let user_kp = Keypair::random();
     test.register_user_in_hs(&user_kp, &hs).await?;
-    let client = &test.event_processor_runner.client;
-    let hs_id = PubkyId::from(hs);
+    let client = &test.client;
     let user_pk = user_kp.public_key();
 
-    client.user_events(&hs_id, &user_pk, 0, 10).await?;
+    client.read_stream(&hs, &user_pk, 0, 10, "/pub/").await?;
     let asked_again = Instant::now();
-    let events = client.user_events(&hs_id, &user_pk, 0, 10).await?;
+    let events = client.read_stream(&hs, &user_pk, 0, 10, "/pub/").await?;
 
     assert!(events.is_empty(), "{events:?}");
     assert!(

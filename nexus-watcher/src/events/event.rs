@@ -3,9 +3,10 @@ use super::epoch_metrics::record_skip;
 use super::route::route;
 use super::target::EventTarget;
 use crate::errors::EventProcessorError;
-use crate::homeserver::HsStreamEvent;
 use nexus_common::models::event::EventLine;
 use pubky_social_specs::PubkyId;
+use pubky_watcher::StreamEvent;
+use pubky_watcher::{EventLineOutcome, FromEventLine};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use tracing::{debug, warn};
@@ -16,11 +17,11 @@ pub enum EventType {
     Del,
 }
 
-impl From<pubky::EventType> for EventType {
-    fn from(value: pubky::EventType) -> Self {
+impl From<pubky_watcher::EventType> for EventType {
+    fn from(value: pubky_watcher::EventType) -> Self {
         match value {
-            pubky::EventType::Put { .. } => Self::Put,
-            pubky::EventType::Delete => Self::Del,
+            pubky_watcher::EventType::Put => Self::Put,
+            pubky_watcher::EventType::Del => Self::Del,
         }
     }
 }
@@ -59,6 +60,21 @@ impl ParseResult {
             uri,
             reason,
         }
+    }
+}
+
+/// Parses a primary homeserver's `/events/` line with [`Event::parse_event`].
+impl FromEventLine for Event {
+    type Error = EventProcessorError;
+
+    fn from_event_line(line: &str) -> Result<EventLineOutcome<Self>, Self::Error> {
+        Ok(match Self::parse_event(line)? {
+            ParseResult::Parsed(event) => EventLineOutcome::Parsed(event),
+            ParseResult::Skipped(_) => EventLineOutcome::Skipped,
+            ParseResult::UnrecognizedUri { reason, .. } => {
+                EventLineOutcome::Unrecognized { reason }
+            }
+        })
     }
 }
 
@@ -102,12 +118,12 @@ impl Event {
         Self::parse_event_parts(event_type, uri, event_line)
     }
 
-    /// Constructs a nexus [`Event`] directly from a [`HsStreamEvent`], avoiding
+    /// Constructs a nexus [`Event`] directly from a [`StreamEvent`], avoiding
     /// the string round-trip through [`Self::parse_event`].
     pub fn from_stream_event(
-        stream_event: &HsStreamEvent,
+        stream_event: &StreamEvent,
     ) -> Result<Option<Self>, EventProcessorError> {
-        let event_type = stream_event.event_type.clone();
+        let event_type = EventType::from(stream_event.event_type);
 
         let uri = stream_event.uri().to_string();
         debug!(%event_type, %uri, "New stream event");

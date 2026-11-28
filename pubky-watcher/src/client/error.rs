@@ -1,117 +1,180 @@
 use std::fmt::Display;
 
 use pubky::errors::RequestError;
-use pubky_social_specs::PubkyId;
-use reqwest::StatusCode;
+use pubky::PublicKey;
 
 use super::fetch::{format_error_body, MAX_ERROR_BODY};
 
-/// A failed [`HomeserverClient`](super::HomeserverClient) call.
+/// Why a [`WatcherClient`](super::WatcherClient) could not be built: the Pubky SDK could
+/// not build its HTTP or PKARR client. See
+/// [`WatcherClientBuilder::build`](super::WatcherClientBuilder::build),
+/// [`WatcherClient::mainnet`](super::WatcherClient::mainnet) and
+/// [`WatcherClient::testnet`](super::WatcherClient::testnet).
+///
+/// The SDK's error is its [`source`](std::error::Error::source), and nowhere else, so the
+/// crate's API does not depend on the SDK's error types.
+#[derive(Debug, thiserror::Error)]
+#[error("could not build the Pubky client")]
+pub struct ClientError {
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl ClientError {
+    /// A build that failed because of `source`, the SDK's error.
+    pub(crate) fn build(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+/// A failed Read of a Homeserver, made through [`WatcherClient`](super::WatcherClient) or
+/// another implementation of the Client's Read traits.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{op:?} {hs}: {kind}")]
 pub struct HsError {
-    /// ID of the homeserver the call went to, or for a resource or blob, its owner's key.
-    /// Not a [`PubkyId`], which also holds the decoded key and would make every error
-    /// several times larger.
+    /// The Homeserver pubkey the Read went to, as z-base-32 text, or for a Resource or blob,
+    /// its User pubkey. Not a [`PublicKey`], which also holds the decoded key and would make
+    /// every error several times larger.
     pub hs: String,
+    /// Which Read failed, as an [`HsOp`].
     pub op: HsOp,
+    /// Why the Read failed, as an [`HsErrorKind`].
     pub kind: HsErrorKind,
 }
 
 impl HsError {
-    pub fn new(hs: &PubkyId, op: HsOp, kind: HsErrorKind) -> Self {
+    /// A failure of the Read `op` on `hs` (the Homeserver pubkey, or the User pubkey of the
+    /// Resource or blob), for the reason `kind`.
+    pub fn new(hs: &PublicKey, op: HsOp, kind: HsErrorKind) -> Self {
         Self {
-            hs: hs.to_string(),
+            hs: hs.z32(),
             op,
             kind,
         }
     }
 }
 
-/// The [`HomeserverClient`](super::HomeserverClient) operation a call made.
+/// Which Read a Homeserver was asked for.
+/// It labels every [`HsError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsOp {
-    PollEvents,
-    UserEvents,
-    GetResource,
-    GetBlob,
+    /// A Read of a Homeserver's Events feed
+    /// ([`FeedReader::read_feed`](super::FeedReader::read_feed)).
+    ReadFeed,
+    /// A Read of a User pubkey's Event stream
+    /// ([`StreamReader::read_stream`](super::StreamReader::read_stream)).
+    ReadStream,
+    /// A Read of the Resource a `PUT` Event names
+    /// ([`ResourceReader::read_resource`](super::ResourceReader::read_resource)).
+    ReadResource,
+    /// A Read of a blob ([`ResourceReader::read_blob`](super::ResourceReader::read_blob)).
+    ReadBlob,
 }
 
-/// Why a homeserver call failed.
+/// Why a Read of a Homeserver failed.
 ///
 /// Homeserver-supplied text (response bodies, transport messages) is capped at
-/// [`MAX_ERROR_BODY`] bytes when a kind is built through its constructors, before
+/// 4 KiB when a kind is built through its constructors, before
 /// it can reach a log line or a span.
+/// It is the [`HsError::kind`] of a failure.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum HsErrorKind {
+    /// The Homeserver answered `404 Not Found`, with the start of its body.
+    /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP 404: {0}")]
     NotFound(String),
+    /// The Homeserver answered `429 Too Many Requests`, with the start of its body.
+    /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP 429: {0}")]
     RateLimited(String),
+    /// The Homeserver answered a `5xx` status, with the start of its body.
+    /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP {0}: {1}")]
     ServerError(u16, String),
     /// Any other non-2xx status.
+    /// Built by [`HsErrorKind::from_status`].
     #[error("HTTP {0}: {1}")]
     Rejected(u16, String),
+    /// The request, its response body included, took longer than the Client's timeout
+    /// ([`DEFAULT_REQUEST_TIMEOUT`](super::DEFAULT_REQUEST_TIMEOUT) by default).
     #[error("timed out")]
     Timeout,
+    /// The Homeserver could not be reached, or its response could not be read
+    /// ([`HsErrorKind::transport`]).
     #[error("transport failed: {0}")]
     Transport(String),
+    /// The response is larger than the cap for its kind of Read: see
+    /// [`ResourceReader`](super::ResourceReader).
     #[error("{got} bytes, over the {max} byte limit")]
-    TooLarge { got: u64, max: u64 },
-    /// The SDK refused the request, could not decode the answer, or could not resolve a
-    /// key: neither a status nor a transport failure. A failed fetch is retried; a failed
-    /// event-stream request skips its user for the run, cursor kept, and unlike a transport
-    /// failure never stops the run.
+    TooLarge {
+        /// The size the Homeserver announced, or the bytes read before stopping.
+        /// In bytes, as the cap ([`HsErrorKind::TooLarge`]).
+        got: u64,
+        /// The cap the Read was under.
+        /// For a blob, the Client's cap
+        /// ([`DEFAULT_MAX_FILE_SIZE`](super::DEFAULT_MAX_FILE_SIZE) by default).
+        max: u64,
+    },
+    /// The SDK refused the request, could not decode the answer, or could not find a User
+    /// pubkey's Homeserver record: neither a status nor a transport failure. A failed Read of
+    /// a Resource is retried; a failed Read of an Event stream skips its user for the Run,
+    /// Cursor kept, and unlike a transport failure never stops the Run.
+    /// Built by the [`WatcherClient`](super::WatcherClient) from the SDK's error.
     #[error("sdk: {0}")]
     Sdk(String),
-    /// A request that could not be built, e.g. from a malformed homeserver URL.
+    /// A request that could not be built, e.g. from a malformed Homeserver URL.
+    /// Built with [`HsErrorKind::malformed`].
     #[error("malformed: {0}")]
     Malformed(String),
 }
 
 impl HsErrorKind {
-    /// Classifies a non-2xx status, keeping at most [`MAX_ERROR_BODY`] bytes of its body.
-    pub fn from_status(status: StatusCode, body: &[u8]) -> Self {
+    /// Classifies a non-2xx status, keeping at most 4 KiB of its body.
+    /// Gives [`HsErrorKind::NotFound`], [`HsErrorKind::RateLimited`],
+    /// [`HsErrorKind::ServerError`] or [`HsErrorKind::Rejected`].
+    pub fn from_status(status: u16, body: &[u8]) -> Self {
         let body = format_error_body(body, MAX_ERROR_BODY);
         match status {
-            StatusCode::NOT_FOUND => Self::NotFound(body),
-            StatusCode::TOO_MANY_REQUESTS => Self::RateLimited(body),
-            s if s.is_server_error() => Self::ServerError(s.as_u16(), body),
-            s => Self::Rejected(s.as_u16(), body),
+            404 => Self::NotFound(body),
+            429 => Self::RateLimited(body),
+            500..=599 => Self::ServerError(status, body),
+            _ => Self::Rejected(status, body),
         }
     }
 
-    /// A failure to reach the homeserver or to read its response.
+    /// A failure to reach the Homeserver or to read its response.
+    /// Keeps at most 4 KiB of `error`'s message ([`HsErrorKind::Transport`]).
     pub fn transport(error: impl Display) -> Self {
         Self::Transport(capped(error))
     }
 
+    /// A request that could not be built, keeping at most 4 KiB of `error`'s message
+    /// ([`HsErrorKind::Malformed`]).
     pub fn malformed(error: impl Display) -> Self {
         Self::Malformed(capped(error))
     }
 
-    pub fn from_reqwest(error: &reqwest::Error) -> Self {
+    /// A `reqwest` failure: a timeout, or else a transport failure.
+    pub(crate) fn from_reqwest(error: &reqwest::Error) -> Self {
         match error.is_timeout() {
             true => Self::Timeout,
             false => Self::transport(error),
         }
     }
 
-    /// Classifies an SDK error so it is retried, or not, as `PubkyClientError::from`
-    /// classifies it.
+    /// Classifies an SDK error.
     ///
     /// A status lands by its code and a transport failure stays one. A validation, JSON
-    /// decode or PKARR failure, which that conversion makes a retried `RequestFailed`
-    /// (`PkarrFailed` for PKARR), is an [`HsErrorKind::Sdk`] failure, treated the same
-    /// way. An error building the request (`Parse`, `Build`, `Authentication`) is
-    /// malformed, and permanent. So is a failed grant credential refresh
-    /// (`CredentialRefresh`): only a signed-in client refreshes one, and Nexus signs in
-    /// only in tests.
-    pub fn from_sdk(error: pubky::Error) -> Self {
+    /// decode or PKARR failure is an [`HsErrorKind::Sdk`] failure. An error building the
+    /// request (`Parse`, `Build`, `Authentication`) is malformed, and permanent. So is a
+    /// failed grant credential refresh (`CredentialRefresh`): only a signed-in client
+    /// refreshes one, and the Client never signs in.
+    pub(crate) fn from_sdk(error: pubky::Error) -> Self {
         match error {
             pubky::Error::Request(RequestError::Server { status, message }) => {
-                Self::from_status(status, message.as_bytes())
+                Self::from_status(status.as_u16(), message.as_bytes())
             }
             pubky::Error::Request(RequestError::Transport(e)) => Self::from_reqwest(&e),
             pubky::Error::Request(
@@ -131,7 +194,7 @@ fn capped(error: impl Display) -> String {
     format_error_body(error.to_string().as_bytes(), MAX_ERROR_BODY)
 }
 
-/// A failing body read gives a non-timeout `reqwest::Error`, as an unreachable homeserver
+/// A failing body read gives a non-timeout `reqwest::Error`, as an unreachable Homeserver
 /// or a reset connection does.
 #[cfg(test)]
 pub(crate) async fn transport_error() -> reqwest::Error {
@@ -147,11 +210,23 @@ pub(crate) async fn transport_error() -> reqwest::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::errors::EventProcessorError;
-    use crate::events::retry::RetryScheduler;
-    use nexus_common::db::PubkyClientError;
-    use pubky::errors::{AuthError, BuildError, PkarrError};
+    use pubky::errors::{AuthError, PkarrError};
     use pubky::CredentialRefreshError;
+    use reqwest::StatusCode;
+    use std::error::Error;
+
+    /// A failed client build says what failed, and gives the SDK's error only as its source,
+    /// so a printer of the error chain shows each message once.
+    #[test]
+    fn a_client_build_failure_gives_the_sdk_error_only_as_its_source() {
+        let error = ClientError::build(std::io::Error::other("no TLS roots"));
+
+        assert_eq!(error.to_string(), "could not build the Pubky client");
+        assert_eq!(
+            error.source().map(ToString::to_string).as_deref(),
+            Some("no TLS roots")
+        );
+    }
 
     /// A `reqwest::Error` that `is_timeout()`: a request to a local socket nothing answers
     /// on, with a timeout shorter than its patience.
@@ -207,19 +282,11 @@ mod tests {
             status: None,
         }));
         assert!(matches!(refresh, HsErrorKind::Malformed(_)), "{refresh:?}");
-
-        let hs = PubkyId::try_from("1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy").unwrap();
-        let retried: EventProcessorError = HsError::new(&hs, HsOp::GetResource, validation).into();
-        let dropped: EventProcessorError = HsError::new(&hs, HsOp::GetResource, parse).into();
-        assert!(RetryScheduler::should_enqueue_related_event(&retried));
-        assert!(!RetryScheduler::should_enqueue_related_event(&dropped));
-        assert!(!dropped.should_not_retry_now());
     }
 
     #[test]
     fn statuses_are_classified() {
-        let kind =
-            |status: u16| HsErrorKind::from_status(StatusCode::from_u16(status).unwrap(), b"");
+        let kind = |status: u16| HsErrorKind::from_status(status, b"");
         assert!(matches!(kind(404), HsErrorKind::NotFound(_)));
         assert!(matches!(kind(429), HsErrorKind::RateLimited(_)));
         assert!(matches!(kind(503), HsErrorKind::ServerError(503, _)));
@@ -233,7 +300,7 @@ mod tests {
     fn homeserver_text_is_capped() {
         let huge = "x".repeat(MAX_ERROR_BODY * 4);
 
-        let status = HsErrorKind::from_status(StatusCode::BAD_GATEWAY, huge.as_bytes());
+        let status = HsErrorKind::from_status(502, huge.as_bytes());
         let sdk_status = HsErrorKind::from_sdk(pubky::Error::from(RequestError::Server {
             status: StatusCode::BAD_GATEWAY,
             message: huge.clone(),
@@ -251,79 +318,6 @@ mod tests {
         }
     }
 
-    /// On a fetch, the client's classification and `PubkyClientError::from` decide the same
-    /// for every SDK error, a build error and a timed-out request included: whether the run
-    /// stops, whether the event is retried, and whether it was a 404. The compiler cannot
-    /// check the two lists against each other, so this does.
-    #[tokio::test]
-    async fn sdk_classification_agrees_with_the_shared_converter() {
-        let server = |status: u16| {
-            pubky::Error::from(RequestError::Server {
-                status: StatusCode::from_u16(status).unwrap(),
-                message: "nope".into(),
-            })
-        };
-        // Two of each, the SDK's error not being `Clone`.
-        let pair = |make: &dyn Fn() -> pubky::Error| (make(), make());
-        let mut pairs = vec![
-            pair(&|| server(404)),
-            pair(&|| server(429)),
-            pair(&|| server(503)),
-            pair(&|| server(400)),
-            pair(&|| server(403)),
-            pair(&|| server(408)),
-            pair(&|| {
-                pubky::Error::from(RequestError::Validation {
-                    message: "bad".into(),
-                })
-            }),
-            pair(&|| {
-                pubky::Error::from(RequestError::DecodeJson {
-                    message: "bad".into(),
-                })
-            }),
-            pair(&|| pubky::Error::from(PkarrError::InvalidRecord("bad".into()))),
-            pair(&|| pubky::Error::from(reqwest::Url::parse("https://").unwrap_err())),
-            pair(&|| pubky::Error::from(AuthError::Validation("bad".into()))),
-        ];
-        pairs.push((
-            pubky::Error::from(RequestError::Transport(transport_error().await)),
-            pubky::Error::from(RequestError::Transport(transport_error().await)),
-        ));
-        pairs.push((
-            pubky::Error::from(RequestError::Transport(timeout_error().await)),
-            pubky::Error::from(RequestError::Transport(timeout_error().await)),
-        ));
-        pairs.push((
-            pubky::Error::from(BuildError::Http(transport_error().await)),
-            pubky::Error::from(BuildError::Http(transport_error().await)),
-        ));
-
-        let hs = PubkyId::try_from("1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy").unwrap();
-        for (via_client, via_converter) in pairs {
-            let label = via_converter.to_string();
-            let via_client: EventProcessorError =
-                HsError::new(&hs, HsOp::GetResource, HsErrorKind::from_sdk(via_client)).into();
-            let via_converter = EventProcessorError::from(PubkyClientError::from(via_converter));
-
-            assert_eq!(
-                via_client.should_not_retry_now(),
-                via_converter.should_not_retry_now(),
-                "{label}"
-            );
-            assert_eq!(
-                RetryScheduler::should_enqueue_related_event(&via_client),
-                RetryScheduler::should_enqueue_related_event(&via_converter),
-                "{label}"
-            );
-            assert_eq!(
-                via_client.is_not_found(),
-                via_converter.is_not_found(),
-                "{label}"
-            );
-        }
-    }
-
     /// A request that timed out is its own kind, so a log tells it from a reset connection.
     #[tokio::test]
     async fn timed_out_requests_are_classified_as_timeouts() {
@@ -334,20 +328,11 @@ mod tests {
         assert!(matches!(kind, HsErrorKind::Timeout), "{kind:?}");
     }
 
-    /// A transport failure stops the run on the event stream, and is retried on a fetch.
+    /// A failure to reach the Homeserver or read its answer is a transport failure.
     #[tokio::test]
-    async fn transport_failures_stop_the_stream_and_retry_fetches() {
+    async fn transport_failures_are_classified() {
         let error = pubky::Error::from(RequestError::Transport(transport_error().await));
         let kind = HsErrorKind::from_sdk(error);
         assert!(matches!(kind, HsErrorKind::Transport(_)), "{kind:?}");
-
-        let hs = PubkyId::try_from("1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy").unwrap();
-        let on_stream: EventProcessorError =
-            HsError::new(&hs, HsOp::UserEvents, kind.clone()).into();
-        assert!(on_stream.should_not_retry_now(), "{on_stream:?}");
-
-        let on_blob: EventProcessorError = HsError::new(&hs, HsOp::GetBlob, kind).into();
-        assert!(!on_blob.should_not_retry_now(), "{on_blob:?}");
-        assert!(RetryScheduler::should_enqueue_related_event(&on_blob));
     }
 }

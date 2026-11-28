@@ -15,15 +15,16 @@ use super::IndexKey;
 use super::RetryEvent;
 use super::RetryScheduler;
 use crate::events::{confirm_flip, is_flip, EventHandler, SkipReason};
-use crate::service::indexer::{run_on_own_task, RunError, RunOutcome};
+use crate::service::indexer::{RunError, RunOutcome};
 use crate::service::SLOW_RUN_THRESHOLD;
+use pubky_watcher::run_on_own_task;
 
 /// Maximum number of retry events to fetch per batch to avoid memory spikes
 const RETRY_BATCH_SIZE: usize = 100;
 
 /// Processor for retrying events that failed due to missing dependencies.
 ///
-/// Not a [`TEventProcessor`](crate::service::indexer::TEventProcessor): one of those reads a
+/// Not a [`Run`](crate::service::indexer::Run): one of those reads a
 /// homeserver, while this retries the entries of every homeserver, each handled as read from
 /// its own origin homeserver.
 pub struct RetryProcessor {
@@ -184,10 +185,10 @@ impl RetryProcessor {
         let (e, outcome) = retry_outcome(error, limit);
         match outcome {
             RetryOutcome::Drop => {
-                // Not worth retrying (ParseFailed, etc.) - dead-letter immediately. No flip is
-                // dead-lettered here: its step runs before the fetch and every failure of it is
-                // queued, so a `social/v1` profile PUT that is 404 or invalid is a `v1` user's
-                // own edit.
+                // Not worth retrying (a rejected request, etc.) - dead-letter immediately. No flip
+                // is dead-lettered here: its step runs before the fetch and every failure of it
+                // is queued, so a `social/v1` profile PUT that is 404 or invalid is a `v1`
+                // user's own edit.
                 warn!("Event {ev_uri} threw an error not worth retrying, dead-lettering: {e}");
                 self.remove_if_current(index_key, retry_event.nonce, ev_uri)
                     .await?;

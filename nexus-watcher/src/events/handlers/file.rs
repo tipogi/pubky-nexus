@@ -5,13 +5,12 @@
 
 use crate::events::translation::legacy_v0::read_blob;
 use crate::events::translation::social_v1::read_v1_file;
-use crate::events::EventProcessorError;
-use crate::homeserver::HomeserverClient;
+use crate::events::{parse_resource, EventProcessorError};
+use pubky_watcher::ResourceReader;
 
 use nexus_common::media::{file_folder, is_v1_file_id, FileVariant, V1_FILES_DIR};
 use nexus_common::models::user::UserIngestor;
 use nexus_common::models::{file::FileDetails, traits::Collection};
-use pubky::PubkyResource;
 use pubky_social_specs::{file_uri_builder, PubkyId};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,7 +35,7 @@ pub async fn sync_put(
     key: ResourceKey,
     files_path: &Path,
     ingestor: &UserIngestor,
-    client: &dyn HomeserverClient,
+    client: &dyn ResourceReader,
 ) -> Result<(), EventProcessorError> {
     debug!("Indexing file");
 
@@ -69,7 +68,7 @@ async fn ingest(
     file: &FileInput,
     files_path: &Path,
     ingestor: &UserIngestor,
-    client: &dyn HomeserverClient,
+    client: &dyn ResourceReader,
 ) -> Result<(), EventProcessorError> {
     // Refuse to download content hosted on a blacklisted HS
     ingestor
@@ -77,8 +76,8 @@ async fn ingest(
         .await
         .inspect_err(|e| warn!("Aborting file ingest: source {}: {e}", file.src))?;
 
-    let source: PubkyResource = file.src.parse()?;
-    let bytes = read_blob(client.get_blob(&source).await?, &file.blob.blob_id)?;
+    let source = parse_resource(&file.src)?;
+    let bytes = read_blob(client.read_blob(&source).await?, &file.blob.blob_id)?;
 
     let full_path = files_path.join(file_folder(user_id.as_ref(), file_id));
     write_main_variant(&full_path, &bytes)
@@ -114,7 +113,7 @@ pub async fn sync_put_v1(
     hash: &str,
     files_path: &Path,
     ingestor: &UserIngestor,
-    client: &dyn HomeserverClient,
+    client: &dyn ResourceReader,
 ) -> Result<(), EventProcessorError> {
     let folder = files_path.join(file_folder(key.owner_id.as_ref(), &key.resource_id));
     if fs::try_exists(main_path(&folder))
@@ -131,9 +130,11 @@ pub async fn sync_put_v1(
         .await
         .inspect_err(|e| warn!("Aborting v1 file ingest: owner {}: {e}", key.owner_id))?;
 
-    let source: PubkyResource =
-        file_uri_builder(key.owner_id.to_string(), key.resource_id.clone()).parse()?;
-    let bytes = read_v1_file(client.get_blob(&source).await?, hash).await?;
+    let source = parse_resource(&file_uri_builder(
+        key.owner_id.to_string(),
+        key.resource_id.clone(),
+    ))?;
+    let bytes = read_v1_file(client.read_blob(&source).await?, hash).await?;
 
     write_v1_main(files_path, &folder, &bytes)
         .await

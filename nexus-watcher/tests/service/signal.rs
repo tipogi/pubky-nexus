@@ -3,7 +3,7 @@ use crate::service::utils::{
     MockEventProcessorRunner,
 };
 use anyhow::Result;
-use nexus_watcher::service::TEventProcessorRunner;
+use nexus_watcher::service::Cycle;
 use std::time::Duration;
 use tokio::time::sleep;
 

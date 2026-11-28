@@ -2,23 +2,23 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use nexus_common::db::{exec_single_row, queries, PubkyClientError};
+use nexus_common::db::{exec_single_row, queries};
 use nexus_common::models::event::EventLine;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::user::{Epoch, UserDetails};
 use nexus_common::utils::test_utils::{default_ingestor_tests, random_pk, random_pubky_id};
 use nexus_common::WatcherConfig;
-use nexus_watcher::errors::EventProcessorError;
+use nexus_watcher::errors::{EventProcessorError, HsRequestError};
 use nexus_watcher::events::retry::{IndexKey, InitialBackoff, RetryScheduler, RetryStore};
 use nexus_watcher::events::{DefaultEventHandler, Event, EventHandler, ParseResult};
-use nexus_watcher::homeserver::HsErrorKind;
-use nexus_watcher::service::{HsEventProcessor, RunError, TEventProcessor};
+use nexus_watcher::service::{HsEventProcessor, Run, RunError};
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::traits::{HashId, TimestampId};
 use pubky_social_specs::legacy_v0::{
     blob_uri_builder, file_uri_builder, post_uri_builder, PubkyAppBlob, PubkyAppFile, PubkyAppUser,
 };
 use pubky_social_specs::PubkyId;
+use pubky_watcher::HsErrorKind;
 use tokio::sync::watch;
 
 use crate::event_processor::utils::default_moderation_tests;
@@ -108,12 +108,14 @@ fn build_processor_with_client(
         },
     ));
     let hs_id = PubkyId::try_from(TEST_HS_ID).expect("Valid test Pubky ID");
+    let client = Arc::new(client);
 
     Arc::new(HsEventProcessor {
         homeserver: Homeserver::new(hs_id),
         limit: 100,
         event_handler,
-        client: Arc::new(client),
+        client: client.clone(),
+        resolver: client,
         shutdown_rx,
         retry_scheduler,
         hs_mapping_cache: Default::default(),
@@ -152,6 +154,7 @@ async fn build_processor_at_cursor_with_client(
 ) -> Result<Arc<HsEventProcessor>> {
     let hs_id = random_pubky_id();
     let homeserver = Homeserver { id: hs_id, cursor };
+    let client = Arc::new(client);
     homeserver.put_to_index().await?;
 
     let retry_scheduler = Arc::new(RetryScheduler::new(
@@ -166,7 +169,8 @@ async fn build_processor_at_cursor_with_client(
         homeserver,
         limit: 100,
         event_handler,
-        client: Arc::new(client),
+        client: client.clone(),
+        resolver: client,
         shutdown_rx,
         retry_scheduler,
         hs_mapping_cache: Default::default(),
@@ -186,7 +190,8 @@ fn processor_with_client(
         homeserver,
         limit: 100,
         event_handler,
-        client,
+        client: client.clone(),
+        resolver: client,
         shutdown_rx: watch::channel(false).1,
         retry_scheduler: Arc::new(RetryScheduler::new(
             store,
@@ -1095,7 +1100,7 @@ async fn test_run_polls_and_fetches_through_the_client() -> Result<()> {
 }
 
 /// The handler [`DefaultEventHandler::from_config`] builds resolves users' homeservers
-/// through its client: a file whose source user the client resolves to a blacklisted
+/// through its resolver: a file whose source user the client resolves to a blacklisted
 /// homeserver is refused, without any network.
 #[tokio_shared_rt::test(shared)]
 async fn test_handler_from_config_resolves_homeservers_through_its_client() -> Result<()> {
@@ -1124,7 +1129,7 @@ async fn test_handler_from_config_resolves_homeservers_through_its_client() -> R
     config.stack.net.external_hs_pk_blacklist = vec![blacklisted_hs.clone()];
     let files = tempfile::TempDir::new()?;
     config.stack.files_path = files.path().to_path_buf();
-    let handler = DefaultEventHandler::from_config(&config, client);
+    let handler = DefaultEventHandler::from_config(&config, client.clone(), client);
 
     let ParseResult::Parsed(event) = Event::parse_event(&format!("PUT {file_uri}"))? else {
         panic!("the file event should parse");
@@ -1196,8 +1201,9 @@ async fn test_failed_poll_keeps_the_cursor() -> Result<()> {
     assert!(
         matches!(
             &err,
-            RunError::Internal(EventProcessorError::PubkyClientError(e))
-                if matches!(e.as_ref(), PubkyClientError::ServerError5xx { .. })
+            RunError::Internal(EventProcessorError::HsRequest(
+                HsRequestError::ServerError5xx { .. }
+            ))
         ),
         "{err:?}"
     );

@@ -1,15 +1,17 @@
-use super::{RunOutcome, TEventProcessor};
+use super::{event_span, handle_error, homeserver_public_key, Run, RunOutcome};
 use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
 use crate::events::{Event, EventHandler};
-use crate::homeserver::HomeserverClient;
 use nexus_common::db::kv::RedisError;
 use nexus_common::db::{fetch_row_from_graph, queries, GraphResult};
 use nexus_common::models::error::ModelError;
 use nexus_common::models::homeserver::Homeserver;
+use nexus_common::models::user::PkdnsHomeserverResolver;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
+use pubky::EventCursor;
 use pubky_social_specs::PubkyId;
+use pubky_watcher::{FeedBatch, FeedReader, HsErrorKind, HsOp, ProtocolViolation};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::watch::Receiver;
@@ -44,6 +46,15 @@ static STALLED_CURSOR_PRIMARY_HS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     global::meter(crate::METER_NAME)
         .u64_counter("watcher.primary_hs.cursor.stalled")
         .with_description("Primary HS batches whose cursor did not advance past the requested one")
+        .build()
+});
+
+/// Counter for events permanently rejected for exceeding a fetch size limit: a primary
+/// homeserver `/events/` body over the client's events cap.
+static REJECTED: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    global::meter(crate::METER_NAME)
+        .u64_counter("watcher.fetch.rejected")
+        .with_description("Event fetches rejected for exceeding a size limit")
         .build()
 });
 
@@ -112,47 +123,6 @@ impl HsMapping {
     }
 }
 
-/// A homeserver response, split into its event lines and the cursor closing the batch.
-///
-/// The homeserver sends the cursor line last, but that is positional convention
-/// rather than something we can rely on from an untrusted peer: the split is
-/// order-independent, and if a batch carries several cursor lines the last one
-/// wins, being the position the homeserver ends the batch at.
-struct EventBatch<'a> {
-    event_lines: Vec<&'a str>,
-    /// Raw, still unparsed value of the batch's cursor line, if it carried one.
-    cursor: Option<&'a str>,
-}
-
-impl<'a> EventBatch<'a> {
-    fn split(lines: &'a [String]) -> Self {
-        let mut event_lines = Vec::with_capacity(lines.len());
-        let mut cursor = None;
-
-        for line in lines {
-            match line.strip_prefix("cursor: ") {
-                Some(value) => cursor = Some(value),
-                None => event_lines.push(line.as_str()),
-            }
-        }
-
-        Self {
-            event_lines,
-            cursor,
-        }
-    }
-
-    /// Whether the batch carried anything other than its cursor line.
-    ///
-    /// Deliberately counts *every* non-cursor line, including ones that later
-    /// parse as skipped or unrecognized: those still legitimately advance the
-    /// cursor, so narrowing this to "lines that reached a handler" would let a
-    /// non-advancing cursor through and re-open the replay loop.
-    fn has_events(&self) -> bool {
-        !self.event_lines.is_empty()
-    }
-}
-
 /// Why a batch's closing cursor was not applied. Each variant has its own metric.
 enum CursorRejection {
     /// Unparseable, would rewind the stored cursor, or advances without events.
@@ -163,6 +133,36 @@ enum CursorRejection {
     Stalled,
 }
 
+impl CursorRejection {
+    /// The rejection, and the reason the warning gives, for a Protocol violation that
+    /// [`FeedBatch::closing_cursor`] found in a Batch whose cursor line is `raw_cursor`.
+    fn for_violation(violation: &ProtocolViolation, raw_cursor: Option<&str>) -> (Self, String) {
+        match (violation, raw_cursor) {
+            (ProtocolViolation::MissingCursor, _) => (
+                Self::Stalled,
+                "batch carried events but no cursor line to advance the checkpoint".to_string(),
+            ),
+            (ProtocolViolation::CursorNotAdvanced { requested, .. }, Some(raw_cursor)) => (
+                Self::Stalled,
+                format!(
+                    "batch carried events but cursor '{raw_cursor}' does not advance past the requested {requested}"
+                ),
+            ),
+            (ProtocolViolation::CursorMovedWithoutEvents { requested, .. }, Some(raw_cursor)) => (
+                Self::Invalid,
+                format!(
+                    "batch carried no events but cursor '{raw_cursor}' differs from the requested {requested}"
+                ),
+            ),
+            // Never reached: Nexus's own check rejects a cursor line that is no `u64` first.
+            (ProtocolViolation::MalformedCursor { .. }, _) => (Self::Invalid, violation.to_string()),
+            // Never reached: `closing_cursor` returns none of the other violations, and the two
+            // above only for a Batch with a cursor line.
+            _ => (Self::Invalid, violation.to_string()),
+        }
+    }
+}
+
 /// Event processor for the primary homeserver
 pub struct HsEventProcessor {
     /// The primary HS endpoint this processor fetches events from
@@ -171,7 +171,10 @@ pub struct HsEventProcessor {
     /// See [WatcherConfig::events_limit]
     pub limit: u16,
     pub event_handler: Arc<dyn EventHandler>,
-    pub client: Arc<dyn HomeserverClient>,
+    /// Client the homeserver's events are polled through
+    pub client: Arc<dyn FeedReader>,
+    /// PKDNS lookup for the homeserver of a user without a `HOSTED_BY` edge
+    pub resolver: Arc<dyn PkdnsHomeserverResolver>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Scheduler used to enqueue failed events onto the retry queue
@@ -188,21 +191,36 @@ pub struct HsEventProcessor {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for HsEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
-        &self.event_handler
-    }
-
+impl Run<Event, EventProcessorError> for HsEventProcessor {
     fn instance_name(&self) -> &'static str {
         "HsEventProcessor"
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
-        Some(&self.retry_scheduler)
+    fn hs_pubkey(&self) -> &str {
+        self.homeserver.id.as_ref()
     }
 
-    fn homeserver_id(&self) -> &PubkyId {
-        &self.homeserver.id
+    /// The handler stores the line with the key of the homeserver the event was read from.
+    async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
+        self.event_handler.handle(event, &self.homeserver.id).await
+    }
+
+    async fn handle_error(
+        &self,
+        event: &Event,
+        error: EventProcessorError,
+    ) -> Result<(), EventProcessorError> {
+        handle_error(
+            event,
+            error,
+            Some(&self.retry_scheduler),
+            &self.homeserver.id,
+        )
+        .await
+    }
+
+    fn event_span(&self, event: &Event) -> tracing::Span {
+        event_span(event)
     }
 
     /// Skips events from users that are not actively bound to this homeserver.
@@ -218,7 +236,7 @@ impl TEventProcessor for HsEventProcessor {
     /// - A stale edge to this homeserver (the user's published homeserver has
     ///   diverged): log a warning and skip until the resolver realigns it.
     /// - An edge to a different homeserver: log a warning and skip.
-    async fn should_process_event(&self, event: &Event) -> Result<bool, EventProcessorError> {
+    async fn should_handle_event(&self, event: &Event) -> Result<bool, EventProcessorError> {
         let user_id = event.target.user_id();
 
         match self.user_hs_mapping(user_id).await? {
@@ -292,7 +310,7 @@ impl HsEventProcessor {
         let Ok(user_pk) = user_id.to_public_key() else {
             return HsMapping::Unresolved;
         };
-        let published = match self.client.resolve_own_record(&user_pk).await {
+        let published = match self.resolver.resolve_own_record(&user_pk).await {
             Ok(record) => record.homeserver(),
             Err(e) => {
                 warn!(%user_id, error = %e, "PKDNS lookup failed; treating the user as publishing no homeserver");
@@ -318,15 +336,22 @@ impl HsEventProcessor {
     async fn poll_events(&self) -> Result<Vec<String>, EventProcessorError> {
         debug!(cursor = %self.homeserver.cursor, "Polling events");
 
-        Ok(self
+        let hs = homeserver_public_key(&self.homeserver.id, HsOp::ReadFeed)?;
+        let lines = self
             .client
-            .poll_events(&self.homeserver.id, self.homeserver.cursor, self.limit)
-            .await?)
+            .read_feed(&hs, self.homeserver.cursor, self.limit)
+            .await
+            .inspect_err(|e| {
+                if matches!(e.kind, HsErrorKind::TooLarge { .. }) {
+                    REJECTED.add(1, &[KeyValue::new("reason", "size_exceeded")]);
+                }
+            })?;
+        Ok(lines)
     }
 
     /// Processes a batch of event lines retrieved from the homeserver.
     ///
-    /// The batch's cursor is validated *before* any handler runs and persisted
+    /// The batch's cursor is checked *before* any handler runs and persisted
     /// only once the whole batch has been processed. A cursor the homeserver
     /// should not have sent — or failed to send at all — therefore costs
     /// nothing: the batch is skipped whole, the stored cursor stays put, and the
@@ -343,38 +368,18 @@ impl HsEventProcessor {
     /// - `lines`: A vector of strings representing event lines retrieved from the homeserver.
     #[tracing::instrument(name = "event_batch.process", skip_all, fields(batch.size = lines.len()))]
     pub async fn process_event_lines(&self, lines: Vec<String>) -> Result<(), EventProcessorError> {
-        let batch = EventBatch::split(&lines);
+        let batch = FeedBatch::split(&lines);
 
-        let next_cursor = match batch.cursor {
-            Some(raw_cursor) => {
-                match self
-                    .resolve_batch_cursor(raw_cursor, batch.has_events())
-                    .await?
-                {
-                    Some(homeserver) => Some(homeserver),
-                    // Rejected: skip the batch entirely. Running the handlers
-                    // would only queue up work the next poll has to repeat,
-                    // since the cursor stays where it is either way.
-                    None => return Ok(()),
-                }
-            }
+        // An idle answer: nothing to handle and no Cursor to store. `closing_cursor` would
+        // return the requested Cursor, and storing it would only add a Redis write.
+        if batch.cursor.is_none() && !batch.has_events() {
+            return Ok(());
+        }
 
-            // Events with no cursor line to close them leave the checkpoint
-            // exactly where a non-advancing cursor would, so the next poll
-            // re-fetches and re-processes this same batch — the same stall,
-            // reached by omission rather than by repetition. A homeserver
-            // sending events always sends the cursor that closes them, so this
-            // is a truncated or malformed response (error pages never get
-            // here: `poll_events` fails the run on a non-2xx).
-            None if batch.has_events() => {
-                self.reject_batch(
-                    &CursorRejection::Stalled,
-                    "batch carried events but no cursor line to advance the checkpoint",
-                );
-                return Ok(());
-            }
-
-            None => None,
+        // Rejected: skip the batch entirely. Running the handlers would only queue up work
+        // the next poll has to repeat, since the cursor stays where it is either way.
+        let Some(next_cursor) = self.resolve_batch_cursor(&batch).await? else {
+            return Ok(());
         };
 
         for line in &batch.event_lines {
@@ -385,78 +390,64 @@ impl HsEventProcessor {
                 return Ok(());
             }
 
-            self.process_event_line(line).await?;
+            self.handle_event_line(line).await?;
         }
 
-        if let Some(homeserver) = next_cursor {
-            homeserver.put_to_index().await?;
-        }
+        next_cursor.put_to_index().await?;
 
         Ok(())
     }
 
-    /// Resolves the cursor line closing a batch into the homeserver record to
-    /// persist once the batch has been processed.
+    /// Checks the Cursor closing `batch` and returns the [`Homeserver`] that stores it once
+    /// the Batch is handled.
     ///
-    /// `batch_had_events` reports whether the batch carried anything besides the
-    /// cursor line itself, which decides how strict the check is.
+    /// A cursor line first goes through Nexus's own check against the stored Cursor, which
+    /// refuses one that does not parse or would rewind it. Then the crate's Protocol check,
+    /// [`FeedBatch::closing_cursor`], compares the Batch with the Cursor it was read from:
+    /// `self.homeserver.cursor`, read from Redis when `self` was built and unchanged since,
+    /// as a Run reads one Batch.
     ///
-    /// Returns `Ok(None)` when the cursor must not be applied, so the caller
-    /// skips the batch. Redis failures propagate instead of being charged to the
-    /// homeserver as bad input, so the run is recorded as failed and retried on
-    /// the next scheduled execution.
+    /// Returns `Ok(None)` when the Cursor must not be stored, so the caller skips the Batch.
+    /// Redis failures propagate instead of being charged to the Homeserver as bad input, so
+    /// the Run is recorded as failed and retried on the next scheduled execution.
     async fn resolve_batch_cursor(
         &self,
-        raw_cursor: &str,
-        batch_had_events: bool,
+        batch: &FeedBatch<'_>,
     ) -> Result<Option<Homeserver>, EventProcessorError> {
-        info!("Received cursor for the next request: {raw_cursor}");
+        if let Some(raw_cursor) = batch.cursor {
+            info!("Received cursor for the next request: {raw_cursor}");
 
-        let homeserver = match Homeserver::try_from_cursor(self.homeserver.id.clone(), raw_cursor)
-            .await
-        {
-            Ok(homeserver) => homeserver,
-            // Only the monotonicity guard raises `InvalidInput`; every other
-            // Redis error is our own infrastructure failing, not bad HS input,
-            // and must fail the run rather than silently skip a batch.
-            Err(ModelError::KvOperationFailed(e)) if !matches!(e, RedisError::InvalidInput(_)) => {
-                return Err(ModelError::KvOperationFailed(e).into());
+            match Homeserver::try_from_cursor(self.homeserver.id.clone(), raw_cursor).await {
+                // The Cursor to store is the one the Protocol check below returns.
+                Ok(_) => {}
+                // Only the monotonicity guard raises `InvalidInput`; every other
+                // Redis error is our own infrastructure failing, not bad HS input,
+                // and must fail the run rather than silently skip a batch.
+                Err(ModelError::KvOperationFailed(e))
+                    if !matches!(e, RedisError::InvalidInput(_)) =>
+                {
+                    return Err(ModelError::KvOperationFailed(e).into());
+                }
+                // Unparseable, or it would rewind the stored cursor.
+                Err(e) => {
+                    let reason = format!("cursor '{raw_cursor}' cannot be applied: {e}");
+                    self.reject_batch(&CursorRejection::Invalid, &reason);
+                    return Ok(None);
+                }
             }
-            // Unparseable, or it would rewind the stored cursor.
-            Err(e) => {
-                let reason = format!("cursor '{raw_cursor}' cannot be applied: {e}");
-                self.reject_batch(&CursorRejection::Invalid, &reason);
-                return Ok(None);
-            }
-        };
-
-        // A batch carrying events has to move the cursor strictly forward. The
-        // fetch is cursor-exclusive, so those events sit above the cursor the
-        // batch was requested with (`self.homeserver.cursor`, read from Redis
-        // when this processor was built and unchanged since — one poll per run).
-        // A cursor merely holding at that position would make the next poll
-        // re-request and re-process this exact batch, indefinitely.
-        if batch_had_events && homeserver.cursor <= self.homeserver.cursor {
-            let reason = format!(
-                "batch carried events but cursor '{raw_cursor}' does not advance past the requested {}",
-                self.homeserver.cursor
-            );
-            self.reject_batch(&CursorRejection::Stalled, &reason);
-            return Ok(None);
         }
 
-        // An idle response cannot prove that any intervening events were
-        // delivered, so it may repeat the requested cursor but never advance it.
-        if !batch_had_events && homeserver.cursor != self.homeserver.cursor {
-            let reason = format!(
-                "batch carried no events but cursor '{raw_cursor}' differs from the requested {}",
-                self.homeserver.cursor
-            );
-            self.reject_batch(&CursorRejection::Invalid, &reason);
-            return Ok(None);
+        match batch.closing_cursor(EventCursor::new(self.homeserver.cursor)) {
+            Ok(cursor) => Ok(Some(Homeserver {
+                id: self.homeserver.id.clone(),
+                cursor: cursor.id(),
+            })),
+            Err(violation) => {
+                let (rejection, reason) = CursorRejection::for_violation(&violation, batch.cursor);
+                self.reject_batch(&rejection, &reason);
+                Ok(None)
+            }
         }
-
-        Ok(Some(homeserver))
     }
 
     /// Records a skipped batch on the metric matching `rejection`, and warns.
@@ -473,70 +464,7 @@ impl HsEventProcessor {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventBatch, HsMapping};
-
-    fn lines(raw: &[&str]) -> Vec<String> {
-        raw.iter().map(|l| l.to_string()).collect()
-    }
-
-    // --- EventBatch::split ---
-
-    /// The usual shape: events followed by the cursor that closes the batch.
-    #[test]
-    fn splits_events_from_the_trailing_cursor() {
-        let lines = lines(&["PUT pubky://a/pub/x", "DEL pubky://b/pub/y", "cursor: 42"]);
-        let batch = EventBatch::split(&lines);
-
-        assert_eq!(
-            batch.event_lines,
-            vec!["PUT pubky://a/pub/x", "DEL pubky://b/pub/y"]
-        );
-        assert_eq!(batch.cursor, Some("42"));
-        assert!(batch.has_events());
-    }
-
-    /// An idle poll: a cursor and nothing else, which must not read as "had events".
-    #[test]
-    fn cursor_only_batch_has_no_events() {
-        let lines = lines(&["cursor: 42"]);
-        let batch = EventBatch::split(&lines);
-
-        assert!(batch.event_lines.is_empty());
-        assert_eq!(batch.cursor, Some("42"));
-        assert!(!batch.has_events());
-    }
-
-    /// The cursor is found wherever it sits, not only in last position.
-    #[test]
-    fn cursor_is_found_out_of_position() {
-        let lines = lines(&["cursor: 42", "PUT pubky://a/pub/x"]);
-        let batch = EventBatch::split(&lines);
-
-        assert_eq!(batch.event_lines, vec!["PUT pubky://a/pub/x"]);
-        assert_eq!(batch.cursor, Some("42"));
-    }
-
-    /// Several cursor lines: the last one wins, being where the batch ends.
-    #[test]
-    fn last_cursor_line_wins() {
-        let lines = lines(&["cursor: 41", "PUT pubky://a/pub/x", "cursor: 42"]);
-        let batch = EventBatch::split(&lines);
-
-        assert_eq!(batch.event_lines, vec!["PUT pubky://a/pub/x"]);
-        assert_eq!(batch.cursor, Some("42"));
-    }
-
-    /// A batch with no cursor line at all, which the caller rejects as stalled
-    /// when it carries events: there is nothing to move the checkpoint with.
-    #[test]
-    fn batch_without_cursor_line() {
-        let lines = lines(&["PUT pubky://a/pub/x"]);
-        let batch = EventBatch::split(&lines);
-
-        assert_eq!(batch.event_lines, vec!["PUT pubky://a/pub/x"]);
-        assert_eq!(batch.cursor, None);
-        assert!(batch.has_events());
-    }
+    use super::HsMapping;
 
     #[test]
     fn a_stored_mapping_is_current_only_for_its_own_homeserver() {
@@ -594,17 +522,5 @@ mod tests {
                 "{mapping:?}"
             );
         }
-    }
-
-    /// Lines that will later parse as skipped or unrecognized still count as
-    /// events: they legitimately advance the cursor, so a batch made only of
-    /// them must not be treated as an idle poll.
-    #[test]
-    fn unrecognized_lines_count_as_events() {
-        let lines = lines(&["garbage", "cursor: 42"]);
-        let batch = EventBatch::split(&lines);
-
-        assert_eq!(batch.event_lines, vec!["garbage"]);
-        assert!(batch.has_events());
     }
 }

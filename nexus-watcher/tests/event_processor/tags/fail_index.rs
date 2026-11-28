@@ -3,7 +3,7 @@ use crate::event_processor::utils::watcher::{
 };
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use nexus_watcher::service::TEventProcessorRunner;
+use nexus_watcher::service::Cycle;
 use pubky::Keypair;
 use pubky_social_specs::legacy_v0::{
     post_uri_builder, traits::HashId, PubkyAppPost, PubkyAppTag, PubkyAppUser,
@@ -66,7 +66,7 @@ async fn test_homeserver_tag_cannot_add_while_index() -> Result<()> {
 
     // Sync all pending events so shadow_user is now in the graph
     test.event_processor_runner
-        .build(test.homeserver_id.as_ref())
+        .build_run(test.homeserver_id.as_ref())
         .await
         .map_err(|e| anyhow!(e))?
         .run()

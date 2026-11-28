@@ -10,129 +10,7 @@ pub use key_based_hs_backoff::HomeserverBackoff;
 pub use key_based_user_backoff::UserNotFoundBackoff;
 pub use key_based_user_resume::UserResumePoints;
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use nexus_common::types::DynError;
-use tokio::sync::watch::Receiver;
-use tracing::{debug, error, info};
-
-use crate::service::{
-    indexer::{RunError, TEventProcessor},
-    stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats},
-};
-
-pub fn status_from_run_result(result: Result<(), RunError>) -> ProcessorRunStatus {
-    match result {
-        Ok(_) => ProcessorRunStatus::Ok,
-        Err(RunError::Internal(_)) => ProcessorRunStatus::Error,
-        Err(RunError::Panicked) => ProcessorRunStatus::Panic,
-        Err(RunError::BudgetSpent) => ProcessorRunStatus::BudgetSpent,
-    }
-}
-
-/// The orchestrator that helps build and run event processors in the Watcher service.
-///
-/// # Implementation Notes
-/// - The `build` method should create and return a fully configured event processor ready for immediate use
-/// - Implementors should ensure that created processors are properly isolated and don't share mutable state unless explicitly intended
-#[async_trait::async_trait]
-pub trait TEventProcessorRunner: Send + Sync {
-    /// Returns the shutdown signal receiver
-    fn shutdown_rx(&self) -> Receiver<bool>;
-
-    /// Creates and returns a new event processor instance for the specified homeserver.
-    ///
-    /// # Parameters
-    /// * `hs_id` - The homeserver PubkyId. Represents the homeserver this event processor will
-    ///   fetch and process events from.
-    ///
-    /// # Returns
-    /// A reference to the event processor instance, ready to be executed with its `run` method.
-    ///
-    /// # Errors
-    /// Returns an error if the event processor couldn't be built
-    async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError>;
-
-    /// Pre-processing step before the main run loop.
-    ///
-    /// Determines the list of target HS IDs to process in this run cycle, ordered by priority.
-    ///
-    /// The list is not truncated here: [`Self::poll_limit`] is applied in [`Self::run`], after
-    /// the HS IDs in backoff are skipped.
-    async fn pre_run(&self) -> Result<Vec<String>, DynError>;
-
-    /// Maximum number of HS IDs built and run per cycle. HS IDs skipped by backoff don't count.
-    ///
-    /// No limit by default. Runners that cap the targets per run should overwrite this.
-    fn poll_limit(&self) -> usize {
-        usize::MAX
-    }
-
-    /// Post-processing of the run results.
-    ///
-    /// No-op default implementation. Callers that perform post-processing should overwrite this.
-    async fn post_run(&self, stats: RunAllProcessorsStats) -> ProcessedStats {
-        ProcessedStats(stats)
-    }
-
-    /// Main run loop: builds and runs event processors for the relevant targets.
-    ///
-    /// # Returns
-    /// Statistics about the event processor run results, summarized as [`ProcessedStats`]
-    async fn run(&self) -> Result<ProcessedStats, DynError> {
-        let hs_ids = self.pre_run().await?;
-        let poll_limit = self.poll_limit();
-        let mut polled = 0;
-        let mut run_stats = RunAllProcessorsStats::default();
-
-        for hs_id in hs_ids {
-            if polled >= poll_limit {
-                break;
-            }
-
-            if *self.shutdown_rx().borrow() {
-                info!(homeserver = %hs_id, "Shutdown detected; exiting run loop");
-                break;
-            }
-
-            if self.backoff_hs_should_skip(&hs_id).await {
-                debug!(homeserver = %hs_id, "Skipping homeserver in backoff");
-                run_stats.add_run_result(hs_id, Duration::ZERO, ProcessorRunStatus::Skipped);
-                continue;
-            }
-
-            polled += 1;
-            let t0 = Instant::now();
-            let status = match self.build(&hs_id).await {
-                Ok(event_processor) => status_from_run_result(event_processor.run().await),
-                Err(e) => {
-                    error!(homeserver = %hs_id, error = %e, "Failed to build event processor");
-                    ProcessorRunStatus::FailedToBuild
-                }
-            };
-            let duration = t0.elapsed();
-
-            self.backoff_hs_record_result(&hs_id, &status).await;
-            run_stats.add_run_result(hs_id, duration, status);
-        }
-
-        let processed_stats = self.post_run(run_stats).await;
-        Ok(processed_stats)
-    }
-
-    /// Called before processing a HS, to check if backoff mechanism indicates it should be skipped.
-    ///
-    /// No-op default implementation. Runners that use backoff should overwrite as needed.
-    async fn backoff_hs_should_skip(&self, _hs_id: &str) -> bool {
-        false
-    }
-
-    /// Called after a HS is processed (build + run), to update its backoff status.
-    ///
-    /// No-op default implementation. Runners that use backoff should overwrite as needed.
-    async fn backoff_hs_record_result(&self, _hs_id: &str, _status: &ProcessorRunStatus) {}
-}
+pub use pubky_watcher::{turn_status_from_run, Cycle};
 
 #[cfg(test)]
 mod tests {
@@ -140,10 +18,16 @@ mod tests {
     use super::*;
     use crate::errors::EventProcessorError;
     use crate::events::{Event, EventHandler};
-    use crate::service::indexer::RunOutcome;
+    use crate::service::indexer::{NexusEventProcessor, RunError};
+    use crate::service::indexer::{Run, RunOutcome};
+    use crate::service::stats::{CycleReport, TurnStatus};
+    use nexus_common::types::DynError;
     use nexus_common::utils::test_utils::random_pubky_id;
     use pubky_social_specs::PubkyId;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::watch::Receiver;
     use tokio::sync::Mutex;
 
     struct NoopHandler;
@@ -189,17 +73,17 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TEventProcessor for SlowProcessor {
-        fn event_handler(&self) -> &Arc<dyn EventHandler> {
-            &self.handler
+    impl Run<Event, EventProcessorError> for SlowProcessor {
+        async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
+            self.handler.handle(event, &self.homeserver_id).await
         }
 
         fn instance_name(&self) -> &'static str {
             "SlowProcessor"
         }
 
-        fn homeserver_id(&self) -> &PubkyId {
-            &self.homeserver_id
+        fn hs_pubkey(&self) -> &str {
+            self.homeserver_id.as_ref()
         }
 
         fn slow_run_threshold(&self) -> Option<Duration> {
@@ -247,26 +131,28 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TEventProcessorRunner for RecordingRunner {
+    impl Cycle<Event, EventProcessorError> for RecordingRunner {
+        type Error = DynError;
+
         fn shutdown_rx(&self) -> Receiver<bool> {
             self.shutdown_rx.clone()
         }
 
-        async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
+        async fn build_run(&self, hs_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
             self.built.lock().await.push(hs_id.to_string());
             let processor = self.processor.clone().ok_or("not built in this test")?;
             Ok(processor)
         }
 
-        async fn pre_run(&self) -> Result<Vec<String>, DynError> {
+        async fn homeservers(&self) -> Result<Vec<String>, DynError> {
             Ok(self.hs_ids.clone())
         }
 
-        fn poll_limit(&self) -> usize {
+        fn run_limit(&self) -> usize {
             self.poll_limit
         }
 
-        async fn backoff_hs_should_skip(&self, hs_id: &str) -> bool {
+        async fn should_skip(&self, hs_id: &str) -> bool {
             self.backoff.should_skip(hs_id)
         }
     }
@@ -286,7 +172,7 @@ mod tests {
         runner.backoff.record_failure("hs1");
         runner.backoff.record_failure("hs2");
 
-        let ProcessedStats(stats) = runner.run().await.unwrap();
+        let CycleReport(stats) = runner.run().await.unwrap();
 
         // The two highest-priority HSs are in backoff, so the next two take their slots
         assert_eq!(*runner.built.lock().await, ["hs3", "hs4"]);
@@ -301,8 +187,8 @@ mod tests {
         let runner = RecordingRunner::new(&["hs1"], usize::MAX)
             .with_processors_taking(Duration::from_millis(300), Duration::from_millis(50));
 
-        let ProcessedStats(first) = runner.run().await.unwrap();
-        let ProcessedStats(second) = runner.run().await.unwrap();
+        let CycleReport(first) = runner.run().await.unwrap();
+        let CycleReport(second) = runner.run().await.unwrap();
 
         let processor = runner.processor.as_ref().expect("set above");
         assert_eq!(processor.peak(), 1, "two runs of hs1 were going at once");
@@ -313,32 +199,6 @@ mod tests {
         );
     }
 
-    /// The warning is the only sign of a run that never returns, so it repeats after every
-    /// threshold, with how long the run has been going.
-    #[tokio::test(start_paused = true)]
-    #[tracing_test::traced_test]
-    async fn a_slow_run_is_logged_at_every_threshold() {
-        let processor = Arc::new(SlowProcessor::new(
-            Duration::from_secs(250),
-            Duration::from_secs(60),
-        ));
-
-        processor.run().await.unwrap();
-
-        logs_assert(|lines| {
-            for secs in [180, 240] {
-                let field = format!("running_for_secs={secs}");
-                if !lines
-                    .iter()
-                    .any(|line| line.contains(" WARN ") && line.contains(&field))
-                {
-                    return Err(format!("no WARN line with {field}"));
-                }
-            }
-            Ok(())
-        });
-    }
-
     /// Processor whose every run stops at its budget.
     struct BudgetProcessor {
         handler: Arc<dyn EventHandler>,
@@ -346,17 +206,17 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl TEventProcessor for BudgetProcessor {
-        fn event_handler(&self) -> &Arc<dyn EventHandler> {
-            &self.handler
+    impl Run<Event, EventProcessorError> for BudgetProcessor {
+        async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
+            self.handler.handle(event, &self.homeserver_id).await
         }
 
         fn instance_name(&self) -> &'static str {
             "BudgetProcessor"
         }
 
-        fn homeserver_id(&self) -> &PubkyId {
-            &self.homeserver_id
+        fn hs_pubkey(&self) -> &str {
+            self.homeserver_id.as_ref()
         }
 
         async fn run_internal(self: Arc<Self>) -> Result<RunOutcome, EventProcessorError> {
@@ -375,10 +235,7 @@ mod tests {
         let result = processor.run().await;
 
         assert!(matches!(result, Err(RunError::BudgetSpent)), "{result:?}");
-        assert_eq!(
-            status_from_run_result(result),
-            ProcessorRunStatus::BudgetSpent
-        );
+        assert_eq!(turn_status_from_run(result), TurnStatus::BudgetSpent);
     }
 
     /// Pins a known limitation: the tick waits for every run, so a run that never returns

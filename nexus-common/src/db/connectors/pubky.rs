@@ -1,151 +1,30 @@
-use pubky::errors::{AuthError, BuildError, PkarrError, RequestError};
-use pubky::{CredentialRefreshError, Pubky, PubkyHttpClient, StatusCode};
-use std::{sync::Arc, time::Duration};
-use thiserror::Error;
-use tokio::sync::OnceCell;
+use pubky_watcher::{ClientError, WatcherClient};
 use tracing::debug;
 
-static PUBKY_SINGLETON: OnceCell<Arc<Pubky>> = OnceCell::const_new();
+use crate::config::NetConfig;
 
-pub type PubkyClientResult<T> = std::result::Result<T, PubkyClientError>;
+/// Builds the Pubky client the `[stack.net]` settings describe: for the testnet relay on
+/// [`NetConfig::testnet_host`] when [`NetConfig::testnet`] is set, otherwise for mainnet, with
+/// every HTTP request, its response body included, bounded by
+/// [`NetConfig::pubky_http_request_timeout_secs`].
+///
+/// `pubky-watcher` builds the client and makes every call on it; no Nexus crate drives the
+/// Pubky SDK client itself. Cloning the client shares the SDK client underneath.
+pub fn build_pubky_client(net: &NetConfig) -> Result<WatcherClient, ClientError> {
+    let testnet_host = net.pubky_client_testnet_host();
+    let http_request_timeout = net.pubky_client_http_request_timeout();
 
-#[derive(Debug, Error)]
-pub enum PubkyClientError {
-    #[error("PubkyClient not initialized")]
-    NotInitialized,
+    let mode = testnet_host
+        .map(|host| format!("testnet with host '{host}'"))
+        .unwrap_or_else(|| "mainnet".to_string());
+    debug!(
+        ?http_request_timeout,
+        "Building the Pubky client in {mode} mode"
+    );
 
-    #[error("404: {message}")]
-    NotFound404 { message: String },
-
-    #[error("429: {message}")]
-    TooManyRequests429 { message: String },
-
-    #[error("Server error (5xx): {message}")]
-    ServerError5xx { message: String },
-
-    /// A 4xx other than 404, 408 and 429: the server refused this request, so a retry
-    /// gets the same answer.
-    #[error("Request rejected ({status}): {message}")]
-    RequestRejected { status: u16, message: String },
-
-    #[error("Request failed: {message}")]
-    RequestFailed { message: String },
-
-    #[error("Pkarr failed: {0}")]
-    PkarrFailed(#[from] PkarrError),
-
-    #[error("Authentication failed: {0}")]
-    AuthenticationFailed(#[from] AuthError),
-
-    /// The SDK failed to refresh a grant credential. Only a signed-in client has one,
-    /// and Nexus signs in only in tests, so a retry would not help.
-    #[error("Credential refresh failed: {0}")]
-    CredentialRefreshFailed(#[from] CredentialRefreshError),
-
-    #[error("Build failed: {0}")]
-    BuildFailed(#[from] BuildError),
-
-    #[error("Parse failed: {0}")]
-    ParseFailed(#[from] url::ParseError),
-}
-
-impl From<pubky::Error> for PubkyClientError {
-    fn from(err: pubky::Error) -> Self {
-        match err {
-            pubky::Error::Request(RequestError::Server { status, message }) => match status {
-                StatusCode::NOT_FOUND => Self::NotFound404 { message },
-                StatusCode::TOO_MANY_REQUESTS => Self::TooManyRequests429 { message },
-                s if s.is_server_error() => Self::ServerError5xx { message },
-                s if s.is_client_error() && s != StatusCode::REQUEST_TIMEOUT => {
-                    Self::RequestRejected {
-                        status: s.as_u16(),
-                        message,
-                    }
-                }
-                _ => Self::RequestFailed { message },
-            },
-            pubky::Error::Request(RequestError::Transport(e)) => Self::RequestFailed {
-                message: e.to_string(),
-            },
-            pubky::Error::Request(
-                RequestError::Validation { message } | RequestError::DecodeJson { message },
-            ) => Self::RequestFailed { message },
-
-            pubky::Error::Pkarr(e) => e.into(),
-            pubky::Error::Authentication(e) => e.into(),
-            pubky::Error::CredentialRefresh(e) => e.into(),
-            pubky::Error::Build(e) => e.into(),
-            pubky::Error::Parse(e) => e.into(),
-        }
+    let mut builder = WatcherClient::builder().request_timeout(http_request_timeout);
+    if let Some(host) = testnet_host {
+        builder = builder.testnet(host);
     }
-}
-
-pub struct PubkyConnector;
-
-impl PubkyConnector {
-    /// Initializes the `Pubky` singleton.
-    ///
-    /// - For mainnet, pass `None`.
-    /// - For testnet, pass `Some(hostname)` (e.g., "localhost" or "homeserver").
-    /// - `http_request_timeout` bounds every Pubky HTTP request, including response-body reads.
-    pub async fn initialise(
-        testnet_host: Option<&str>,
-        http_request_timeout: Duration,
-    ) -> PubkyClientResult<()> {
-        PUBKY_SINGLETON
-            .get_or_try_init(|| async {
-                let mode = testnet_host
-                    .map(|host| format!("testnet with host '{host}'"))
-                    .unwrap_or_else(|| "mainnet".to_string());
-                debug!(
-                    ?http_request_timeout,
-                    "Initialising Pubky singleton in {mode} mode"
-                );
-
-                // TODO: set pkarr's `minimum_ttl` / `maximum_ttl` and its DHT and relay request
-                // timeouts explicitly, as config values; `request_timeout` bounds only the HTTP
-                // client, not pkarr.
-                let mut client_builder = PubkyHttpClient::builder();
-                client_builder.request_timeout(http_request_timeout);
-
-                if let Some(host) = testnet_host {
-                    client_builder
-                        .testnet_with_host(host)
-                        // Force pkarr/mainline DHT to bind an ephemeral local port instead of default behavior
-                        // We do this to prevent the client DHT from competing with `StaticTestnet` for port 6881
-                        .pkarr(|p| {
-                            p.dht(|c| {
-                                c.port = Some(0);
-                                c
-                            })
-                        });
-                }
-
-                let client = client_builder
-                    .build()
-                    .map_err(|e| PubkyClientError::from(pubky::Error::from(e)))?;
-                Ok(Arc::new(Pubky::with_client(client)))
-            })
-            .await
-            .map(|_| ())
-    }
-    /// Retrieves the instance of `Pubky`
-    pub fn get() -> PubkyClientResult<Arc<Pubky>> {
-        PUBKY_SINGLETON
-            .get()
-            .cloned()
-            .ok_or(PubkyClientError::NotInitialized)
-    }
-
-    /// Initializes `PUBKY_SINGLETON` with a provided `Pubky` instance.
-    ///
-    /// # Usage:
-    /// - This function is primarily intended for **watcher tests** where a controlled `Pubky` instance
-    ///   needs to be injected instead of relying on environment-based initialization
-    pub async fn init_from(sdk: Pubky) -> PubkyClientResult<()> {
-        PUBKY_SINGLETON
-            .get_or_try_init(|| async { Ok(Arc::new(sdk)) })
-            .await
-            .map(|_| ())
-    }
+    builder.build()
 }

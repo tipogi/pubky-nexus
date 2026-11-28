@@ -5,11 +5,11 @@ use super::HsErrorKind;
 /// Max bytes to read from an error response body.
 pub(crate) const MAX_ERROR_BODY: usize = 4 * 1024;
 
-/// Max bytes for a JSON resource descriptor (user, post, tag, file meta, etc).
+/// Max bytes for a JSON Resource (a user, a post, a tag, a file's metadata, etc).
 pub(crate) const MAX_RESOURCE_SIZE: usize = 2 * 1024 * 1024;
 
-/// Max bytes for a homeserver `/events` response body.
-/// Worst case: 1 000 events × 4 160 bytes/line ≈ 4 MiB; 5 MiB gives headroom.
+/// Max bytes for the body of an Events feed's Batch (`/events/`).
+/// Worst case: 1 000 Event lines × 4 160 bytes/line ≈ 4 MiB; 5 MiB gives headroom.
 pub(crate) const MAX_EVENTS_BODY: usize = 5 * 1024 * 1024;
 
 /// Truncates a byte slice to `max` bytes for safe embedding in error messages.

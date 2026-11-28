@@ -2,13 +2,12 @@ use crate::event_processor::utils::default_moderation_tests;
 use anyhow::{anyhow, Error, Result};
 use base32::{encode, Alphabet};
 use chrono::Utc;
-use nexus_common::db::{PubkyConnector, RedisOps};
+use nexus_common::db::RedisOps;
 use nexus_common::models::file::FileDetails;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::models::post::PostStream;
 use nexus_common::models::traits::Collection;
-use nexus_common::models::user::USER_SOCIAL_GRAPH_KEY_PARTS;
-use nexus_common::utils::test_utils::default_ingestor_tests;
+use nexus_common::models::user::{UserIngestor, USER_SOCIAL_GRAPH_KEY_PARTS};
 use nexus_common::WatcherConfig;
 use nexus_common::{StackConfig, StackManager};
 use nexus_watcher::errors::EventProcessorError;
@@ -18,10 +17,9 @@ use nexus_watcher::events::retry::{
 };
 use nexus_watcher::events::{DefaultEventHandler, EventHandler};
 use nexus_watcher::events::{Event, ParseResult};
-use nexus_watcher::homeserver::{HomeserverClient, PubkyHomeserverClient};
+use nexus_watcher::service::Cycle;
 use nexus_watcher::service::HsEventProcessorRunner;
 use nexus_watcher::service::KeyBasedEventProcessorRunner;
-use nexus_watcher::service::TEventProcessorRunner;
 use pubky::ClientId;
 use pubky::Keypair;
 use pubky::PublicKey;
@@ -37,6 +35,7 @@ use pubky_social_specs::{
     PubkyId, PubkySocialFollow, PubkySocialPost, PubkySocialTag, PubkySocialUser, Root,
 };
 use pubky_testnet::Testnet;
+use pubky_watcher::WatcherClient;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,6 +72,9 @@ pub struct WatcherTest {
     pub homeserver_id: PubkyId,
     /// The homeserver's admin server, which serves the WebDAV used by [`Self::put_as_admin`]
     pub admin_socket: SocketAddr,
+    /// The Pubky client the watcher under test uses, over the testnet's SDK client. The
+    /// test's own writes go through its SDK client too.
+    pub client: Arc<WatcherClient>,
     /// The event processor runner
     pub event_processor_runner: HsEventProcessorRunner,
     /// Whether to ensure event processing is complete
@@ -102,22 +104,13 @@ impl WatcherTest {
     fn create_test_event_processor_runner(
         primary_homeserver: PubkyId,
         files_path: PathBuf,
-        max_file_size: u64,
+        client: Arc<WatcherClient>,
     ) -> HsEventProcessorRunner {
-        let pubky = PubkyConnector::get().expect("PubkyConnector is initialised by setup");
-        // Through `from_config`, as the watcher builds it, so the blob cap it reads is the one
-        // the oversized-file tests set.
-        let config = WatcherConfig {
-            max_file_size,
-            ..WatcherConfig::default()
-        };
-        let client: Arc<dyn HomeserverClient> =
-            Arc::new(PubkyHomeserverClient::from_config(pubky, &config));
         // One retry queue: the scheduler enqueues to it and the handler's gate reads it
         let store: Arc<dyn RetryStore> = Arc::new(RedisRetryStore::new());
         let event_handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::new(
             default_moderation_tests(),
-            default_ingestor_tests(),
+            Arc::new(UserIngestor::new([], client.clone())),
             client.clone(),
             files_path,
             store.clone(),
@@ -136,7 +129,8 @@ impl WatcherTest {
         HsEventProcessorRunner {
             limit: 1000,
             event_handler,
-            client,
+            client: client.clone(),
+            resolver: client,
             shutdown_rx,
             primary_homeserver,
             retry_scheduler,
@@ -150,7 +144,7 @@ impl WatcherTest {
     /// 2. Initializes database connectors for Neo4j and Redis.
     /// 3. Sets up the global DHT test network for the watcher (ephemeral testnet).
     /// 4. Creates and starts a test homeserver instance with a random public key.
-    /// 5. Initializes the PubkyConnector with the test homeserver client.
+    /// 5. Builds the watcher's Pubky client over the test homeserver's SDK client.
     /// 6. Creates and configures the event processor with the test homeserver URL.
     ///
     /// # Returns
@@ -180,26 +174,25 @@ impl WatcherTest {
             .await
             .unwrap();
 
-        // Initialize the PubkyConnector with the test homeserver client
-        let sdk = testnet.sdk().unwrap();
-        match PubkyConnector::init_from(sdk).await {
-            Ok(_) => debug!("WatcherTest: PubkyConnector initialised"),
-            Err(e) => panic!("WatcherTest: PubkyConnector initialization failed: {}", e),
-        }
-
+        // The watcher's client, over the test homeserver's SDK client, with the blob cap the
+        // oversized-file tests set
         let max_file_size = max_file_size.unwrap_or(nexus_common::DEFAULT_MAX_FILE_SIZE);
+        let client =
+            Arc::new(WatcherClient::from_pubky(testnet.sdk()?).with_max_file_size(max_file_size));
+        debug!("WatcherTest: Pubky client built");
 
         // Initialize the test-scoped EventProcessorRunner; mirrors the standard processor behavior
         let event_processor_runner = Self::create_test_event_processor_runner(
             homeserver_id.clone(),
             files_path,
-            max_file_size,
+            client.clone(),
         );
 
         Ok(Self {
             testnet,
             homeserver_id,
             admin_socket,
+            client,
             event_processor_runner,
             ensure_event_processing: true,
             temp_dir,
@@ -216,7 +209,7 @@ impl WatcherTest {
     pub async fn ensure_event_processing_complete(&mut self) -> Result<()> {
         if self.ensure_event_processing {
             self.event_processor_runner
-                .build(self.homeserver_id.as_ref())
+                .build_run(self.homeserver_id.as_ref())
                 .await
                 .map_err(|e| anyhow!(e))?
                 .run()
@@ -232,13 +225,13 @@ impl WatcherTest {
     pub async fn process_external_homeserver(&self, homeserver_id: &PubkyId) -> Result<()> {
         let runner = KeyBasedEventProcessorRunner::new(
             &WatcherConfig::default(),
-            self.event_processor_runner.client.clone(),
+            self.client.clone(),
             self.event_processor_runner.event_handler.clone(),
             self.event_processor_runner.retry_scheduler.clone(),
             self.event_processor_runner.shutdown_rx.clone(),
         );
         runner
-            .build(homeserver_id.as_ref())
+            .build_run(homeserver_id.as_ref())
             .await
             .map_err(|e| anyhow!(e))?
             .run()
@@ -250,7 +243,7 @@ impl WatcherTest {
     /// Sends a PUT request to the homeserver with the provided object of data.
     ///
     /// This function performs the following steps:
-    /// 1. Retrieves the Pubky client from the PubkyConnector.
+    /// 1. Takes the SDK client of the test's Pubky client.
     /// 2. Sends the object data to the specified homeserver URI using a PUT request.
     /// 3. Ensures that all event processing is complete after the PUT operation.
     ///
@@ -266,7 +259,7 @@ impl WatcherTest {
     where
         T: serde::Serialize,
     {
-        let pubky = PubkyConnector::get()?;
+        let pubky = self.client.sdk();
 
         let signer = pubky.signer(user_keypair.clone());
         let session = signer.signin(test_client_id()).await?;
@@ -308,7 +301,7 @@ impl WatcherTest {
     /// Sends a DELETE request to the homeserver to remove content.
     ///
     /// This function performs the following steps:
-    /// 1. Retrieves the Pubky client from the PubkyConnector.
+    /// 1. Takes the SDK client of the test's Pubky client.
     /// 2. Sends a DELETE request to the specified homeserver URI.
     /// 3. Ensures that all event processing is complete after the DELETE operation.
     ///
@@ -316,7 +309,7 @@ impl WatcherTest {
     /// - `hs_path`: The homeserver path to the file to be deleted.
     ///
     pub async fn del(&mut self, user_keypair: &Keypair, hs_path: &ResourcePath) -> Result<()> {
-        let pubky = PubkyConnector::get()?;
+        let pubky = self.client.sdk();
 
         let signer = pubky.signer(user_keypair.clone());
         let session = signer.signin(test_client_id()).await?;
@@ -326,7 +319,7 @@ impl WatcherTest {
     }
 
     pub async fn register_user(&self, user_kp: &Keypair) -> Result<()> {
-        let pubky = PubkyConnector::get()?;
+        let pubky = self.client.sdk();
 
         let signer = pubky.signer(user_kp.clone());
         let hs_pk = self
@@ -339,7 +332,7 @@ impl WatcherTest {
     }
 
     pub async fn register_user_in_hs(&self, user_kp: &Keypair, hs_pk: &PublicKey) -> Result<()> {
-        let pubky = PubkyConnector::get()?;
+        let pubky = self.client.sdk();
 
         let signer = pubky.signer(user_kp.clone());
         signer.signup(hs_pk, None).await?;
@@ -477,7 +470,7 @@ impl WatcherTest {
         homeserver_uri: &str,
         object: Vec<u8>,
     ) -> Result<()> {
-        let pubky = PubkyConnector::get()?;
+        let pubky = self.client.sdk();
 
         let signer = pubky.signer(user_kp.clone());
         let session = signer.signin(test_client_id()).await?;

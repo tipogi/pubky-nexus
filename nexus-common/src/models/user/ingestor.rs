@@ -154,10 +154,8 @@ mod tests {
     use pubky::{Keypair, PublicKey};
 
     use super::*;
-    use crate::db::{
-        exec_single_row, fetch_row_from_graph, graph::Query, queries, PubkyClientResult,
-    };
-    use crate::models::user::PkdnsRecord;
+    use crate::db::{exec_single_row, fetch_row_from_graph, graph::Query, queries};
+    use crate::models::user::{PkdnsLookupError, PkdnsRecord};
     use crate::utils::test_utils::{random_pubky_id, signed_packet_naming};
     use crate::{types::DynError, StackConfig, StackManager};
 
@@ -169,7 +167,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for SigningResolver {
-        async fn resolve_record(&self, _: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        async fn resolve_record(&self, _: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
             Ok(PkdnsRecord::Published(signed_packet_naming(
                 &self.keypair,
                 Some(&self.homeserver),
@@ -231,7 +229,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for ProfileIndexedDuringLookup {
-        async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        async fn resolve_record(
+            &self,
+            user_pk: &PublicKey,
+        ) -> Result<PkdnsRecord, PkdnsLookupError> {
             self.profile
                 .clone()
                 .put_profile_to_graph(&self.uri)

@@ -20,7 +20,7 @@ pub use details::{
 };
 pub use epoch::Epoch;
 pub use homeserver_resolver::{
-    pkdns_record_of, PkdnsHomeserverResolver, PkdnsRecord, PubkyConnectorResolver, StoredRecord,
+    PkdnsHomeserverResolver, PkdnsLookupError, PkdnsRecord, StoredRecord,
 };
 pub use influencers::{Influencers, GLOBAL_INFLUENCERS_CACHE_SIZE};
 pub use ingestor::UserIngestor;

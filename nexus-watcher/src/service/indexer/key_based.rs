@@ -7,18 +7,24 @@ use tokio::time::Instant;
 
 use crate::errors::EventProcessorError;
 use crate::events::Event;
-use crate::homeserver::{HomeserverClient, HsStreamEvent};
 use nexus_common::models::homeserver::HsBlacklist;
 use nexus_common::models::user::UserHsCursor;
 use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use pubky::{EventCursor, PublicKey};
 use pubky_social_specs::PubkyId;
+use pubky_watcher::{
+    check_event_user_pubkey, check_stream_cursors, HsOp, ProtocolViolation, StreamEvent,
+    StreamReader,
+};
 use tokio::sync::watch::Receiver;
 use tracing::{debug, error, info, warn};
 
 use super::homeserver::HsMapping;
-use super::{RunOutcome, TEventProcessor};
+
+/// The paths a user's stream is read under: everything they publish.
+const USER_EVENTS_PATH: &str = "/pub/";
+use super::{event_span, handle_error, homeserver_public_key, Run, RunOutcome};
 use crate::events::retry::RetryScheduler;
 use crate::events::EventHandler;
 use crate::service::runner::{UserNotFoundBackoff, UserResumePoints};
@@ -47,11 +53,11 @@ pub struct KeyBasedEventProcessor {
     pub limit: u16,
 
     pub event_handler: Arc<dyn EventHandler>,
-    pub client: Arc<dyn HomeserverClient>,
+    pub client: Arc<dyn StreamReader>,
     pub user_not_found_backoff: Arc<UserNotFoundBackoff>,
 
     /// HS PKs that should not be indexed. Defense-in-depth: the runner already
-    /// excludes these from `pre_run`, but the processor refuses to run for a
+    /// excludes these from `homeservers`, but the processor refuses to run for a
     /// blacklisted HS too.
     pub hs_blacklist: HsBlacklist,
 
@@ -72,28 +78,43 @@ pub struct KeyBasedEventProcessor {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessor for KeyBasedEventProcessor {
-    fn event_handler(&self) -> &Arc<dyn EventHandler> {
-        &self.event_handler
-    }
-
+impl Run<Event, EventProcessorError> for KeyBasedEventProcessor {
     fn instance_name(&self) -> &'static str {
         "KeyBasedEventProcessor"
     }
 
-    fn retry_scheduler(&self) -> Option<&Arc<RetryScheduler>> {
-        Some(&self.retry_scheduler)
+    fn hs_pubkey(&self) -> &str {
+        self.homeserver_id.as_ref()
     }
 
-    fn homeserver_id(&self) -> &PubkyId {
-        &self.homeserver_id
+    /// The handler stores the line with the key of the homeserver the event was read from.
+    async fn handle(&self, event: &Event) -> Result<(), EventProcessorError> {
+        self.event_handler.handle(event, &self.homeserver_id).await
+    }
+
+    async fn handle_error(
+        &self,
+        event: &Event,
+        error: EventProcessorError,
+    ) -> Result<(), EventProcessorError> {
+        handle_error(
+            event,
+            error,
+            Some(&self.retry_scheduler),
+            &self.homeserver_id,
+        )
+        .await
+    }
+
+    fn event_span(&self, event: &Event) -> tracing::Span {
+        event_span(event)
     }
 
     async fn run_internal(self: Arc<Self>) -> Result<RunOutcome, EventProcessorError> {
         let hs_id = self.homeserver_id.to_string();
 
         // Blacklisted HSs must never be indexed. The runner already excludes
-        // them from `pre_run`, so reaching here is unexpected.
+        // them from `homeservers`, so reaching here is unexpected.
         if self.hs_blacklist.is_blacklisted(&hs_id) {
             error!(action = "abort_hs", "Refusing to process blacklisted HS");
             return Err(EventProcessorError::HsBlacklisted { hs_id });
@@ -101,9 +122,7 @@ impl TEventProcessor for KeyBasedEventProcessor {
 
         // A format-valid id need not be a curve point, and then no user's stream on it can
         // be read. That never changes, so the run stops here instead of failing every user.
-        self.homeserver_id.to_public_key().map_err(|e| {
-            EventProcessorError::SpecValidation(format!("{hs_id} is not a valid public key: {e}"))
-        })?;
+        let hs_pk = homeserver_public_key(&self.homeserver_id, HsOp::ReadStream)?;
         let deadline = Instant::now() + self.budget;
 
         let mut users = self
@@ -136,7 +155,7 @@ impl TEventProcessor for KeyBasedEventProcessor {
                 continue;
             }
 
-            match self.process_user(user_pk, *cursor, deadline).await {
+            match self.process_user(&hs_pk, user_pk, *cursor, deadline).await {
                 Ok(()) => self.user_not_found_backoff.record_success(user_pk).await,
                 Err(err) => {
                     if err.should_not_retry_now() {
@@ -225,6 +244,7 @@ impl KeyBasedEventProcessor {
     #[tracing::instrument(name = "dx.user_events.process", skip_all, fields(user_id = %user_pk.z32()))]
     async fn process_user(
         &self,
+        hs_pk: &PublicKey,
         user_pk: &PublicKey,
         cursor: EventCursor,
         deadline: Instant,
@@ -232,7 +252,7 @@ impl KeyBasedEventProcessor {
         let hs_id: &str = self.homeserver_id.as_ref();
         let stream_events = self
             .client
-            .user_events(&self.homeserver_id, user_pk, cursor.id(), self.limit)
+            .read_stream(hs_pk, user_pk, cursor.id(), self.limit, USER_EVENTS_PATH)
             .await?;
 
         let user_id = user_pk.z32();
@@ -254,7 +274,7 @@ impl KeyBasedEventProcessor {
         }
 
         let (latest_cursor, result) = self
-            .process_user_events(hs_id, &user_id, cursor.id(), stream_events, deadline)
+            .process_user_events(hs_id, user_pk, cursor, stream_events, deadline)
             .await;
 
         if let Some(cursor_val) = latest_cursor {
@@ -273,8 +293,8 @@ impl KeyBasedEventProcessor {
     ///
     /// `persisted_cursor` is the user's currently stored cursor for this
     /// homeserver; it acts as the initial ordering floor so that events at or
-    /// below what we have already indexed are rejected. The complete batch is
-    /// validated before any handler runs.
+    /// below what we have already indexed are rejected. The complete batch goes
+    /// through the Protocol check of its Cursors before any handler runs.
     ///
     /// Returns the latest cursor that is safe to persist, plus the processing
     /// result. Cursor advancement is intentionally skipped for `UserIdMismatch`
@@ -282,33 +302,38 @@ impl KeyBasedEventProcessor {
     async fn process_user_events(
         &self,
         hs_id: &str,
-        user_id: &str,
-        persisted_cursor: u64,
-        stream_events: Vec<HsStreamEvent>,
+        user_pk: &PublicKey,
+        persisted_cursor: EventCursor,
+        stream_events: Vec<StreamEvent>,
         deadline: Instant,
     ) -> (Option<u64>, Result<(), EventProcessorError>) {
+        let user_id = user_pk.z32();
         if *self.shutdown_rx.borrow() {
             debug!(%user_id, "Shutdown detected; exiting event loop");
             return (None, Ok(()));
         }
 
-        let mut cursor_floor = persisted_cursor;
-        for stream_event in &stream_events {
-            let cursor_id = stream_event.cursor;
-            if cursor_id <= cursor_floor {
-                OUT_OF_ORDER_CURSOR_EXTERNAL_HS
-                    .add(1, &[KeyValue::new("hs_id", hs_id.to_string())]);
-                return (
-                    None,
-                    Err(EventProcessorError::EventCursorOutOfOrder {
-                        hs_id: hs_id.into(),
-                        user_id: user_id.into(),
-                        cursor: cursor_id,
-                        cursor_floor,
-                    }),
-                );
-            }
-            cursor_floor = cursor_id;
+        if let Err(violation) = check_stream_cursors(user_pk, persisted_cursor, &stream_events) {
+            let (cursor_floor, cursor) = match violation {
+                ProtocolViolation::CursorNotAdvanced { requested, got, .. } => (requested, got),
+                // Never reached: `check_stream_cursors` returns no other violation.
+                _ => (
+                    persisted_cursor.id(),
+                    stream_events
+                        .first()
+                        .map_or(persisted_cursor.id(), |event| event.cursor),
+                ),
+            };
+            OUT_OF_ORDER_CURSOR_EXTERNAL_HS.add(1, &[KeyValue::new("hs_id", hs_id.to_string())]);
+            return (
+                None,
+                Err(EventProcessorError::EventCursorOutOfOrder {
+                    hs_id: hs_id.into(),
+                    user_id,
+                    cursor,
+                    cursor_floor,
+                }),
+            );
         }
 
         let mut latest_cursor: Option<u64> = None;
@@ -322,11 +347,18 @@ impl KeyBasedEventProcessor {
             let cursor_id = stream_event.cursor;
 
             // External homeservers must not index another user's URI.
-            // Validate the raw resource before [Event::from_stream_event],
-            // because a foreign user PK with an unsupported path would
+            // Check the Event's User pubkey before [Event::from_stream_event],
+            // because a foreign User pubkey with an unsupported path would
             // return Ok(None) thus skipping but also advancing latest_cursor.
-            if let Err(err) = Self::validate_user_id(hs_id, &stream_event, user_id) {
-                return (latest_cursor, Err(err));
+            if check_event_user_pubkey(user_pk, &stream_event).is_err() {
+                return (
+                    latest_cursor,
+                    Err(EventProcessorError::UserIdMismatch {
+                        hs_id: hs_id.into(),
+                        expected_user_id: user_id,
+                        event_user_id: stream_event.user_pubkey().z32(),
+                    }),
+                );
             }
 
             match Event::from_stream_event(&stream_event) {
@@ -360,22 +392,5 @@ impl KeyBasedEventProcessor {
         }
 
         (latest_cursor, Ok(()))
-    }
-
-    fn validate_user_id(
-        hs_id: &str,
-        stream_event: &HsStreamEvent,
-        expected_user_id: &str,
-    ) -> Result<(), EventProcessorError> {
-        let event_user_id = stream_event.owner().z32();
-        if event_user_id != expected_user_id {
-            return Err(EventProcessorError::UserIdMismatch {
-                hs_id: hs_id.into(),
-                expected_user_id: expected_user_id.into(),
-                event_user_id,
-            });
-        }
-
-        Ok(())
     }
 }

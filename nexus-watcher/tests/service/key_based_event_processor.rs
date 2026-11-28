@@ -4,30 +4,28 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use nexus_common::db::{
-    exec_single_row, graph::Query, PubkyClientError, PubkyClientResult, RedisOps,
-};
+use nexus_common::db::{exec_single_row, graph::Query, RedisOps};
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
 use nexus_common::models::user::{
     set_user_homeserver, set_user_homeserver_stale, user_hs_cursor_key, Epoch,
-    PkdnsHomeserverResolver, PkdnsRecord, UserDetails, UserHsCursor,
+    PkdnsHomeserverResolver, PkdnsLookupError, PkdnsRecord, UserDetails, UserHsCursor,
 };
 use nexus_common::types::DynError;
 use nexus_common::utils::test_utils::random_pubky_id;
 use nexus_common::WatcherConfig;
-use nexus_watcher::errors::EventProcessorError;
+use nexus_watcher::errors::{EventProcessorError, HsRequestError};
 use nexus_watcher::events::retry::{InitialBackoff, RetryScheduler};
+use nexus_watcher::events::Event;
 use nexus_watcher::events::EventHandler;
-use nexus_watcher::events::{Event, EventType};
-use nexus_watcher::homeserver::{HomeserverClient, HsError, HsErrorKind, HsStreamEvent};
-use nexus_watcher::service::indexer::{KeyBasedEventProcessor, RunError, TEventProcessor};
+use nexus_watcher::service::indexer::{KeyBasedEventProcessor, Run, RunError};
 use nexus_watcher::service::runner::{UserNotFoundBackoff, UserResumePoints};
-use nexus_watcher::service::stats::ProcessorRunStatus;
-use nexus_watcher::service::{
-    KeyBasedEventProcessorRunner, TEventProcessorRunner, KEY_BASED_RUN_BUDGET,
-};
+use nexus_watcher::service::stats::TurnStatus;
+use nexus_watcher::service::{Cycle, KeyBasedEventProcessorRunner, KEY_BASED_RUN_BUDGET};
 use pubky::{Keypair, PubkyResource, PublicKey};
 use pubky_social_specs::PubkyId;
+use pubky_watcher::{
+    EventType, FeedReader, HsError, HsErrorKind, ResourceReader, StreamEvent, StreamReader,
+};
 use tokio::sync::watch;
 
 use crate::service::utils::{
@@ -491,7 +489,7 @@ async fn key_based_processor_stops_at_its_budget() -> Result<(), DynError> {
     let hs_id = homeserver.id.to_string();
     let user_a_id = create_user_on_homeserver(&homeserver).await?;
     let user_b_id = create_user_on_homeserver(&homeserver).await?;
-    let batch = |user_id: &str| -> Result<Vec<HsStreamEvent>, DynError> {
+    let batch = |user_id: &str| -> Result<Vec<StreamEvent>, DynError> {
         (1..=10)
             .map(|cursor| stream_event(cursor, user_id, "/pub/pubky.app/profile.json"))
             .collect()
@@ -627,11 +625,11 @@ async fn key_based_runner_backs_off_homeserver_after_spent_budget() -> Result<()
     let stats = runner.run().await?.0;
 
     let run = stats
-        .stats
+        .turns
         .iter()
-        .find(|run| run.hs_id == hs_id)
+        .find(|run| run.hs_pubkey == hs_id)
         .expect("the homeserver was run");
-    assert_eq!(run.status, ProcessorRunStatus::BudgetSpent);
+    assert_eq!(run.status, TurnStatus::BudgetSpent);
     assert!(runner.backoff.should_skip(&hs_id));
 
     Ok(())
@@ -1066,29 +1064,33 @@ struct MappingChangesDuringFetch {
 
 #[async_trait::async_trait]
 impl PkdnsHomeserverResolver for MappingChangesDuringFetch {
-    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+    async fn resolve_record(&self, user_pk: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
         self.inner.resolve_record(user_pk).await
     }
 }
 
 #[async_trait::async_trait]
-impl HomeserverClient for MappingChangesDuringFetch {
-    async fn poll_events(
+impl FeedReader for MappingChangesDuringFetch {
+    async fn read_feed(
         &self,
-        hs: &PubkyId,
+        hs: &PublicKey,
         cursor: u64,
         limit: u16,
     ) -> Result<Vec<String>, HsError> {
-        self.inner.poll_events(hs, cursor, limit).await
+        self.inner.read_feed(hs, cursor, limit).await
     }
+}
 
-    async fn user_events(
+#[async_trait::async_trait]
+impl StreamReader for MappingChangesDuringFetch {
+    async fn read_stream(
         &self,
-        hs: &PubkyId,
+        hs: &PublicKey,
         user: &PublicKey,
         cursor: u64,
         limit: u16,
-    ) -> Result<Vec<HsStreamEvent>, HsError> {
+        path: &str,
+    ) -> Result<Vec<StreamEvent>, HsError> {
         let user_id = user.z32();
         match self.change {
             MappingChange::MarkedStale => set_user_homeserver_stale(&user_id, true, None).await,
@@ -1097,15 +1099,18 @@ impl HomeserverClient for MappingChangesDuringFetch {
             }
         }
         .expect("the mapping changes");
-        self.inner.user_events(hs, user, cursor, limit).await
+        self.inner.read_stream(hs, user, cursor, limit, path).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ResourceReader for MappingChangesDuringFetch {
+    async fn read_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        self.inner.read_resource(resource).await
     }
 
-    async fn get_resource(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
-        self.inner.get_resource(resource).await
-    }
-
-    async fn get_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
-        self.inner.get_blob(resource).await
+    async fn read_blob(&self, resource: &PubkyResource) -> Result<Vec<u8>, HsError> {
+        self.inner.read_blob(resource).await
     }
 }
 
@@ -1224,10 +1229,10 @@ async fn user_cursor(user_id: &str, hs_id: &str) -> Result<Option<isize>, DynErr
     Ok(UserHsCursor::check_sorted_set_member(None, &user_hs_cursor_key(user_id), &[hs_id]).await?)
 }
 
-fn stream_event(cursor: u64, user_id: &str, path: &str) -> Result<HsStreamEvent, DynError> {
+fn stream_event(cursor: u64, user_id: &str, path: &str) -> Result<StreamEvent, DynError> {
     let user_pk: PublicKey = user_id.parse()?;
 
-    Ok(HsStreamEvent::new(
+    Ok(StreamEvent::new(
         EventType::Del,
         &PubkyResource::new(user_pk, path)?,
         cursor,
@@ -1253,7 +1258,7 @@ fn event_stream_5xx() -> HsErrorKind {
 
 /// A 5xx on a request other than the event stream, e.g. a file fetch
 fn server_error_5xx() -> EventProcessorError {
-    PubkyClientError::ServerError5xx {
+    HsRequestError::ServerError5xx {
         message: "File request failed with status 500".into(),
     }
     .into()
@@ -1261,7 +1266,7 @@ fn server_error_5xx() -> EventProcessorError {
 
 /// Non-transport error type, that happens to have a transport-error-like error message
 fn retryable_client_error() -> EventProcessorError {
-    PubkyClientError::RequestFailed {
+    HsRequestError::RequestFailed {
         message: "connection refused".into(),
     }
     .into()

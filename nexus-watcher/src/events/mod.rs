@@ -1,4 +1,4 @@
-use nexus_common::models::user::UserIngestor;
+use nexus_common::models::user::{PkdnsHomeserverResolver, UserIngestor};
 mod classify;
 mod epoch_metrics;
 pub mod event;
@@ -12,8 +12,7 @@ pub use classify::SkipReason;
 pub use event::{Event, EventType, ParseResult};
 pub use target::EventTarget;
 
-use crate::errors::EventProcessorError;
-use crate::homeserver::HomeserverClient;
+use crate::errors::{EventProcessorError, HsRequestError};
 use crate::service::indexer::HsMapping;
 use crate::METER_NAME;
 use nexus_common::models::takedown::is_taken_down;
@@ -21,11 +20,26 @@ use nexus_common::WatcherConfig;
 use opentelemetry::{global, metrics::Counter};
 use pubky::PubkyResource;
 use pubky_social_specs::PubkyId;
+use pubky_watcher::ResourceReader;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
 use tracing::{debug, info};
+
+/// Parses `uri` into the [`PubkyResource`] the client reads. Every way the SDK can refuse a
+/// URI is a validation of the request (a missing `<user>/<path>`, an invalid key, an empty
+/// or `..` path segment), which fails the event as a request failure, retried, carrying the
+/// SDK's reason.
+pub(crate) fn parse_resource(uri: &str) -> Result<PubkyResource, EventProcessorError> {
+    uri.parse().map_err(|error| {
+        let message = match error {
+            pubky::Error::Request(pubky::errors::RequestError::Validation { message }) => message,
+            other => other.to_string(),
+        };
+        HsRequestError::RequestFailed { message }.into()
+    })
+}
 
 /// Counter for events skipped because the moderator took their record down.
 static TAKEN_DOWN: LazyLock<Counter<u64>> = LazyLock::new(|| {
@@ -82,7 +96,7 @@ pub trait EventHandler: Send + Sync {
 pub struct DefaultEventHandler {
     moderation: Arc<Moderation>,
     ingestor: Arc<UserIngestor>,
-    client: Arc<dyn HomeserverClient>,
+    client: Arc<dyn ResourceReader>,
 
     /// Local files directory on Nexus used for file-backed events.
     files_path: PathBuf,
@@ -97,7 +111,7 @@ impl DefaultEventHandler {
     pub fn new(
         moderation: Arc<Moderation>,
         ingestor: Arc<UserIngestor>,
-        client: Arc<dyn HomeserverClient>,
+        client: Arc<dyn ResourceReader>,
         files_path: PathBuf,
         retry_store: Arc<dyn RetryStore>,
     ) -> Self {
@@ -112,9 +126,13 @@ impl DefaultEventHandler {
 
     /// Builds a handler that fetches through `client`, deriving its moderation rules
     /// and user ingestor from config, and reading the Redis retry queue. The ingestor
-    /// resolves users' homeservers through `client` too.
-    pub fn from_config(config: &WatcherConfig, client: Arc<dyn HomeserverClient>) -> Self {
-        let ingestor = UserIngestor::from_config(&config.stack, client.clone());
+    /// resolves users' homeservers through `resolver`.
+    pub fn from_config(
+        config: &WatcherConfig,
+        client: Arc<dyn ResourceReader>,
+        resolver: Arc<dyn PkdnsHomeserverResolver>,
+    ) -> Self {
+        let ingestor = UserIngestor::from_config(&config.stack, resolver);
         Self::new(
             Moderation::from_config(config),
             Arc::new(ingestor),
@@ -206,7 +224,7 @@ pub async fn handle_put_event(
     files_path: &Path,
     moderation: Arc<Moderation>,
     ingestor: Arc<UserIngestor>,
-    client: &dyn HomeserverClient,
+    client: &dyn ResourceReader,
 ) -> Result<(), EventProcessorError> {
     // Whatever order events arrive in, a record the moderator took down stays down. A
     // copy left behind by an earlier attempt whose removal failed is removed here too.
@@ -219,8 +237,8 @@ pub async fn handle_put_event(
     let translated = match translate_put_from_path(&event.target) {
         Some(translated) => translated,
         None => {
-            let pubky_resource: PubkyResource = event.uri.parse()?;
-            let blob = client.get_resource(&pubky_resource).await?;
+            let pubky_resource = parse_resource(&event.uri)?;
+            let blob = client.read_resource(&pubky_resource).await?;
             translate_put(&event.uri, &event.target, &blob)?
         }
     };
@@ -334,5 +352,43 @@ pub async fn handle_del_event(
         TranslatedDel::Tag(key) => handlers::tag::del(key).await,
         TranslatedDel::Bookmark(key) => handlers::bookmark::del(key).await,
         TranslatedDel::File(key) => handlers::file::del(key, files_path).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_resource;
+    use crate::errors::{EventProcessorError, HsRequestError};
+    use crate::events::retry::RetryScheduler;
+
+    /// A resource URI the SDK cannot parse fails as a request that is retried, carrying the
+    /// SDK's reason, as it did when Nexus converted every SDK error itself.
+    #[test]
+    fn a_malformed_resource_uri_is_a_retried_request_failure() {
+        let error = parse_resource("pubky://no-path-here").unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                EventProcessorError::HsRequest(HsRequestError::RequestFailed { message })
+                    if message == "missing `<user>/<path>`"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "PubkyClientError: Request failed: missing `<user>/<path>`"
+        );
+        assert!(RetryScheduler::should_enqueue_related_event(&error));
+        assert!(!error.should_not_retry_now());
+    }
+
+    #[test]
+    fn a_well_formed_resource_uri_parses() {
+        let user = "1hb71xx9km3f4pw5izsy1gn19ff1uuuqonw4mcygzobwkryujoiy";
+        let resource =
+            parse_resource(&format!("pubky://{user}/pub/pubky.app/posts/0033SSE3B1FQ0")).unwrap();
+        assert_eq!(resource.owner.z32(), user);
+        assert_eq!(resource.path.as_str(), "/pub/pubky.app/posts/0033SSE3B1FQ0");
     }
 }

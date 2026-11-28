@@ -1,11 +1,8 @@
-use pubky::errors::PkarrError;
-use pubky::pkarr::dns::rdata::RData;
-use pubky::pkarr::errors::ResolveError;
-use pubky::pkarr::{ResolvePolicy, SignedPacket};
-use pubky::{Pubky, PublicKey};
+use pubky::pkarr::SignedPacket;
+use pubky::PublicKey;
 use pubky_social_specs::PubkyId;
+use pubky_watcher::{PkdnsLookup, WatcherClient};
 
-use crate::db::{PubkyClientError, PubkyClientResult, PubkyConnector};
 use crate::types::DynError;
 
 /// A user's PKDNS record, as the DHT or a relay answered.
@@ -81,6 +78,19 @@ impl TryFrom<&SignedPacket> for StoredRecord {
     }
 }
 
+/// Why a user's PKDNS record could not be looked up. A user who publishes no record is not a
+/// failure: that is [`PkdnsRecord::Missing`].
+#[derive(Debug, thiserror::Error)]
+pub enum PkdnsLookupError {
+    /// The lookup failed: no DHT node or relay gave a usable answer.
+    #[error("Pkarr failed: {0}")]
+    LookupFailed(#[from] pubky_watcher::PkdnsLookupError),
+
+    /// The answer is a packet signed by another key than the user's.
+    #[error("Request failed: PKDNS answer for {user} is signed by {signer}")]
+    SignedByAnotherKey { user: String, signer: String },
+}
+
 /// Resolves a user's currently published homeserver from PKDNS/DHT.
 ///
 /// Abstracted behind a trait so callers can route the lookup through their own client, or
@@ -88,7 +98,7 @@ impl TryFrom<&SignedPacket> for StoredRecord {
 #[async_trait::async_trait]
 pub trait PkdnsHomeserverResolver: Send + Sync {
     /// Looks up the PKDNS record of `user_pk`.
-    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord>;
+    async fn resolve_record(&self, user_pk: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError>;
 
     /// Looks up the PKDNS record of `user_pk`, refusing a packet nexus cannot
     /// apply:
@@ -99,18 +109,18 @@ pub trait PkdnsHomeserverResolver: Send + Sync {
     ///   reads a DHT item's `seq` as a `u64`, so an item signed with a negative
     ///   `seq` arrives with such a timestamp; its signature does not verify as a
     ///   pkarr packet, so it could not be kept as proof either.
-    async fn resolve_own_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+    async fn resolve_own_record(
+        &self,
+        user_pk: &PublicKey,
+    ) -> Result<PkdnsRecord, PkdnsLookupError> {
         let record = self.resolve_record(user_pk).await?;
         let PkdnsRecord::Published(packet) = &record else {
             return Ok(record);
         };
         if packet.public_key() != *user_pk.as_inner() {
-            return Err(PubkyClientError::RequestFailed {
-                message: format!(
-                    "PKDNS answer for {} is signed by {}",
-                    user_pk.z32(),
-                    packet.public_key().to_z32()
-                ),
+            return Err(PkdnsLookupError::SignedByAnotherKey {
+                user: user_pk.z32(),
+                signer: packet.public_key().to_z32(),
             });
         }
         if StoredRecord::try_from(packet).is_err() {
@@ -125,48 +135,30 @@ pub trait PkdnsHomeserverResolver: Send + Sync {
     }
 }
 
-/// Looks up the PKDNS record of `user_pk` through `pubky`: the lookup behind
-/// `Pubky::get_homeserver_of`, which folds a missing packet and a packet naming
-/// no homeserver into one `None` and fails on a malformed `_pubky` record. A
-/// missing packet is [`PkdnsRecord::Missing`]; a DHT or relay failure is an
-/// error, so the caller does not take it for "no record".
-pub async fn pkdns_record_of(pubky: &Pubky, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-    match pubky
-        .client()
-        .pkarr()
-        .resolve(user_pk, ResolvePolicy::CacheFirst)
-        .await
-    {
-        Ok(packet) => Ok(PkdnsRecord::Published(packet)),
-        Err(ResolveError::NotFound) => Ok(PkdnsRecord::Missing),
-        Err(e) => Err(PkarrError::Resolve(e).into()),
-    }
-}
-
-/// The homeserver a PKDNS record names: the target of its `_pubky` SVCB/HTTPS
-/// record, if that is a public key. Mirrors `Pubky::get_homeserver_of`, whose
-/// parsing the SDK does not export.
-fn published_homeserver(packet: &SignedPacket) -> Option<PubkyId> {
-    let target = packet
-        .resource_records("_pubky")
-        .find_map(|rr| match &rr.rdata {
-            RData::SVCB(svcb) => Some(svcb.target.to_string()),
-            RData::HTTPS(https) => Some(https.0.target.to_string()),
-            _ => None,
-        })?;
-    PublicKey::try_from_z32(&target).ok().map(PubkyId::from)
-}
-
-/// Resolver backed by the shared [`PubkyConnector`].
-#[derive(Debug, Default, Clone, Copy)]
-pub struct PubkyConnectorResolver;
-
+/// Rebuilds the client's PKDNS answer as Nexus's [`PkdnsRecord`]: a packet is
+/// [`PkdnsRecord::Published`], no packet is [`PkdnsRecord::Missing`], and a DHT or relay
+/// failure is [`PkdnsLookupError::LookupFailed`].
 #[async_trait::async_trait]
-impl PkdnsHomeserverResolver for PubkyConnectorResolver {
-    async fn resolve_record(&self, user_pk: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
-        let pubky = PubkyConnector::get()?;
-        pkdns_record_of(&pubky, user_pk).await
+impl PkdnsHomeserverResolver for WatcherClient {
+    async fn resolve_record(&self, user_pk: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
+        pkdns_record(PkdnsLookup::lookup_homeserver_record(self, user_pk).await)
     }
+}
+
+/// The client's answer as a [`PkdnsRecord`], or the lookup failure as
+/// [`PkdnsLookupError::LookupFailed`].
+fn pkdns_record(
+    answer: Result<Option<SignedPacket>, pubky_watcher::PkdnsLookupError>,
+) -> Result<PkdnsRecord, PkdnsLookupError> {
+    match answer? {
+        Some(packet) => Ok(PkdnsRecord::Published(packet)),
+        None => Ok(PkdnsRecord::Missing),
+    }
+}
+
+/// The homeserver a PKDNS record names, as `pubky-watcher` reads it, as a `PubkyId`.
+fn published_homeserver(packet: &SignedPacket) -> Option<PubkyId> {
+    pubky_watcher::published_homeserver(packet).map(PubkyId::from)
 }
 
 #[cfg(test)]
@@ -175,6 +167,26 @@ mod tests {
     use crate::utils::test_utils::{random_pubky_id, signed_packet_naming};
     use pubky::pkarr::dns::{rdata::SVCB, Name};
     use pubky::Keypair;
+
+    /// A failed lookup is a `LookupFailed` that keeps pkarr's reason, logged as it was when
+    /// the error was pkarr's own; no packet is no record.
+    #[test]
+    fn a_failed_lookup_is_a_pkarr_failure_with_its_reason() {
+        let failed = pkdns_record(Err(pubky_watcher::PkdnsLookupError::new(
+            "no queried DHT nodes responded",
+        )))
+        .unwrap_err();
+
+        assert!(
+            matches!(failed, PkdnsLookupError::LookupFailed(_)),
+            "{failed:?}"
+        );
+        assert_eq!(
+            failed.to_string(),
+            "Pkarr failed: Failed to resolve the DHT record: no queried DHT nodes responded"
+        );
+        assert_eq!(pkdns_record(Ok(None)).unwrap(), PkdnsRecord::Missing);
+    }
 
     /// The `_pubky` target is read from HTTPS and SVCB records the way the SDK
     /// reads it; a packet without one, or with a target that is no key, names none.
@@ -277,7 +289,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PkdnsHomeserverResolver for FixedRecordResolver {
-        async fn resolve_record(&self, _: &PublicKey) -> PubkyClientResult<PkdnsRecord> {
+        async fn resolve_record(&self, _: &PublicKey) -> Result<PkdnsRecord, PkdnsLookupError> {
             Ok(self.0.clone())
         }
     }

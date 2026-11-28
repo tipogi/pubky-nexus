@@ -34,8 +34,7 @@ use nexus_watcher::events::retry::{
 };
 use nexus_watcher::events::EventType;
 use nexus_watcher::events::{handlers, DefaultEventHandler, EventHandler};
-use nexus_watcher::homeserver::HsErrorKind;
-use nexus_watcher::service::{HsEventProcessor, RunOutcome, TEventProcessor};
+use nexus_watcher::service::{HsEventProcessor, Run, RunOutcome};
 use pubky_social_specs::legacy_v0::traits::{HashId as _, TimestampId};
 use pubky_social_specs::legacy_v0::{
     blob_uri_builder, file_uri_builder as v0_file_uri_builder, follow_uri_builder,
@@ -48,6 +47,7 @@ use pubky_social_specs::{
     tag_uri_builder as v1_tag_uri_builder, PubkyId, PubkySocialPost, PubkySocialPostKind,
     PubkySocialTag, PubkySocialUser, Root,
 };
+use pubky_watcher::HsErrorKind;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -740,7 +740,7 @@ async fn test_retry_entry_whose_origin_homeserver_is_no_key_is_removed_unhandled
 
 // ============================================================================
 // Retry 404 removes from queue
-// Handler returns PubkyClientError with 404 message, event is removed (content gone, no point retrying)
+// Handler returns a homeserver 404, event is removed (content gone, no point retrying)
 // ============================================================================
 
 #[tokio_shared_rt::test(shared)]
@@ -769,7 +769,7 @@ async fn test_retry_404_removes_from_queue() -> Result<()> {
         store.clone(),
         create_test_config(10, 50, 60, 3600, 60, 3600),
         create_mock_handler(
-            Err(nexus_common::db::PubkyClientError::NotFound404 { message: event_uri }.into()),
+            Err(EventProcessorError::client_error_404(event_uri)),
             Some(post_id),
         ),
         shutdown_rx,
@@ -2942,7 +2942,8 @@ async fn primary_runner(
         homeserver,
         limit: 100,
         event_handler: handler,
-        client,
+        client: client.clone(),
+        resolver: client,
         shutdown_rx: watch::channel(false).1,
         retry_scheduler: Arc::new(RetryScheduler::new(
             store,

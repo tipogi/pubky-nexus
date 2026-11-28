@@ -9,24 +9,21 @@ pub mod user_hs_resolver;
 pub use constants::{
     KEY_BASED_RUN_BUDGET, KEY_BASED_SLOW_RUN_MARGIN, SLOW_RUN_THRESHOLD, WATCHER_CONFIG_FILE_NAME,
 };
-pub use indexer::{
-    HsEventProcessor, KeyBasedEventProcessor, RunError, RunOutcome, TEventProcessor,
-};
-pub use runner::{HsEventProcessorRunner, KeyBasedEventProcessorRunner, TEventProcessorRunner};
+pub use indexer::{HsEventProcessor, KeyBasedEventProcessor, Run, RunError, RunOutcome};
+pub use runner::{Cycle, HsEventProcessorRunner, KeyBasedEventProcessorRunner};
 pub(crate) use task_runner::{run_periodic_tasks, PeriodicTask};
 pub use user_hs_resolver::UserHsResolverRunner;
 
 use crate::events::retry::{RetryProcessor, RetryScheduler};
 use crate::events::{DefaultEventHandler, EventHandler};
-use crate::homeserver::{HomeserverClient, PubkyHomeserverClient};
 use crate::service::constants::DEFAULT_WATCHER_CONFIG_TOML;
 use crate::service::task_runner::task_results_into_result;
 use crate::NexusWatcherBuilder;
-use nexus_common::db::PubkyConnector;
 use nexus_common::file::ConfigLoader;
 use nexus_common::models::homeserver::Homeserver;
 use nexus_common::types::DynError;
 use nexus_common::WatcherConfig;
+use pubky_watcher::WatcherClient;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::watch::Receiver;
@@ -74,10 +71,13 @@ impl NexusWatcher {
     /// an internal cancellation signal is sent so that sibling tasks can finish their
     /// current iteration and exit.
     ///
-    /// The tasks share one [`HomeserverClient`], one event handler and one retry scheduler.
-    ///
-    /// Expects [`PubkyConnector`] to be initialised.
-    pub async fn start(shutdown_rx: Receiver<bool>, config: WatcherConfig) -> Result<(), DynError> {
+    /// The tasks share `client`, one event handler and one retry scheduler. The client reads
+    /// blobs up to its own cap, which the builder sets from [`WatcherConfig::max_file_size`].
+    pub async fn start(
+        shutdown_rx: Receiver<bool>,
+        config: WatcherConfig,
+        client: Arc<WatcherClient>,
+    ) -> Result<(), DynError> {
         debug!(?config, "Running NexusWatcher with ");
 
         Homeserver::persist_if_unknown(config.homeserver.clone()).await?;
@@ -87,16 +87,16 @@ impl NexusWatcher {
         let hs_resolver_interval_ms = config.hs_resolver_interval_ms;
         let retry_processor_interval_ms = config.retry_processor_interval_ms;
 
-        let client: Arc<dyn HomeserverClient> = Arc::new(PubkyHomeserverClient::from_config(
-            PubkyConnector::get()?,
+        let event_handler: Arc<dyn EventHandler> = Arc::new(DefaultEventHandler::from_config(
             &config,
+            client.clone(),
+            client.clone(),
         ));
-        let event_handler: Arc<dyn EventHandler> =
-            Arc::new(DefaultEventHandler::from_config(&config, client.clone()));
         let retry_scheduler = Arc::new(RetryScheduler::from_config(&config));
 
         let hs_runner = Arc::new(HsEventProcessorRunner::new(
             &config,
+            client.clone(),
             client.clone(),
             event_handler.clone(),
             retry_scheduler.clone(),

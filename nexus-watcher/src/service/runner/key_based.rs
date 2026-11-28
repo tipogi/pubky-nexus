@@ -1,9 +1,9 @@
-use super::{HomeserverBackoff, TEventProcessorRunner, UserNotFoundBackoff, UserResumePoints};
+use super::{Cycle, HomeserverBackoff, UserNotFoundBackoff, UserResumePoints};
+use crate::errors::EventProcessorError;
 use crate::events::retry::RetryScheduler;
-use crate::events::EventHandler;
-use crate::homeserver::HomeserverClient;
-use crate::service::indexer::{KeyBasedEventProcessor, TEventProcessor};
-use crate::service::stats::{ProcessedStats, ProcessorRunStatus, RunAllProcessorsStats};
+use crate::events::{Event, EventHandler};
+use crate::service::indexer::{KeyBasedEventProcessor, NexusEventProcessor};
+use crate::service::stats::{CycleReport, CycleStats, TurnStatus};
 use crate::service::KEY_BASED_RUN_BUDGET;
 use crate::METER_NAME;
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
@@ -12,13 +12,14 @@ use nexus_common::WatcherConfig;
 use opentelemetry::global;
 use opentelemetry::metrics::{Gauge, Meter};
 use pubky_social_specs::PubkyId;
+use pubky_watcher::StreamReader;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
 use tracing::{debug, info, warn};
 
 /// Metrics for the external-HS monitoring loop, recorded once per run in
-/// [`KeyBasedEventProcessorRunner::post_run`].
+/// [`KeyBasedEventProcessorRunner::after_cycle`].
 ///
 /// Instruments come from the global meter, so they are no-ops until an
 /// `SdkMeterProvider` is installed.
@@ -72,14 +73,14 @@ pub struct KeyBasedEventProcessorRunner {
     pub monitored_hs_limit: usize,
 
     pub event_handler: Arc<dyn EventHandler>,
-    /// Client the processors this runner builds fetch through
-    pub client: Arc<dyn HomeserverClient>,
+    /// Client the processors this runner builds read users' event streams through
+    pub client: Arc<dyn StreamReader>,
     pub shutdown_rx: Receiver<bool>,
 
     /// Primary homeserver ID, excluded from the external targets list
     pub primary_homeserver: PubkyId,
 
-    /// HS PKs that must never be indexed. Excluded from `pre_run` and re-checked
+    /// HS PKs that must never be indexed. Excluded from `homeservers` and re-checked
     /// by each [`KeyBasedEventProcessor`] this runner builds.
     pub hs_blacklist: HsBlacklist,
 
@@ -102,7 +103,7 @@ impl KeyBasedEventProcessorRunner {
     /// Creates a runner configured by `config`, sharing the given client, handler and scheduler
     pub fn new(
         config: &WatcherConfig,
-        client: Arc<dyn HomeserverClient>,
+        client: Arc<dyn StreamReader>,
         event_handler: Arc<dyn EventHandler>,
         retry_scheduler: Arc<RetryScheduler>,
         shutdown_rx: Receiver<bool>,
@@ -140,12 +141,14 @@ impl KeyBasedEventProcessorRunner {
 }
 
 #[async_trait::async_trait]
-impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
+impl Cycle<Event, EventProcessorError> for KeyBasedEventProcessorRunner {
+    type Error = DynError;
+
     fn shutdown_rx(&self) -> Receiver<bool> {
         self.shutdown_rx.clone()
     }
 
-    async fn build(&self, hs_id: &str) -> Result<Arc<dyn TEventProcessor>, DynError> {
+    async fn build_run(&self, hs_id: &str) -> Result<Arc<NexusEventProcessor>, DynError> {
         let homeserver_id = PubkyId::try_from(hs_id)?;
 
         Ok(Arc::new(KeyBasedEventProcessor {
@@ -162,25 +165,25 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
         }))
     }
 
-    async fn pre_run(&self) -> Result<Vec<String>, DynError> {
+    async fn homeservers(&self) -> Result<Vec<String>, DynError> {
         self.hs_by_priority().await
     }
 
-    fn poll_limit(&self) -> usize {
+    fn run_limit(&self) -> usize {
         self.monitored_hs_limit
     }
 
-    async fn backoff_hs_should_skip(&self, hs_id: &str) -> bool {
+    async fn should_skip(&self, hs_id: &str) -> bool {
         self.backoff.should_skip(hs_id)
     }
 
-    async fn backoff_hs_record_result(&self, hs_id: &str, status: &ProcessorRunStatus) {
+    async fn record_turn(&self, hs_id: &str, status: &TurnStatus) {
         record_run_status(&self.backoff, hs_id, status);
     }
 
-    async fn post_run(&self, stats: RunAllProcessorsStats) -> ProcessedStats {
-        for individual_run_stat in &stats.stats {
-            let hs_id = &individual_run_stat.hs_id;
+    async fn after_cycle(&self, stats: CycleStats) -> CycleReport {
+        for individual_run_stat in &stats.turns {
+            let hs_id = &individual_run_stat.hs_pubkey;
             let duration = individual_run_stat.duration;
             let status = &individual_run_stat.status;
             debug!(homeserver = %hs_id, ?duration, ?status, "Event processor run completed");
@@ -195,7 +198,7 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
 
         // Recorded on every run, including an empty one, so the saturation ratio
         // always has a denominator in force.
-        EXTERNAL_HS_METRICS.record_run(self.monitored_hs_limit, stats.stats.len() - count_skipped);
+        EXTERNAL_HS_METRICS.record_run(self.monitored_hs_limit, stats.turns.len() - count_skipped);
 
         let had_issues = count_error + count_panic + count_budget_spent + count_failed_to_build > 0;
 
@@ -221,14 +224,14 @@ impl TEventProcessorRunner for KeyBasedEventProcessorRunner {
             info!(hs_ok = count_ok, "Key-based indexing finished");
         }
 
-        ProcessedStats(stats)
+        CycleReport(stats)
     }
 }
 
 /// Records a run's status in the homeserver's backoff: only an `Ok` run resets it, and every
 /// other status, a spent budget included, backs the homeserver off further.
-fn record_run_status(backoff: &HomeserverBackoff, hs_id: &str, status: &ProcessorRunStatus) {
-    if *status == ProcessorRunStatus::Ok {
+fn record_run_status(backoff: &HomeserverBackoff, hs_id: &str, status: &TurnStatus) {
+    if *status == TurnStatus::Ok {
         backoff.record_success(hs_id);
     } else {
         backoff.record_failure(hs_id);
@@ -239,7 +242,7 @@ fn record_run_status(backoff: &HomeserverBackoff, hs_id: &str, status: &Processo
 mod tests {
     use super::HomeserverBackoff;
     use super::{record_run_status, ExternalHsMetrics};
-    use crate::service::stats::ProcessorRunStatus;
+    use crate::service::stats::TurnStatus;
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
@@ -298,9 +301,9 @@ mod tests {
     #[test]
     fn ok_run_resets_the_backoff() {
         let backoff = HomeserverBackoff::new(60, 3600);
-        record_run_status(&backoff, "hs1", &ProcessorRunStatus::Error);
+        record_run_status(&backoff, "hs1", &TurnStatus::Error);
 
-        record_run_status(&backoff, "hs1", &ProcessorRunStatus::Ok);
+        record_run_status(&backoff, "hs1", &TurnStatus::Ok);
 
         assert_eq!(backoff.next_backoff_secs_for("hs1"), None);
         assert!(!backoff.should_skip("hs1"));
@@ -313,7 +316,7 @@ mod tests {
         let backoff = HomeserverBackoff::new(60, 3600);
 
         for _ in 0..2 {
-            record_run_status(&backoff, "hs1", &ProcessorRunStatus::BudgetSpent);
+            record_run_status(&backoff, "hs1", &TurnStatus::BudgetSpent);
         }
 
         assert_eq!(backoff.next_backoff_secs_for("hs1"), Some(240));

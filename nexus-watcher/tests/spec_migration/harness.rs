@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use nexus_common::config::EventRetryConfig;
-use nexus_common::db::PubkyConnector;
 use nexus_common::media::file_folder;
 use nexus_common::models::follow::{Followers, Following, UserFollows};
 use nexus_common::models::homeserver::{Homeserver, HsBlacklist};
@@ -18,17 +17,15 @@ use nexus_common::models::post::{PostStream, PostView};
 use nexus_common::models::tag::TagDetails;
 use nexus_common::models::user::{Epoch, UserIngestor, UserView};
 use nexus_common::types::Pagination;
-use nexus_common::utils::test_utils::default_ingestor_tests;
 use nexus_common::{StackConfig, StackManager, DEFAULT_MAX_FILE_SIZE};
 use nexus_watcher::events::retry::{
     InMemoryRetryStore, IndexKey, InitialBackoff, RetryEvent, RetryProcessor, RetryScheduler,
     RetryStore,
 };
 use nexus_watcher::events::{DefaultEventHandler, EventHandler, Moderation};
-use nexus_watcher::homeserver::{HomeserverClient, PubkyHomeserverClient};
-use nexus_watcher::service::indexer::{KeyBasedEventProcessor, TEventProcessor};
+use nexus_watcher::service::indexer::{KeyBasedEventProcessor, Run};
 use nexus_watcher::service::runner::{UserNotFoundBackoff, UserResumePoints};
-use nexus_watcher::service::{HsEventProcessorRunner, TEventProcessorRunner, KEY_BASED_RUN_BUDGET};
+use nexus_watcher::service::{Cycle, HsEventProcessorRunner, KEY_BASED_RUN_BUDGET};
 use nexus_watcher::EventProcessorError;
 use pubky::{ClientId, Keypair, PubkySession};
 use pubky_social_specs::legacy_v0::traits::{HasIdPath, HasPath, HashId, TimestampId};
@@ -42,6 +39,7 @@ use pubky_social_specs::{
     PubkySocialUser, Root,
 };
 use pubky_testnet::Testnet;
+use pubky_watcher::WatcherClient;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::watch;
@@ -56,7 +54,7 @@ pub struct SpecMigrationTest {
     /// Read per user.
     pub external: PubkyId,
     bulk: HsEventProcessorRunner,
-    client: Arc<dyn HomeserverClient>,
+    client: Arc<WatcherClient>,
     handler: Arc<dyn EventHandler>,
     ingestor: Arc<UserIngestor>,
     retry_queue: Arc<RetryQueue>,
@@ -82,19 +80,16 @@ impl SpecMigrationTest {
             .await
             .map_err(|e| anyhow!("persisting the primary: {e}"))?;
 
-        // Nexus's own client: one per process, bound to this testnet
-        PubkyConnector::init_from(testnet.sdk()?)
-            .await
-            .map_err(|e| anyhow!("pubky connector: {e}"))?;
-        let pubky = PubkyConnector::get().map_err(|e| anyhow!("pubky connector: {e}"))?;
-        let client: Arc<dyn HomeserverClient> =
-            Arc::new(PubkyHomeserverClient::new(pubky, DEFAULT_MAX_FILE_SIZE));
+        // Nexus's own client, bound to this testnet
+        let client = Arc::new(
+            WatcherClient::from_pubky(testnet.sdk()?).with_max_file_size(DEFAULT_MAX_FILE_SIZE),
+        );
 
         let moderation = Arc::new(Moderation {
             id: PubkyId::from(Keypair::random().public_key()),
             tags: Vec::new(),
         });
-        let ingestor = default_ingestor_tests();
+        let ingestor = Arc::new(UserIngestor::new([], client.clone()));
         // One retry queue: the scheduler enqueues to it and the handler's gate reads it
         let retry_queue = Arc::new(RetryQueue::default());
         let store: Arc<dyn RetryStore> = retry_queue.clone();
@@ -117,6 +112,7 @@ impl SpecMigrationTest {
             limit: 1000,
             event_handler: handler.clone(),
             client: client.clone(),
+            resolver: client.clone(),
             shutdown_rx: shutdown_rx.clone(),
             primary_homeserver: primary.clone(),
             retry_scheduler: retry.clone(),
@@ -145,7 +141,7 @@ impl SpecMigrationTest {
     /// everything written so far, read once.
     pub async fn index(&self) -> Result<()> {
         self.bulk
-            .build(self.primary.as_ref())
+            .build_run(self.primary.as_ref())
             .await
             .map_err(|e| anyhow!("{e}"))?
             .run()
