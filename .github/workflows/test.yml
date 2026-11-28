@@ -43,6 +43,11 @@ jobs:
         with:
           tool: cargo-nextest
 
+      # Needs no Docker services. Lives here only until `pubky-watcher` moves
+      # to its own repository, whose CI then runs these tests.
+      - name: Run pubky-watcher tests
+        run: cargo nextest run -p pubky-watcher --no-fail-fast
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
